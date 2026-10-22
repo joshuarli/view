@@ -1,6 +1,6 @@
 # view — campaign plan
 
-**Status:** in progress.
+**Status:** complete.
 **Goal:** a native macOS 27 app, launched as `view [directory]`, that shows every image and video beneath that directory in one ordered, flattened thumbnail grid, with native Quick Look and Ctrl+Delete-to-Trash, and nothing else.
 **Owner decisions:** OD1–OD3 below, dated 2026-10-22.
 
@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** C2 Report (final source verified; O1 refreshed on final source).
+**Last accepted checkpoint:** C3 Handoff (final source verified; working tree clean and committed).
 **Provisional work:** none.
 **Current steering decision:** keep existing settings because the measured gates pass; GUI correctness is owner-verified (OD2), and scroll memory remains unmeasured.
-**Next substantive milestone:** C3 Handoff.
+**Next substantive milestone:** none.
 
 ## Charter
 
@@ -195,6 +195,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — O4 accepted at `a30e703`. Removed the duplicate `runningTasks` dictionary because `activeRequests` now retains every live request through completion and supplies shutdown's cancel-and-await list. The cache ledger and `NSCache` remain because one provides deterministic cost accounting and eviction tests while the other enforces a system cache limit. Generation, demand, failure, and removal state each protect a scheduler invariant. Work that loses demand is canceled, cannot publish a stale result, keeps a bounded slot until its request returns, and is awaited at shutdown. Only visible and one-viewport demand starts image work; full-resolution buffers are not retained. The app uses AppKit's grid, Quick Look panel, and Trash integration. One repeated O(N) path remains when scanning continues while Quick Look is open: each batch rebuilds the panel's URL snapshot. It was not exercised by the closed-panel 2,000-item launch, so it is filed as VIE-1 for measurement before optimization. No other file, class, cache, or abstraction has a justified removal. No scope creep was found.
 - 2026-10-22 — C1 review completed using the local `ultrareview` procedure because no `ultrareview` executable or tool is installed. A scheduler resource-bound defect was reproduced before the fix: the new regression test observed `requestCount == 2` while a canceled request still had not returned. Commit `17c1811` retains that request in the bounded slot table until completion; all 13 Scheduler tests pass after the fix. No P1/P2 finding remains. VIE-1 records the unmeasured Quick Look snapshot cost, and VIE-2 records suspended scheduler tasks left by several tests. `mdtool check --untracked` and `mdtool dups --untracked` both report zero findings. README developer-only layout and test details were removed, AGENTS.md now routes to the performance topic, and the file map was corrected. The Markdown count increased from 267 to 323 lines to include O2 gate evidence and the actionable P3 tickets while README lost ten lines. Next C2.
 - 2026-10-22 — C2 report evidence refreshed on final source. Three release launches passed both readiness gates after the scheduler fix and O4 simplification. Final-source medians were 156.9 ms first thumbnail, 181.0 ms initial viewport, and 209.2 ms scan completion across 2,000 items. Every measured O2 limit passes; scroll-pass RSS growth remains unmeasured under OD2. `./scripts/test.sh` passed 50 tests in 7 suites, `swift build -c release` passed, and `./scripts/build-app.sh` packaged the app. Bundle and executable sizes are 616 KiB and 608 KiB by `du -sk`. The source escape-hatch search returned no matches. Next C3.
+- 2026-10-22 — C3 handoff complete. The final commit leaves a clean tracked tree. `git worktree list` shows only the primary checkout, and no campaign worktrees remain. `.build/`, `View.app/`, and `.work/` remain ignored generated state. Owner verification is still required for rendering, video playback, Quick Look controls, real Trash behavior, Retina sharpness, resize, and scroll smoothness.
 
 ## For the owner afterwards
 
