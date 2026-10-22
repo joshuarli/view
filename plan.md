@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** O1 Measure (three gated release launches recorded in `docs/performance.md`; no tuning change made).
+**Last accepted checkpoint:** O2 Tune (measured thresholds pass; no tuning change made).
 **Provisional work:** none.
-**Current steering decision:** parity before optimization; GUI correctness is owner-verified (OD2); perf measured and logged until P3.
-**Next substantive milestone:** O2 Tune, with measured gates reviewed and settings changed only for demonstrated wins.
+**Current steering decision:** keep existing settings because the measured gates pass; GUI correctness is owner-verified (OD2), and scroll memory remains unmeasured.
+**Next substantive milestone:** O3's conditional trigger check, then O4 Simplify.
 
 ## Charter
 
@@ -190,6 +190,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — I5 accepted at `8f3ee85`; `./scripts/test.sh --filter 'Trash|GridCommand'` passed 10 tests and `swift build` passed. The core service tracks in-flight URLs, requires the recycle mapping to contain the source URL, and only then calls the catalog-removal closure. The app uses `NSWorkspace.recycle`, removes the matching collection item, evicts thumbnail cache/demand, preserves catalog neighbor selection, refreshes the preview snapshot, and presents native failure sheets. The public core contract now includes `TrashService`, `TrashOutcome`, `TrashError`, and Ctrl+Delete mapping; no real Trash interaction was campaign-verified under OD2. Next I6.
 - 2026-10-22 — I6 accepted at `ace0fce`; `./scripts/test.sh` passed all 49 tests and `swift build -c release` passed. Release output contains only the inherited Command Line Tools missing linker search-path warnings recorded in P1; no Swift warnings or errors appeared. Added exact URL identity checks for unusual names, sink-failure propagation, and scheduler shutdown coverage. App termination now awaits scan cancellation, scheduler/Quick Look request cancellation, and pending recycle completion. The root scanner's typed failure reaches the native alert path; actual panel, alert, thumbnail, and Trash appearance remain owner-verified under OD2. No command-line behavior changed. Next O1.
 - 2026-10-22 — O1 accepted after three direct release launches on the generated 2,000-item corpus. `perf-gate-ready` returned 0 before and after each run. Median `first-thumbnail-ms` was 146.0, `visible-populated-ms` was 171.5, and `scan-complete-ms` was 205.0; each run scanned 2,000 items in 16 batches. The 980 copies were added to the 1,000 varied PNGs and 20 movies to match O2's 2,000-item scan gate. Peak physical footprint ranged from 49 to 54 MB; idle CPU mean ranged from 0.00% to 0.09%. Scroll-pass memory growth was not measured because OD2 excludes GUI automation. Results and commands are in `docs/performance.md`; next O2.
+- 2026-10-22 — O2 accepted: all measured thresholds pass on O1, and the post-fix gated spot check remained within 1.03× of O1's observed ranges. First-thumbnail, initial-viewport, and scan medians were 146.0 ms, 171.5 ms, and 205.0 ms; the post-fix sample was 156.8 ms, 177.9 ms, and 211.4 ms. The 2,000-item scan completed in 16 batches, concurrency peaked at 4, cache cost was 9,216,000 bytes, idle CPU mean was 0.01%, and median RSS was 100,064 KiB in the spot check. No tuning changed because the thresholds already pass. The second-pass RSS gate remains unmeasured under OD2; next O3 trigger check.
 
 ## For the owner afterwards
 
