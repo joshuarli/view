@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import viewCore
+@testable import viewCore
 
 @Suite("Discovery")
 struct DiscoveryTests {
@@ -114,6 +114,85 @@ struct DiscoveryTests {
       #expect(path == root.url.path)
     } else {
       Issue.record("Expected the unreadable root error")
+    }
+  }
+
+  @Test func skipsAnEntryWhoseMetadataCannotBeReadAndFindsLaterMedia() async throws {
+    let root = try TestDirectory.make()
+    defer { root.remove() }
+    let unreadable = try createMedia("a-unreadable.png", in: root.url)
+    let later = try createMedia("z-later.mov", in: root.url)
+    let batches = BatchRecorder()
+
+    let summary = try await DirectoryScanner.scan(
+      root: RootDirectory(url: root.url),
+      batchSink: { await batches.append($0) },
+      readResourceValues: { url, keys in
+        if url == unreadable { throw MetadataReadFailure.denied }
+        return try url.resourceValues(forKeys: keys)
+      }
+    )
+
+    #expect(await batches.values.flatMap { $0 }.map(\.url) == [later])
+    #expect(summary.itemCount == 1)
+  }
+
+  @Test func skipsAnEntryWithMissingRequiredMetadataAndFindsLaterMedia() async throws {
+    let root = try TestDirectory.make()
+    defer { root.remove() }
+    let missing = try createMedia("a-missing.png", in: root.url)
+    let later = try createMedia("z-later.mov", in: root.url)
+    let batches = BatchRecorder()
+
+    let summary = try await DirectoryScanner.scan(
+      root: RootDirectory(url: root.url),
+      batchSink: { await batches.append($0) },
+      readResourceValues: { url, keys in
+        var values = try url.resourceValues(forKeys: keys)
+        if url == missing { values.name = nil }
+        return values
+      }
+    )
+
+    #expect(await batches.values.flatMap { $0 }.map(\.url) == [later])
+    #expect(summary.itemCount == 1)
+  }
+
+  @Test func skipsAnEntryRemovedDuringMetadataReadAndFindsLaterMedia() async throws {
+    let root = try TestDirectory.make()
+    defer { root.remove() }
+    let removed = try createMedia("a-removed.png", in: root.url)
+    let later = try createMedia("z-later.mov", in: root.url)
+    let batches = BatchRecorder()
+
+    let summary = try await DirectoryScanner.scan(
+      root: RootDirectory(url: root.url),
+      batchSink: { await batches.append($0) },
+      readResourceValues: { url, keys in
+        if url == removed {
+          try FileManager.default.removeItem(at: url)
+          throw MetadataReadFailure.entryRemoved
+        }
+        return try url.resourceValues(forKeys: keys)
+      }
+    )
+
+    #expect(!FileManager.default.fileExists(atPath: removed.path))
+    #expect(await batches.values.flatMap { $0 }.map(\.url) == [later])
+    #expect(summary.itemCount == 1)
+  }
+
+  @Test func propagatesCancellationFromMetadataRead() async throws {
+    let root = try TestDirectory.make()
+    defer { root.remove() }
+    _ = try createMedia("image.png", in: root.url)
+
+    await #expect(throws: CancellationError.self) {
+      try await DirectoryScanner.scan(
+        root: RootDirectory(url: root.url),
+        batchSink: { _ in },
+        readResourceValues: { _, _ in throw CancellationError() }
+      )
     }
   }
 
@@ -274,4 +353,9 @@ private actor BatchGate {
 
 private enum BatchSinkFailure: Error, Sendable {
   case failed
+}
+
+private enum MetadataReadFailure: Error, Sendable {
+  case denied
+  case entryRemoved
 }

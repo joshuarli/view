@@ -45,13 +45,33 @@ public enum DirectoryScanner {
     root: RootDirectory,
     batchSink: @escaping @Sendable ([MediaItem]) async throws -> Void
   ) async throws -> DirectoryScanSummary {
+    try await Self.scan(
+      root: root,
+      batchSink: batchSink,
+      readResourceValues: { url, keys in
+        try url.resourceValues(forKeys: keys)
+      }
+    )
+  }
+
+  @concurrent
+  static func scan(
+    root: RootDirectory,
+    batchSink: @escaping @Sendable ([MediaItem]) async throws -> Void,
+    readResourceValues: @escaping @Sendable (URL, Set<URLResourceKey>) throws -> URLResourceValues
+  ) async throws -> DirectoryScanSummary {
     var pendingItems: [MediaItem] = []
     pendingItems.reserveCapacity(Self.batchSize)
     var itemCount = 0
     var batchCount = 0
     var skippedDirectoryCount = 0
     try Task.checkCancellation()
-    var stack = [DirectoryFrame(entries: try Self.readRootEntries(at: root.url), nextEntry: 0)]
+    var stack = [
+      DirectoryFrame(
+        entries: try Self.readRootEntries(at: root.url, readResourceValues: readResourceValues),
+        nextEntry: 0
+      ),
+    ]
 
     while !stack.isEmpty {
       try Task.checkCancellation()
@@ -67,7 +87,7 @@ public enum DirectoryScanner {
 
       if entry.isDirectory {
         do {
-          let children = try Self.readEntries(at: entry.url)
+          let children = try Self.readEntries(at: entry.url, readResourceValues: readResourceValues)
           stack.append(DirectoryFrame(entries: children, nextEntry: 0))
         } catch is DirectoryReadError {
           skippedDirectoryCount += 1
@@ -116,15 +136,21 @@ public enum DirectoryScanner {
     )
   }
 
-  private static func readRootEntries(at url: URL) throws -> [DirectoryEntry] {
+  private static func readRootEntries(
+    at url: URL,
+    readResourceValues: @Sendable (URL, Set<URLResourceKey>) throws -> URLResourceValues
+  ) throws -> [DirectoryEntry] {
     do {
-      return try readEntries(at: url)
+      return try readEntries(at: url, readResourceValues: readResourceValues)
     } catch let error as DirectoryReadError {
       throw DirectoryScannerError.rootUnreadable(path: url.path, reason: error.reason)
     }
   }
 
-  private static func readEntries(at url: URL) throws -> [DirectoryEntry] {
+  private static func readEntries(
+    at url: URL,
+    readResourceValues: @Sendable (URL, Set<URLResourceKey>) throws -> URLResourceValues
+  ) throws -> [DirectoryEntry] {
     let urls: [URL]
     do {
       urls = try FileManager.default.contentsOfDirectory(
@@ -141,14 +167,17 @@ public enum DirectoryScanner {
       try Task.checkCancellation()
       let values: URLResourceValues
       do {
-        values = try entryURL.resourceValues(forKeys: resourceKeys)
+        values = try readResourceValues(entryURL, resourceKeys)
+      } catch let error as CancellationError {
+        throw error
       } catch {
-        throw DirectoryScannerError.entryMetadataUnreadable(
-          path: entryURL.path,
-          reason: error.localizedDescription
-        )
+        continue
       }
-      entries.append(try DirectoryEntry(url: entryURL, values: values))
+      do {
+        entries.append(try DirectoryEntry(url: entryURL, values: values))
+      } catch is DirectoryScannerError {
+        continue
+      }
     }
     entries.sort { PathOrder.comesBefore($0.name, $1.name) }
     return entries
