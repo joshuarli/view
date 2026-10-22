@@ -6,6 +6,7 @@ struct ViewApp {
   private static var delegate: ViewAppDelegate?
 
   static func main() {
+    let metrics = ViewMetrics(enabled: ProcessInfo.processInfo.environment["VIEW_METRICS"] == "1")
     let root: RootDirectory
     do {
       root = try RootDirectory.resolve(
@@ -19,7 +20,7 @@ struct ViewApp {
 
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
-    let delegate = ViewAppDelegate(root: root)
+    let delegate = ViewAppDelegate(root: root, metrics: metrics)
     Self.delegate = delegate
     app.delegate = delegate
     app.run()
@@ -29,10 +30,12 @@ struct ViewApp {
 @MainActor
 final class ViewAppDelegate: NSObject, NSApplicationDelegate {
   private let root: RootDirectory
+  private let metrics: ViewMetrics
   private var window: NSWindow?
 
-  init(root: RootDirectory) {
+  init(root: RootDirectory, metrics: ViewMetrics) {
     self.root = root
+    self.metrics = metrics
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -45,10 +48,11 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
       defer: false
     )
     window.title = root.url.lastPathComponent
-    window.contentViewController = GridViewController(root: root)
+    window.contentViewController = GridViewController(root: root, metrics: metrics)
     window.setContentSize(NSSize(width: 1100, height: 760))
     window.center()
     window.makeKeyAndOrderFront(nil)
+    metrics.windowShown()
     self.window = window
     NSApp.activate()
   }

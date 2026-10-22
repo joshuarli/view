@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import viewCore
 
 @MainActor
@@ -64,6 +65,10 @@ final class ThumbnailCell: NSCollectionViewItem {
   func setCatalogSelection(_ isSelected: Bool) {
     catalogSelection = isSelected
     updateSelectionAppearance()
+  }
+
+  func display(_ image: CGImage) {
+    thumbnailView.image = NSImage(cgImage: image, size: NSSize(width: 160, height: 160))
   }
 
   private func updateSelectionAppearance() {

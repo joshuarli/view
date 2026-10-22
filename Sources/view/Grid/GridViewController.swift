@@ -1,17 +1,25 @@
 import AppKit
+import CoreGraphics
 import viewCore
 
 @MainActor
-final class GridViewController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate {
+final class GridViewController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSCollectionViewPrefetching {
   private let root: RootDirectory
-  private var catalog = Catalog()
+  private let metrics: ViewMetrics
+  private(set) var catalog = Catalog()
   private var scanTask: Task<Void, Never>?
+  private var thumbnailCoordinator: ThumbnailCoordinator?
+  private var prefetchIndexPaths: Set<IndexPath> = []
+  private var lastScrollOriginY: CGFloat = 0
+  private var scrollDirection: ScrollDirection = .down
+  private var isObservingScrollBounds = false
   private var scrollView: NSScrollView!
-  private var collectionView: NSCollectionView!
+  private(set) var collectionView: NSCollectionView!
   private var emptyStateLabel: NSTextField!
 
-  init(root: RootDirectory) {
+  init(root: RootDirectory, metrics: ViewMetrics) {
     self.root = root
+    self.metrics = metrics
     super.init(nibName: nil, bundle: nil)
   }
 
@@ -35,6 +43,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     collectionView.collectionViewLayout = layout
     collectionView.dataSource = self
     collectionView.delegate = self
+    collectionView.prefetchDataSource = self
     collectionView.isSelectable = true
     collectionView.allowsEmptySelection = true
     collectionView.allowsMultipleSelection = false
@@ -48,6 +57,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     scrollView.drawsBackground = false
     scrollView.hasVerticalScroller = true
     scrollView.hasHorizontalScroller = false
+    scrollView.contentView.postsBoundsChangedNotifications = true
     scrollView.documentView = collectionView
 
     emptyStateLabel = NSTextField(labelWithString: root.url.path)
@@ -74,8 +84,17 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
 
   override func viewDidAppear() {
     super.viewDidAppear()
+    if thumbnailCoordinator == nil {
+      thumbnailCoordinator = ThumbnailCoordinator(grid: self, metrics: metrics)
+    }
+    beginObservingScrollBounds()
     guard scanTask == nil else { return }
     startScan()
+  }
+
+  override func viewWillDisappear() {
+    super.viewWillDisappear()
+    endObservingScrollBounds()
   }
 
   func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
@@ -111,15 +130,46 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     updateVisibleSelection()
   }
 
+  func collectionView(_ collectionView: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
+    prefetchIndexPaths.formUnion(indexPaths)
+    updateThumbnailDemand()
+  }
+
+  func collectionView(_ collectionView: NSCollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
+    prefetchIndexPaths.subtract(indexPaths)
+    updateThumbnailDemand()
+  }
+
+  func displayThumbnail(_ image: CGImage, for url: URL) -> Bool {
+    for indexPath in collectionView.indexPathsForVisibleItems() {
+      guard
+        catalog.item(at: indexPath.item)?.url == url,
+        let cell = collectionView.item(at: indexPath) as? ThumbnailCell,
+        cell.representedURL == url
+      else { continue }
+      cell.display(image)
+      return true
+    }
+    return false
+  }
+
   private func startScan() {
     let root = self.root
+    metrics.scanStarted()
     scanTask = Task { [weak self, root] in
       do {
-        _ = try await DirectoryScanner.scan(root: root) { [weak self] batch in
+        let volume = try await ThumbnailCoordinator.volume(for: root)
+        guard let self else { return }
+        guard !Task.isCancelled else { throw CancellationError() }
+        self.thumbnailCoordinator?.configure(volume: volume)
+        let summary = try await DirectoryScanner.scan(root: root) { [weak self] batch in
           await self?.append(batch)
         }
+        self.metrics.scanCompleted(summary)
       } catch is CancellationError {
+        self?.metrics.scanFailed()
       } catch {
+        self?.metrics.scanFailed()
         self?.presentScanError(error)
       }
     }
@@ -130,7 +180,10 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     guard !insertedIndices.isEmpty else { return }
     let indexPaths = Set(insertedIndices.map { IndexPath(item: $0, section: 0) })
     collectionView.insertItems(at: indexPaths)
+    metrics.catalogBatchApplied()
     updateEmptyState()
+    collectionView.layoutSubtreeIfNeeded()
+    updateThumbnailDemand()
   }
 
   private func updateEmptyState() {
@@ -149,6 +202,66 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     }
   }
 
+  private func beginObservingScrollBounds() {
+    guard !isObservingScrollBounds else { return }
+    lastScrollOriginY = scrollView.contentView.bounds.origin.y
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(clipViewBoundsDidChange(_:)),
+      name: NSView.boundsDidChangeNotification,
+      object: scrollView.contentView
+    )
+    isObservingScrollBounds = true
+  }
+
+  private func endObservingScrollBounds() {
+    guard isObservingScrollBounds else { return }
+    NotificationCenter.default.removeObserver(
+      self,
+      name: NSView.boundsDidChangeNotification,
+      object: scrollView.contentView
+    )
+    isObservingScrollBounds = false
+  }
+
+  @objc private func clipViewBoundsDidChange(_ notification: Notification) {
+    let currentOriginY = scrollView.contentView.bounds.origin.y
+    if currentOriginY > lastScrollOriginY {
+      scrollDirection = .down
+    } else if currentOriginY < lastScrollOriginY {
+      scrollDirection = .up
+    }
+    lastScrollOriginY = currentOriginY
+    updateThumbnailDemand()
+  }
+
+  private func updateThumbnailDemand() {
+    let visiblePaths = collectionView.indexPathsForVisibleItems().sorted { $0.item < $1.item }
+    let visibleItems = visiblePaths.compactMap { catalog.item(at: $0.item) }
+    guard !visiblePaths.isEmpty else {
+      thumbnailCoordinator?.updateDemand(visible: [], prefetch: [])
+      return
+    }
+
+    let visibleIndices = visiblePaths.map(\.item)
+    let prefetchIndices: [Int]
+    switch scrollDirection {
+    case .down:
+      let start = visibleIndices[visibleIndices.count - 1] + 1
+      let end = min(catalog.count, start + visibleIndices.count)
+      prefetchIndices = start < end ? Array(start..<end) : []
+    case .up:
+      let end = visibleIndices[0]
+      let start = max(0, end - visibleIndices.count)
+      prefetchIndices = end > start ? Array((start..<end).reversed()) : []
+    }
+    let callbackIndices = Set(prefetchIndexPaths.map(\.item))
+    let callbackPrefetch = prefetchIndices.filter { callbackIndices.contains($0) }
+    let selectedPrefetch = callbackPrefetch.isEmpty ? prefetchIndices : callbackPrefetch
+    let prefetchItems = selectedPrefetch.compactMap { catalog.item(at: $0) }
+    thumbnailCoordinator?.updateDemand(visible: visibleItems, prefetch: prefetchItems)
+  }
+
   private func presentScanError(_ error: any Error) {
     let alert = NSAlert(error: error)
     guard let window = view.window else {
@@ -156,5 +269,10 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       return
     }
     alert.beginSheetModal(for: window) { _ in }
+  }
+
+  private enum ScrollDirection {
+    case down
+    case up
   }
 }
