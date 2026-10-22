@@ -187,6 +187,12 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     updateThumbnailDemand()
   }
 
+  func cancelWork() async {
+    scanTask?.cancel()
+    await scanTask?.value
+    await thumbnailCoordinator?.cancelAll()
+  }
+
   private func startScan() {
     let root = self.root
     metrics.scanStarted()

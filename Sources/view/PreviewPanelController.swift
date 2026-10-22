@@ -85,6 +85,11 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     trashController.trashSelectedItem()
   }
 
+  func cancelWork() async {
+    await grid.cancelWork()
+    await trashController.waitForPendingOperation()
+  }
+
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
     guard
       menuItem.action == #selector(togglePreview(_:)) || menuItem.action == #selector(trashSelectedItem(_:))

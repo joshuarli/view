@@ -32,6 +32,7 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
   private let root: RootDirectory
   private let metrics: ViewMetrics
   private var window: NSWindow?
+  private var shutdownTask: Task<Void, Never>?
 
   init(root: RootDirectory, metrics: ViewMetrics) {
     self.root = root
@@ -59,6 +60,17 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     true
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard shutdownTask == nil else { return .terminateLater }
+    guard let controller = window?.contentViewController as? PreviewPanelController else { return .terminateNow }
+    shutdownTask = Task { [weak self, controller] in
+      await controller.cancelWork()
+      NSApp.reply(toApplicationShouldTerminate: true)
+      self?.shutdownTask = nil
+    }
+    return .terminateLater
   }
 
   private func installMainMenu(previewController: PreviewPanelController) {

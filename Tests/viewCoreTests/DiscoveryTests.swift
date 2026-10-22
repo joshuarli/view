@@ -143,12 +143,10 @@ struct DiscoveryTests {
   @Test func preservesDuplicateBasenamesWhitespaceUnicodeAndNewlines() async throws {
     let root = try TestDirectory.make()
     defer { root.remove() }
-    try createMedia("one/same.png", in: root.url)
-    try createMedia("two/same.png", in: root.url)
+    let firstDuplicate = try createMedia("one/same.png", in: root.url)
+    let secondDuplicate = try createMedia("two/same.png", in: root.url)
     let names = [" with spaces 🧀.png", "line\nbreak.png", "quote'\".png", "e\u{301}.png"]
-    for name in names {
-      try createMedia(name, in: root.url)
-    }
+    let unusualURLs = try names.map { try createMedia($0, in: root.url) }
 
     let batches = BatchRecorder()
     _ = try await DirectoryScanner.scan(
@@ -160,6 +158,31 @@ struct DiscoveryTests {
     #expect(items.count == 6)
     #expect(items.filter { $0.url.lastPathComponent == "same.png" }.count == 2)
     #expect(Set(items.map(\.url.lastPathComponent)).isSuperset(of: Set(names + ["same.png"])))
+    #expect(Set(items.map(\.url)) == Set([firstDuplicate, secondDuplicate] + unusualURLs))
+  }
+
+  @Test func batchSinkFailureStopsTheScanAndPropagates() async throws {
+    let root = try TestDirectory.make()
+    defer { root.remove() }
+    for index in 0..<300 {
+      try createMedia("image-\(index).png", in: root.url)
+    }
+    let batches = BatchRecorder()
+
+    do {
+      _ = try await DirectoryScanner.scan(
+        root: RootDirectory(url: root.url),
+        batchSink: { batch in
+          await batches.append(batch)
+          throw BatchSinkFailure.failed
+        }
+      )
+      Issue.record("Expected batch sink failure")
+    } catch {
+      #expect(error is BatchSinkFailure)
+    }
+
+    #expect(await batches.values.count == 1)
   }
 
   @Test(arguments: [127, 128, 129])
@@ -247,4 +270,8 @@ private actor BatchGate {
     releaseContinuation?.resume()
     releaseContinuation = nil
   }
+}
+
+private enum BatchSinkFailure: Error, Sendable {
+  case failed
 }

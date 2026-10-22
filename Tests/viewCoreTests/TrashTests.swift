@@ -132,6 +132,31 @@ struct TrashTests {
     #expect(catalog.selectedURL == nil)
   }
 
+  @Test func unusualFilenameSurvivesPreviewAndTrashIdentity() async throws {
+    let filename = "line\nbreak 'quote' \"double\" 🧀 e\u{301}.png"
+    let source = url(filename)
+    var catalog = Catalog()
+    catalog.append([MediaItem(url: source, kind: .image, modificationDate: nil, fileSize: nil)])
+    try catalog.select(source)
+    var preview = PreviewSession()
+    let began = preview.begin(with: catalog)
+    #expect(began)
+    #expect(preview.previewItem(at: 0) == source)
+    let service = TrashService()
+
+    let result = try await service.move(
+      source,
+      recycle: { moved in
+        #expect(moved == source)
+        return [moved: self.url("trashed-\(filename)")]
+      },
+      removeFromCatalog: { moved in _ = catalog.remove(moved) }
+    )
+
+    #expect(result == .removed)
+    #expect(catalog.isEmpty)
+  }
+
   private func catalog(_ names: [String], selectedIndex: Int) throws -> Catalog {
     var catalog = Catalog()
     catalog.append(names.map { name in

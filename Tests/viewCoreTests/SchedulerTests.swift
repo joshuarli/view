@@ -99,6 +99,28 @@ struct SchedulerTests {
     #expect(await requests.startedRequests[1].key == current)
   }
 
+  @Test func cancelAllCancelsAndAwaitsEveryOwnedRequest() async {
+    let cache = ThumbnailCache(totalCostLimit: 1024)
+    let requests = RequestHarness(respondsToCancellation: true)
+    let results = ResultRecorder()
+    let scheduler = ThumbnailScheduler(
+      concurrencyLimit: 2,
+      cache: cache,
+      request: { key, generation in try await requests.request(key, generation: generation) },
+      resultSink: { results.record(key: $0, generation: $1, result: $2) }
+    )
+    scheduler.updateDemand(visible: [key("first.png"), key("second.png")], prefetch: [])
+    await requests.waitForStartCount(2)
+
+    let shutdown = Task { await scheduler.cancelAll() }
+    await requests.waitForCompletionCount(2)
+    await shutdown.value
+
+    #expect(scheduler.activeRequestCount == 0)
+    #expect(await requests.cancelledCount == 2)
+    #expect(results.results.isEmpty)
+  }
+
   @Test func rapidDirectionChangesKeepOnlyTheLatestBoundedDemand() async {
     let cache = ThumbnailCache(totalCostLimit: 1024)
     let requests = RequestHarness()

@@ -30,6 +30,10 @@ final class TrashController {
     }
   }
 
+  func waitForPendingOperation() async {
+    await task?.value
+  }
+
   private func presentError(_ error: any Error) {
     let alert = NSAlert(error: error)
     guard let window = grid.view.window else {
