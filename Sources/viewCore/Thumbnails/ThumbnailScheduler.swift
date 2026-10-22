@@ -33,7 +33,6 @@ public final class ThumbnailScheduler {
   private var demandGenerations: [ThumbnailKey: UInt64] = [:]
   private var settledGenerations: [ThumbnailKey: UInt64] = [:]
   private var activeRequests: [ThumbnailKey: ActiveThumbnailRequest] = [:]
-  private var runningTasks: [UInt64: Task<Void, Never>] = [:]
   private var failedKeys: Set<ThumbnailKey> = []
   private var removedURLs: Set<URL> = []
   private var nextGeneration: UInt64 = 0
@@ -115,7 +114,7 @@ public final class ThumbnailScheduler {
     prefetchDemand.removeAll(keepingCapacity: false)
     demandGenerations.removeAll(keepingCapacity: false)
     settledGenerations.removeAll(keepingCapacity: false)
-    let tasks = Array(runningTasks.values)
+    let tasks = activeRequests.values.map(\.task)
     activeRequests.removeAll(keepingCapacity: false)
     tasks.forEach { $0.cancel() }
     for task in tasks {
@@ -166,13 +165,11 @@ public final class ThumbnailScheduler {
       self?.finishRequest(for: key, generation: generation, result: result)
     }
     activeRequests[key] = ActiveThumbnailRequest(generation: generation, task: task)
-    runningTasks[generation] = task
     requestCount += 1
     maximumConcurrentRequestCount = max(maximumConcurrentRequestCount, activeRequests.count)
   }
 
   private func finishRequest(for key: ThumbnailKey, generation: UInt64, result: ThumbnailResult) {
-    runningTasks.removeValue(forKey: generation)
     guard activeRequests[key]?.generation == generation else { return }
     activeRequests.removeValue(forKey: key)
     guard !stopped, demandGenerations[key] == generation, !removedURLs.contains(key.url) else {
