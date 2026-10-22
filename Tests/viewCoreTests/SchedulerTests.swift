@@ -99,6 +99,37 @@ struct SchedulerTests {
     #expect(await requests.startedRequests[1].key == current)
   }
 
+  @Test func cancellationKeepsTheSlotUntilUnderlyingWorkFinishes() async {
+    let cache = ThumbnailCache(totalCostLimit: 1024)
+    let requests = RequestHarness()
+    let results = ResultRecorder()
+    let scheduler = ThumbnailScheduler(
+      concurrencyLimit: 1,
+      cache: cache,
+      request: { key, generation in try await requests.requestIgnoringCancellation(key, generation: generation) },
+      resultSink: { results.record(key: $0, generation: $1, result: $2) }
+    )
+    let abandoned = key("abandoned.png")
+    let current = key("current.png")
+
+    scheduler.updateDemand(visible: [abandoned], prefetch: [])
+    await requests.waitForStartCount(1)
+    let abandonedRequest = await requests.startedRequests[0]
+
+    scheduler.updateDemand(visible: [current], prefetch: [])
+    #expect(scheduler.requestCount == 1)
+
+    await requests.complete(abandonedRequest, with: makeImage())
+    await requests.waitForCompletionCount(1)
+    await requests.waitForStartCount(2)
+    let currentRequest = await requests.startedRequests[1]
+    #expect(currentRequest.key == current)
+
+    let shutdown = Task { await scheduler.cancelAll() }
+    await requests.complete(currentRequest, with: makeImage())
+    await shutdown.value
+  }
+
   @Test func cancelAllCancelsAndAwaitsEveryOwnedRequest() async {
     let cache = ThumbnailCache(totalCostLimit: 1024)
     let requests = RequestHarness(respondsToCancellation: true)

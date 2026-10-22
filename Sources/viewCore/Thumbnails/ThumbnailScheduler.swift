@@ -82,9 +82,7 @@ public final class ThumbnailScheduler {
     for key in Array(demandGenerations.keys) where !nextDemand.contains(key) {
       demandGenerations.removeValue(forKey: key)
       settledGenerations.removeValue(forKey: key)
-      if let request = activeRequests.removeValue(forKey: key) {
-        request.task.cancel()
-      }
+      activeRequests[key]?.task.cancel()
     }
 
     for key in nextVisible + nextPrefetch where demandGenerations[key] == nil {
@@ -103,7 +101,7 @@ public final class ThumbnailScheduler {
     for key in matchingKeys {
       demandGenerations.removeValue(forKey: key)
       settledGenerations.removeValue(forKey: key)
-      activeRequests.removeValue(forKey: key)?.task.cancel()
+      activeRequests[key]?.task.cancel()
     }
     visibleDemand.removeAll { $0.url == url }
     prefetchDemand.removeAll { $0.url == url }
