@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** I1 Discovery at `bc49a2b` (ordered recursive scanning, 128-item backpressured batches, cancellation, and filtering; Discovery suite green).
+**Last accepted checkpoint:** I2 Catalog and grid at `5a92004` (incremental AppKit grid, reusable cells, URL selection, and empty state; focused suites and build green).
 **Provisional work:** none.
 **Current steering decision:** parity before optimization; GUI correctness is owner-verified (OD2); perf measured and logged until P3.
-**Next substantive milestone:** I2 Catalog and grid, with the Catalog and GridCommand suites green.
+**Next substantive milestone:** I3 Thumbnails, with the Scheduler suite green and request/cache behavior integrated into visible cells.
 
 ## Charter
 
@@ -184,6 +184,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — Preflight. Verified toolchain, SDK symbols, launcher behavior, GUI/automation permissions, and loop timings. Scaffolding accepted at `21c798d` after build, 5 tests, app packaging, launcher error paths, and one windowed launch (1100×792 frame, title from root).
 - 2026-10-22 — Owner answers recorded as OD1–OD3; source spec's GUI integration block superseded by OD2; terminology corrected to call media "items" (the app is `view`).
 - 2026-10-22 — I1 accepted at `bc49a2b`; `./scripts/test.sh --filter Discovery` passed 9 tests covering ordering, filters, root and nested read failures, cancellation, and 127/128/129 batch boundaries. `PathOrder` uses the required comparison options and UTF-8 byte ordering for ties; the no-locale overload matches the canonical traversal vector. The public core surface is one static scan operation with immutable `Sendable` media items; next I2.
+- 2026-10-22 — I2 accepted at `5a92004`; `./scripts/test.sh --filter 'Catalog|GridCommand'` passed 7 tests and `swift build` passed. The catalog appends in scanner order, owns URL selection and neighbor selection after removal, and drives incremental `NSCollectionView` inserts. `NSCollectionView` owns native arrow navigation and reuse; no GUI behavior is claimed verified under OD2. The public core API now includes catalog mutation and the Space command mapping; next I3.
 
 ## For the owner afterwards
 
