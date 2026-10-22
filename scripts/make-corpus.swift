@@ -13,7 +13,7 @@ enum CorpusError: Error, LocalizedError {
   var errorDescription: String? {
     switch self {
     case .usage:
-      "usage: swift scripts/make-corpus.swift .work/corpus"
+      "usage: swift scripts/make-corpus.swift .work/corpus [media-item-count]"
     case .outsideWorkDirectory:
       "corpus destination must be beneath the repository's .work directory"
     case .destinationExists(let url):
@@ -30,13 +30,14 @@ func createDirectory(_ url: URL) throws {
   try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
 }
 
-func createPNG(at url: URL, colorIndex: Int) throws {
+func createPNG(at url: URL, index: Int) throws {
   try createDirectory(url.deletingLastPathComponent())
+  let dimensions = [(400, 300), (300, 400), (500, 500), (1200, 120)][index % 4]
   guard
     let context = CGContext(
       data: nil,
-      width: 400,
-      height: 300,
+      width: dimensions.0,
+      height: dimensions.1,
       bitsPerComponent: 8,
       bytesPerRow: 0,
       space: CGColorSpaceCreateDeviceRGB(),
@@ -47,11 +48,11 @@ func createPNG(at url: URL, colorIndex: Int) throws {
     throw CorpusError.imageCreation(url)
   }
 
-  let red = CGFloat((colorIndex * 67 + 31) % 256) / 255
-  let green = CGFloat((colorIndex * 131 + 73) % 256) / 255
-  let blue = CGFloat((colorIndex * 197 + 149) % 256) / 255
+  let red = CGFloat((index * 67 + 31) % 256) / 255
+  let green = CGFloat((index * 131 + 73) % 256) / 255
+  let blue = CGFloat((index * 197 + 149) % 256) / 255
   context.setFillColor(red: red, green: green, blue: blue, alpha: 1)
-  context.fill(CGRect(x: 0, y: 0, width: 400, height: 300))
+  context.fill(CGRect(x: 0, y: 0, width: dimensions.0, height: dimensions.1))
   guard let image = context.makeImage() else { throw CorpusError.imageCreation(url) }
   CGImageDestinationAddImage(destination, image, nil)
   guard CGImageDestinationFinalize(destination) else { throw CorpusError.imageCreation(url) }
@@ -100,29 +101,49 @@ func corpusDestination(_ argument: String) throws -> URL {
 }
 
 do {
-  guard CommandLine.arguments.count == 2 else { throw CorpusError.usage }
+  guard (2...3).contains(CommandLine.arguments.count) else { throw CorpusError.usage }
   let root = try corpusDestination(CommandLine.arguments[1])
+  let itemCount: Int
+  if CommandLine.arguments.count == 3 {
+    guard let count = Int(CommandLine.arguments[2]), count >= 2 else { throw CorpusError.usage }
+    itemCount = count
+  } else {
+    itemCount = 2_000
+  }
+  let videoCount = max(1, itemCount / 100)
+  let imageCount = itemCount - videoCount
+  let originalImageCount = (imageCount + videoCount) / 2
+  let copiedImageCount = imageCount - originalImageCount
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
 
   var originals: [URL] = []
-  originals.reserveCapacity(1_000)
-  for index in 0..<1_000 {
+  originals.reserveCapacity(originalImageCount)
+  for index in 0..<originalImageCount {
     let folder = String(format: "%02d", index / 100)
-    let image = root.appending(path: "images/group-\(folder)/image-\(String(format: "%04d", index)).png")
-    try createPNG(at: image, colorIndex: index)
+    let image = root.appending(path: "images/group-\(folder)/image-\(String(format: "%05d", index)).png")
+    try createPNG(at: image, index: index)
     originals.append(image)
   }
 
-  for index in 0..<980 {
+  for index in 0..<copiedImageCount {
     let folder = String(format: "%02d", index / 100)
-    let copy = root.appending(path: "copies/group-\(folder)/copy-\(String(format: "%04d", index)).png")
+    let copy = root.appending(path: "copies/group-\(folder)/copy-\(String(format: "%05d", index)).png")
     try createDirectory(copy.deletingLastPathComponent())
     try FileManager.default.copyItem(at: originals[index], to: copy)
   }
 
-  for index in 0..<20 {
-    let video = root.appending(path: "videos/clip-\(String(format: "%02d", index)).mov")
+  let originalVideoCount = min(videoCount, 20)
+  var originalVideos: [URL] = []
+  originalVideos.reserveCapacity(originalVideoCount)
+  for index in 0..<originalVideoCount {
+    let video = root.appending(path: "videos/originals/clip-\(String(format: "%03d", index)).mov")
     try createVideo(at: video, index: index)
+    originalVideos.append(video)
+  }
+  for index in 0..<(videoCount - originalVideoCount) {
+    let copy = root.appending(path: "videos/copies/clip-\(String(format: "%03d", index)).mov")
+    try createDirectory(copy.deletingLastPathComponent())
+    try FileManager.default.copyItem(at: originalVideos[index % originalVideos.count], to: copy)
   }
 
   let noise = root.appending(path: "noise")
@@ -142,7 +163,7 @@ do {
     withDestinationURL: originals[0].deletingLastPathComponent()
   )
 
-  print("corpus media items=2000 images=1980 videos=20 path=\(root.path)")
+  print("corpus media items=\(itemCount) images=\(imageCount) videos=\(videoCount) path=\(root.path)")
 } catch {
   FileHandle.standardError.write(Data("make-corpus: \(error.localizedDescription)\n".utf8))
   exit(1)

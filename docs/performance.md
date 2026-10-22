@@ -28,3 +28,21 @@ The CPU means per run were 0.10%, 0.22%, and 0.07%; individual samples ranged fr
 | Second-pass RSS growth | Not measured | 20% | Unmeasured |
 
 Scrolling and second-pass memory growth were not measured. The three launches did not compare decoder implementations or establish whether Quick Look dominates thumbnail latency.
+
+## Scanner comparison at 20,000 items
+
+`swift scripts/make-corpus.swift .work/corpus-20k 20000` creates 10,000 varied PNGs, 9,800 PNG copies, 20 one-second H.264 movies, and 180 movie copies. The corpus occupied 97 MB. The scanner ran in release mode against the same corpus on each side. Five runs per side alternated between `f544159` and the per-entry failure handling change. `perf-gate-ready` returned 0 before each run and after each run with `-1`.
+
+Every run found 20,000 media items in 157 batches. The scanner used a no-op batch sink, so the measurements cover discovery and batching without collection-view updates, thumbnail requests, or Quick Look. The baseline was `f544159`; the candidate was `b9021ed`.
+
+| Metric | Baseline | Candidate |
+| --- | ---: | ---: |
+| Scan time median | 436.4 ms | 432.9 ms |
+| Scan time range | 429.8–440.7 ms | 431.0–439.1 ms |
+| Maximum resident set size | 30.1 MiB | 30.1 MiB |
+
+The time ranges overlap. The scanner change shows no measurable performance difference on this corpus. `time -l` recorded 0.36–0.37 seconds of user CPU and 0.04–0.05 seconds of system CPU per scan. This serial discovery run used about one core.
+
+The run did not measure window launch, thumbnail generation, forward or reverse scrolling, cache reuse, Quick Look during discovery, or memory growth during scrolling. Those UI measurements remain open.
+
+The release `view` executable grew from 621,200 bytes at `f544159` to 652,600 bytes after these changes. The repository has no executable-size limit.

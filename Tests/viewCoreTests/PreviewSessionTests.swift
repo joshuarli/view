@@ -39,6 +39,25 @@ struct PreviewSessionTests {
     #expect(session.currentIndex == 1)
   }
 
+  @Test func lookupAndSelectionStaySeparateAcrossImagesAndMovies() throws {
+    let imageURL = url("still.png")
+    let movieURL = url("clip.mov")
+    var catalog = Catalog()
+    catalog.append([
+      MediaItem(url: imageURL, kind: .image, modificationDate: nil, fileSize: nil),
+      MediaItem(url: movieURL, kind: .movie, modificationDate: nil, fileSize: nil),
+    ])
+    try catalog.select(imageURL)
+    var session = PreviewSession()
+
+    let began = session.begin(with: catalog)
+    #expect(began)
+    #expect(session.previewItem(at: 1) == movieURL)
+    #expect(session.currentIndex == 0)
+    #expect(session.selectPreviewItem(at: 1) == movieURL)
+    #expect(session.currentIndex == 1)
+  }
+
   @Test func catalogAppendsDoNotExpandThePreviewSnapshot() throws {
     var catalog = try catalog(["one.png", "two.png"], selectedIndex: 1)
     var session = PreviewSession()

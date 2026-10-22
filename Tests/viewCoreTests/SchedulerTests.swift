@@ -304,6 +304,34 @@ struct SchedulerTests {
     await finishSchedulerRequests(scheduler, requests: requests)
   }
 
+  @Test func completedPrefetchCanServeVisibleCellRebindingFromCache() async {
+    let cache = ThumbnailCache(totalCostLimit: 1024)
+    let requests = RequestHarness()
+    let results = ResultRecorder()
+    let scheduler = ThumbnailScheduler(
+      concurrencyLimit: 1,
+      cache: cache,
+      request: { key, generation in try await requests.request(key, generation: generation) },
+      resultSink: { results.record(key: $0, generation: $1, result: $2) }
+    )
+    let prefetched = key("prefetched.png")
+
+    scheduler.updateDemand(visible: [], prefetch: [prefetched])
+    await requests.waitForStartCount(1)
+    let started = await requests.startedRequests
+    let request = started[0]
+    let image = makeImage()
+    await requests.complete(request, with: image)
+    await results.waitForCount(1)
+
+    scheduler.updateDemand(visible: [prefetched], prefetch: [])
+
+    #expect(scheduler.requestCount == 1)
+    #expect(results.results.count == 1)
+    #expect(cache.image(for: prefetched)?.width == image.width)
+    await finishSchedulerRequests(scheduler, requests: requests)
+  }
+
   @Test func failureIsLatchedForTheSession() async {
     let cache = ThumbnailCache(totalCostLimit: 1024)
     let requests = RequestHarness(failure: RequestFailure.unavailable)
