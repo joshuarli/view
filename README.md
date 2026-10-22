@@ -1,13 +1,9 @@
 # view
 
-A fast native macOS image and video browser, launched from a terminal.
+A native macOS browser for images and videos in a directory.
 
 ```sh
-swift build -c release
-./scripts/build-app.sh
-./bin/view ~/Pictures
+./bin/view [directory]
 ```
 
-`./bin/view` resolves the directory to an absolute path, rejects missing or non-directory roots, and launches `View.app` as a detached native application. With no argument it uses the current directory. Set `VIEW_APP` to point at another `View.app`.
-
-Requires Swift 6.4 and the macOS 27 SDK (Command Line Tools are sufficient).
+Without a directory, the launcher opens the current directory. It expects `View.app` in the repository; set `VIEW_APP` to use another app bundle. Press Space to preview the selection or Control+Delete to move it to Trash.
