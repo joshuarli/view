@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** I2 Catalog and grid at `5a92004` (incremental AppKit grid, reusable cells, URL selection, and empty state; focused suites and build green).
+**Last accepted checkpoint:** I3 Thumbnails at `5981c99` (bounded Quick Look scheduling, versioned image cache, and viewport demand integration; focused suite and build green).
 **Provisional work:** none.
 **Current steering decision:** parity before optimization; GUI correctness is owner-verified (OD2); perf measured and logged until P3.
-**Next substantive milestone:** I3 Thumbnails, with the Scheduler suite green and request/cache behavior integrated into visible cells.
+**Next substantive milestone:** I4 Quick Look, with the PreviewSession suite green and the native panel owned through the responder chain.
 
 ## Charter
 
@@ -185,6 +185,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — Owner answers recorded as OD1–OD3; source spec's GUI integration block superseded by OD2; terminology corrected to call media "items" (the app is `view`).
 - 2026-10-22 — I1 accepted at `bc49a2b`; `./scripts/test.sh --filter Discovery` passed 9 tests covering ordering, filters, root and nested read failures, cancellation, and 127/128/129 batch boundaries. `PathOrder` uses the required comparison options and UTF-8 byte ordering for ties; the no-locale overload matches the canonical traversal vector. The public core surface is one static scan operation with immutable `Sendable` media items; next I2.
 - 2026-10-22 — I2 accepted at `5a92004`; `./scripts/test.sh --filter 'Catalog|GridCommand'` passed 7 tests and `swift build` passed. The catalog appends in scanner order, owns URL selection and neighbor selection after removal, and drives incremental `NSCollectionView` inserts. `NSCollectionView` owns native arrow navigation and reuse; no GUI behavior is claimed verified under OD2. The public core API now includes catalog mutation and the Space command mapping; next I3.
+- 2026-10-22 — I3 accepted at `5981c99`; `./scripts/test.sh --filter Scheduler` passed 11 tests and `swift build` passed. The scheduler bounds active requests, deduplicates and reprioritizes current demand, cancels stale work, and rejects stale results; the `NSCache` wrapper versions images by URL, size, scale, modification date, and file size with a 96 MiB ceiling. The Quick Look bridge rejects icon-only results and owns its cancellation task through completion. Runtime metrics and signposts are wired but measurement is deferred to O1 after I6; no GUI behavior is claimed verified under OD2. Next I4.
 
 ## For the owner afterwards
 
