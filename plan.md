@@ -1,6 +1,6 @@
 # view — campaign plan
 
-**Status:** ready to execute.
+**Status:** in progress.
 **Goal:** a native macOS 27 app, launched as `view [directory]`, that shows every image and video beneath that directory in one ordered, flattened thumbnail grid, with native Quick Look and Ctrl+Delete-to-Trash, and nothing else.
 **Owner decisions:** OD1–OD3 below, dated 2026-10-22.
 
@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** I6 Hardening at `ace0fce` (shutdown drains scanner, thumbnail requests, and in-flight recycle work; full tests and release build pass).
+**Last accepted checkpoint:** O1 Measure (three gated release launches recorded in `docs/performance.md`; no tuning change made).
 **Provisional work:** none.
 **Current steering decision:** parity before optimization; GUI correctness is owner-verified (OD2); perf measured and logged until P3.
-**Next substantive milestone:** O1 Measure, with a generated corpus and three quiet-host measurement launches after checking `perf-gate-ready`.
+**Next substantive milestone:** O2 Tune, with measured gates reviewed and settings changed only for demonstrated wins.
 
 ## Charter
 
@@ -62,7 +62,7 @@
 - **P11 Trash.** A menu item with key equivalent `"\u{8}"` and `.control` (never `.command`, never unmodified) triggers a `@MainActor` trash service in `viewCore` that owns the in-flight set, awaits an injected `recycle` closure, and mutates the catalog only after the returned mapping contains the URL. The app supplies `NSWorkspace.shared.recycle`, evicts cache entries, cancels demand, keeps Quick Look consistent, and shows an `NSAlert` sheet with `localizedDescription` on failure. Selection after removal is the item now at the removed index, else the previous one; no rescan. No second confirmation, no permanent deletion, no manual `~/.Trash` move.
 - **P12 Interruptible identity checks.** Any work that crosses an `await` re-checks the requested item identity and a generation counter before applying a result. Cell reuse sets the cell's represented key; a late result for another key is discarded.
 - **P13 Metrics.** Always-compiled, activated by `VIEW_METRICS=1`, one `VIEW_METRIC name=value` line per measurement on stderr, timed from process start with `ContinuousClock`. Names and meanings: `window-shown-ms` (window ordered front), `first-batch-ms` (first catalog batch applied), `scan-complete-ms` (scanner returned), `scan-items` (catalog count), `first-thumbnail-ms` (first thumbnail displayed in a cell), `visible-populated-ms` (every cell in the initial viewport holds an image or latched placeholder), `scan-batches` (catalog batches applied), `thumbnail-requests` (QL requests issued), `max-concurrent-thumbnail-requests` (high-water mark), `thumbnail-cache-bytes` (sum of costs after the initial viewport settles). No UI, no framework. Add `os_signpost` intervals in the same places. Measurement runs launch the bundled executable directly — `VIEW_METRICS=1 View.app/Contents/MacOS/view <dir> 2> <log>` — and the executor kills it afterwards; `bin/view` is not used for measurement because launchd discards stderr.
-- **P14 Fixtures.** Tests build their own fixtures in `.work/tmp/unit-tests/`; measurement uses `swift scripts/make-corpus.swift <dir>` producing 1,000 varied-color 400×300 PNGs, 20 one-second H.264 clips, noise files, nested directories, and hidden/package/symlink decoys. Never use real user media as a test target.
+- **P14 Fixtures.** Tests build their own fixtures in `.work/tmp/unit-tests/`; measurement uses `swift scripts/make-corpus.swift <dir>` producing 1,000 varied-color 400×300 PNGs, 980 PNG copies, 20 one-second H.264 clips, noise files, nested directories, and hidden/package/symlink decoys. The 2,000 media items match the O2 scan gate. Never use real user media as a test target.
 - **P15 Launch.** The launcher is the checked-in POSIX script `bin/view`: resolve its own path through symlinks, find `View.app` beside the repo root or at `$VIEW_APP`, reject more than one argument, reject missing/non-directory roots on stderr with exit 1, canonicalize with `pwd -P`, then `open -n -a View.app --args <root>`. One new app instance per invocation; no dependence on a running instance or a live terminal. The app re-validates the root and exits 1 with a stderr message if it is unusable. No install step outside the repo.
 - **P16 Bundle.** `View.app` assembled by `scripts/build-app.sh`, ad-hoc signed, `CFBundleIdentifier com.view`, executable `view`, `LSMinimumSystemVersion 27.0`, high-resolution capable, no sandbox, no entitlements, no icon, no custom URL types. `NSApplication` activation policy `.regular`.
 - **P17 Docs.** `README.md` carries the exact commands; `docs/performance.md` carries measurement runs (date, machine, corpus, values, verdict). No other docs unless a real reader appears.
@@ -82,7 +82,7 @@
 - Known baseline failure: plain `swift test` fails to load `TestingMacros`; use `./scripts/test.sh`. No other known red.
 - Capabilities: `CGWindowListCopyWindowInfo` works; `screencapture` and synthetic keystrokes are denied; System Events read-only queries work. GUI automation is therefore out of scope (OD2).
 - Measurement path verified: `View.app/Contents/MacOS/view <dir>` launches the real window from a terminal with stderr attached (81 MB RSS, 18 MB physical footprint while idle), so `VIEW_METRICS` output is readable without launchd. `footprint <pid>` and `perf-gate-ready` are available. The host runs an OrbStack VM that can be hot; treat timing runs that fail the gate as deferred, not as failures.
-- Reference numbers for perf: first real measurement lands in I3; P3 gates compare against it.
+- Reference numbers for perf: O1 records the first three quiet-host runs; P3 gates compare against those values.
 
 ## Sequence
 
@@ -189,6 +189,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — I4 accepted at `7cda6ba`; `./scripts/test.sh --filter PreviewSession` passed 6 tests and `swift build` passed. The window content controller owns panel control only through responder-chain callbacks; the session keeps a URL snapshot and updates the grid selection on Quick Look navigation. The Objective-C control callbacks are imported nonisolated, so they use `MainActor.assumeIsolated` at the AppKit callback boundary; this runtime-checked adapter keeps panel state main-actor isolated. No GUI behavior is claimed verified under OD2. Next I5.
 - 2026-10-22 — I5 accepted at `8f3ee85`; `./scripts/test.sh --filter 'Trash|GridCommand'` passed 10 tests and `swift build` passed. The core service tracks in-flight URLs, requires the recycle mapping to contain the source URL, and only then calls the catalog-removal closure. The app uses `NSWorkspace.recycle`, removes the matching collection item, evicts thumbnail cache/demand, preserves catalog neighbor selection, refreshes the preview snapshot, and presents native failure sheets. The public core contract now includes `TrashService`, `TrashOutcome`, `TrashError`, and Ctrl+Delete mapping; no real Trash interaction was campaign-verified under OD2. Next I6.
 - 2026-10-22 — I6 accepted at `ace0fce`; `./scripts/test.sh` passed all 49 tests and `swift build -c release` passed. Release output contains only the inherited Command Line Tools missing linker search-path warnings recorded in P1; no Swift warnings or errors appeared. Added exact URL identity checks for unusual names, sink-failure propagation, and scheduler shutdown coverage. App termination now awaits scan cancellation, scheduler/Quick Look request cancellation, and pending recycle completion. The root scanner's typed failure reaches the native alert path; actual panel, alert, thumbnail, and Trash appearance remain owner-verified under OD2. No command-line behavior changed. Next O1.
+- 2026-10-22 — O1 accepted after three direct release launches on the generated 2,000-item corpus. `perf-gate-ready` returned 0 before and after each run. Median `first-thumbnail-ms` was 146.0, `visible-populated-ms` was 171.5, and `scan-complete-ms` was 205.0; each run scanned 2,000 items in 16 batches. The 980 copies were added to the 1,000 varied PNGs and 20 movies to match O2's 2,000-item scan gate. Peak physical footprint ranged from 49 to 54 MB; idle CPU mean ranged from 0.00% to 0.09%. Scroll-pass memory growth was not measured because OD2 excludes GUI automation. Results and commands are in `docs/performance.md`; next O2.
 
 ## For the owner afterwards
 
