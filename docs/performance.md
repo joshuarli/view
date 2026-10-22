@@ -2,11 +2,29 @@
 
 ## O1 baseline
 
-The three recorded runs used the release app on macOS 27.0.1, arm64, Swift 6.4, and the macOS 27.0 SDK. The machine has 18 CPU cores.
+Recorded 2026-10-22 on macOS 27.0.1, arm64, Swift 6.4, and the macOS 27.0 SDK. The machine has 18 CPU cores.
 
 The corpus contains 2,000 media items: 1,000 varied-color PNGs, 980 PNG copies, and 20 one-second H.264 movies. It also contains text and audio noise, a hidden image, a package image, and file and directory symlinks. The corpus occupies 7.8 MB.
 
-The app was built with `TMPDIR="$PWD/.work/tmp" ./scripts/build-app.sh`. Each run launched `View.app/Contents/MacOS/view` in a foreground session with `VIEW_METRICS=1`. The readiness gate returned 0 before and immediately after each run.
+The corpus and release app were prepared with these commands:
+
+```sh
+swift scripts/make-corpus.swift .work/corpus
+TMPDIR="$PWD/.work/tmp" ./scripts/build-app.sh
+```
+
+Each run launched the bundled executable in a foreground session. The readiness gate returned 0 before and immediately after each run.
+
+```sh
+VIEW_METRICS=1 ./View.app/Contents/MacOS/view "$PWD/.work/corpus" > .work/tmp/o1-run1.metrics 2>&1
+```
+
+After a five-second settle, CPU and RSS were sampled ten times over 20 seconds. Physical footprint was sampled during each run.
+
+```sh
+for sample in $(seq 1 10); do ps -o %cpu= -o rss= -p "$APP_PID"; sleep 2; done
+footprint --sample 1 --sample-duration 25 --noCategories "$APP_PID"
+```
 
 | Run | Window shown ms | First batch ms | Scan complete ms | First thumbnail ms | Visible populated ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -55,7 +73,7 @@ The O1 values met each measured O2 threshold. After the scheduler cancellation f
 | Steady RSS | 103,904–105,024 KiB medians | 100,064 KiB median | 500 MiB | Pass |
 | Second-pass RSS growth | Not measured | Not measured | 20% | Unmeasured under OD2 |
 
-Source inspection found directory enumeration, metadata reads, volume lookup, and Quick Look generation outside the main actor. The main actor installs returned images in cells. No blocking decode or file read is present on that path. The scroll-memory gate needs owner verification because measuring it requires UI input.
+Source inspection found directory enumeration, metadata reads, volume lookup, and Quick Look generation outside the main actor. The main actor wraps returned `CGImage` values in `NSImage` for display; there is no synchronous decoder or file read on that path. This is source evidence, not a main-actor latency trace. The scroll-memory gate needs owner verification because measuring it requires UI input.
 
 No tuning parameter changed. The baseline already meets the measured latency, memory, and idle CPU thresholds. The cache remains 96 MiB, local concurrency remains 4, prefetch remains one viewport ahead, and scan batches remain 128 items. The post-fix sample did not exceed 1.5× any O1 timing, and its values were within the observed spread except first-thumbnail time, which was 2.1% above the O1 maximum.
 
