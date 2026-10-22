@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** O3 ImageIO experiment (not run; numeric triggers missed, signpost trigger unmeasured).
+**Last accepted checkpoint:** O4 Simplify (removed duplicate request-task state; one scale follow-up filed).
 **Provisional work:** none.
 **Current steering decision:** keep existing settings because the measured gates pass; GUI correctness is owner-verified (OD2), and scroll memory remains unmeasured.
-**Next substantive milestone:** O4 Simplify.
+**Next substantive milestone:** C1 Review.
 
 ## Charter
 
@@ -177,7 +177,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 
 **Source reference (ideas only; no code copied, none vendored).** If any code is taken from them anyway, its license and attribution travel with it. Pixe (`ImageDirectoryWalker`, `ImageList`, `ThumbnailCache`, `GridLayout`, `InputHandler`; on-demand drawing) for recursive scanning and thumbnail caching patterns; MViewer (`PhotoLoader`, `FileNavigator`, `ViewerWindowController`) for bounded decoding and simple navigation; FlowVision for recursive media browsing at larger scale; Shoebox for a modern photo grid. All use Swift 5 mode or carry machinery outside this scope.
 
-**File map after P1.** `Sources/viewCore/Discovery/{MediaItem,PathOrder,DirectoryScanner}.swift`, `Sources/viewCore/{Catalog,GridCommand,PreviewSession,Trash}.swift`, `Sources/viewCore/Thumbnails/{ThumbnailKey,ThumbnailCache,ThumbnailScheduler}.swift`, `Sources/view/{ViewApp,RootViewController,ThumbnailCoordinator,PreviewPanelController,TrashController}.swift`, `Sources/view/Grid/{GridViewController,ThumbnailCell}.swift`, `Tests/viewCoreTests/{Discovery,Catalog,Scheduler,PreviewSession,GridCommand,Trash,RootDirectory}Tests.swift`, `scripts/{build-app,test}`, `bin/view`, `Info.plist`, `README.md`, `AGENTS.md`; P3 adds `scripts/make-corpus` and `docs/performance.md`.
+**File map after P1.** `Sources/viewCore/Discovery/{MediaItem,PathOrder,DirectoryScanner}.swift`, `Sources/viewCore/{Catalog,GridCommand,PreviewSession,RootDirectory,Trash}.swift`, `Sources/viewCore/Thumbnails/{ThumbnailKey,ThumbnailCache,ThumbnailScheduler}.swift`, `Sources/view/{ViewApp,ThumbnailCoordinator,PreviewPanelController,TrashController}.swift`, `Sources/view/Grid/{GridViewController,ThumbnailCell}.swift`, `Tests/viewCoreTests/{Discovery,Catalog,Scheduler,PreviewSession,GridCommand,Trash,RootDirectory}Tests.swift`, `scripts/{build-app.sh,make-corpus.swift,test.sh}`, `bin/view`, `Info.plist`, `README.md`, `AGENTS.md`; `docs/performance.md` records O1 and O2.
 
 ## Campaign log
 
@@ -192,6 +192,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — O1 accepted after three direct release launches on the generated 2,000-item corpus. `perf-gate-ready` returned 0 before and after each run. Median `first-thumbnail-ms` was 146.0, `visible-populated-ms` was 171.5, and `scan-complete-ms` was 205.0; each run scanned 2,000 items in 16 batches. The 980 copies were added to the 1,000 varied PNGs and 20 movies to match O2's 2,000-item scan gate. Peak physical footprint ranged from 49 to 54 MB; idle CPU mean ranged from 0.00% to 0.09%. Scroll-pass memory growth was not measured because OD2 excludes GUI automation. Results and commands are in `docs/performance.md`; next O2.
 - 2026-10-22 — O2 accepted: all measured thresholds pass on O1, and the post-fix gated spot check remained within 1.03× of O1's observed ranges. First-thumbnail, initial-viewport, and scan medians were 146.0 ms, 171.5 ms, and 205.0 ms; the post-fix sample was 156.8 ms, 177.9 ms, and 211.4 ms. The 2,000-item scan completed in 16 batches, concurrency peaked at 4, cache cost was 9,216,000 bytes, idle CPU mean was 0.01%, and median RSS was 100,064 KiB in the spot check. No tuning changed because the thresholds already pass. The second-pass RSS gate remains unmeasured under OD2; next O3 trigger check.
 - 2026-10-22 — O3 not run: O1 first-thumbnail p50 was 146.0 ms against a 600 ms trigger, and initial-viewport p50 was 171.5 ms against a 2,500 ms trigger. The signpost condition was not measured, and no other evidence showed Quick Look dominating, so there was no measured reason to run the one-attempt ImageIO experiment. No alternate thumbnail path was added; next O4.
+- 2026-10-22 — O4 accepted at `a30e703`. Removed the duplicate `runningTasks` dictionary because `activeRequests` now retains every live request through completion and supplies shutdown's cancel-and-await list. The cache ledger and `NSCache` remain because one provides deterministic cost accounting and eviction tests while the other enforces a system cache limit. Generation, demand, failure, and removal state each protect a scheduler invariant. Work that loses demand is canceled, cannot publish a stale result, keeps a bounded slot until its request returns, and is awaited at shutdown. Only visible and one-viewport demand starts image work; full-resolution buffers are not retained. The app uses AppKit's grid, Quick Look panel, and Trash integration. One repeated O(N) path remains when scanning continues while Quick Look is open: each batch rebuilds the panel's URL snapshot. It was not exercised by the closed-panel 2,000-item launch, so it is filed as VIE-1 for measurement before optimization. No other file, class, cache, or abstraction has a justified removal. No scope creep was found.
 
 ## For the owner afterwards
 
