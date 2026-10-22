@@ -7,6 +7,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private let root: RootDirectory
   private let metrics: ViewMetrics
   private(set) var catalog = Catalog()
+  var catalogDidChange: ((Catalog) -> Void)?
   private var scanTask: Task<Void, Never>?
   private var thumbnailCoordinator: ThumbnailCoordinator?
   private var prefetchIndexPaths: Set<IndexPath> = []
@@ -153,6 +154,17 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     return false
   }
 
+  func selectFromPreview(_ url: URL) {
+    guard let index = catalog.items.firstIndex(where: { $0.url == url }) else { return }
+    do {
+      try catalog.select(url)
+    } catch {
+      preconditionFailure(error.localizedDescription)
+    }
+    collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
+    updateVisibleSelection()
+  }
+
   private func startScan() {
     let root = self.root
     metrics.scanStarted()
@@ -183,6 +195,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     metrics.catalogBatchApplied()
     updateEmptyState()
     collectionView.layoutSubtreeIfNeeded()
+    catalogDidChange?(catalog)
     updateThumbnailDemand()
   }
 
