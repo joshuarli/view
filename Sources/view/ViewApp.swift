@@ -19,7 +19,7 @@ struct ViewApp {
 
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
-    let delegate = ViewAppDelegate(root: root.url)
+    let delegate = ViewAppDelegate(root: root)
     Self.delegate = delegate
     app.delegate = delegate
     app.run()
@@ -28,10 +28,10 @@ struct ViewApp {
 
 @MainActor
 final class ViewAppDelegate: NSObject, NSApplicationDelegate {
-  private let root: URL
+  private let root: RootDirectory
   private var window: NSWindow?
 
-  init(root: URL) {
+  init(root: RootDirectory) {
     self.root = root
   }
 
@@ -44,8 +44,8 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
       backing: .buffered,
       defer: false
     )
-    window.title = root.lastPathComponent
-    window.contentViewController = RootViewController(root: root)
+    window.title = root.url.lastPathComponent
+    window.contentViewController = GridViewController(root: root)
     window.setContentSize(NSSize(width: 1100, height: 760))
     window.center()
     window.makeKeyAndOrderFront(nil)
