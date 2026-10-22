@@ -5,11 +5,14 @@ import viewCore
 @MainActor
 final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   private let grid: GridViewController
+  private let trashController: TrashController
   private var session = PreviewSession()
   private var isControllingPanel = false
 
   init(root: RootDirectory, metrics: ViewMetrics) {
-    grid = GridViewController(root: root, metrics: metrics)
+    let grid = GridViewController(root: root, metrics: metrics)
+    self.grid = grid
+    trashController = TrashController(grid: grid)
     super.init(nibName: nil, bundle: nil)
     grid.catalogDidChange = { [weak self] catalog in
       self?.catalogDidChange(catalog)
@@ -78,8 +81,14 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     }
   }
 
+  @objc func trashSelectedItem(_ sender: Any?) {
+    trashController.trashSelectedItem()
+  }
+
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-    guard menuItem.action == #selector(togglePreview(_:)) else { return true }
+    guard
+      menuItem.action == #selector(togglePreview(_:)) || menuItem.action == #selector(trashSelectedItem(_:))
+    else { return true }
     return grid.catalog.selectedURL != nil
   }
 

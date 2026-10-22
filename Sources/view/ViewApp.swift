@@ -73,21 +73,37 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
     let mainMenu = NSMenu()
     mainMenu.addItem(appMenuItem)
 
-    let previewMenu = NSMenu(title: "Preview")
-    let shortcut = GridCommand.togglePreview.shortcut
-    let previewItem = NSMenuItem(
+    let viewMenu = NSMenu(title: "View")
+    viewMenu.addItem(menuItem(
+      command: .togglePreview,
       title: "Show Preview",
       action: #selector(PreviewPanelController.togglePreview(_:)),
-      keyEquivalent: shortcut.keyEquivalent
-    )
-    previewItem.target = previewController
-    previewItem.keyEquivalentModifierMask = modifierFlags(for: shortcut.modifiers)
-    previewMenu.addItem(previewItem)
-    let previewMenuItem = NSMenuItem(title: "Preview", action: nil, keyEquivalent: "")
-    previewMenuItem.submenu = previewMenu
-    mainMenu.addItem(previewMenuItem)
+      target: previewController
+    ))
+    viewMenu.addItem(menuItem(
+      command: .trashSelectedItem,
+      title: "Move to Trash",
+      action: #selector(PreviewPanelController.trashSelectedItem(_:)),
+      target: previewController
+    ))
+    let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+    viewMenuItem.submenu = viewMenu
+    mainMenu.addItem(viewMenuItem)
 
     NSApp.mainMenu = mainMenu
+  }
+
+  private func menuItem(
+    command: GridCommand,
+    title: String,
+    action: Selector,
+    target: AnyObject
+  ) -> NSMenuItem {
+    let shortcut = command.shortcut
+    let item = NSMenuItem(title: title, action: action, keyEquivalent: shortcut.keyEquivalent)
+    item.target = target
+    item.keyEquivalentModifierMask = modifierFlags(for: shortcut.modifiers)
+    return item
   }
 
   private func modifierFlags(for modifiers: Set<GridKeyModifier>) -> NSEvent.ModifierFlags {

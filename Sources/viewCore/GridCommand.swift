@@ -17,11 +17,14 @@ public struct GridShortcut: Sendable, Equatable {
 
 public enum GridCommand: CaseIterable, Sendable, Equatable {
   case togglePreview
+  case trashSelectedItem
 
   public var shortcut: GridShortcut {
     switch self {
     case .togglePreview:
       GridShortcut(keyEquivalent: " ", modifiers: [])
+    case .trashSelectedItem:
+      GridShortcut(keyEquivalent: "\u{8}", modifiers: [.control])
     }
   }
 

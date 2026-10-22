@@ -14,6 +14,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private var lastScrollOriginY: CGFloat = 0
   private var scrollDirection: ScrollDirection = .down
   private var isObservingScrollBounds = false
+  private var isApplyingCatalogMutation = false
   private var scrollView: NSScrollView!
   private(set) var collectionView: NSCollectionView!
   private var emptyStateLabel: NSTextField!
@@ -115,6 +116,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
+    guard !isApplyingCatalogMutation else { return }
     guard let indexPath = indexPaths.first, let item = catalog.item(at: indexPath.item) else { return }
     do {
       try catalog.select(item.url)
@@ -125,6 +127,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
+    guard !isApplyingCatalogMutation else { return }
     if collectionView.selectionIndexPaths.isEmpty {
       catalog.clearSelection()
     }
@@ -163,6 +166,25 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     }
     collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
     updateVisibleSelection()
+  }
+
+  func removeCatalogItem(_ url: URL) {
+    guard let removedIndex = catalog.remove(url) else { return }
+    thumbnailCoordinator?.removeItem(at: url)
+    prefetchIndexPaths.removeAll(keepingCapacity: false)
+    isApplyingCatalogMutation = true
+    collectionView.deleteItems(at: [IndexPath(item: removedIndex, section: 0)])
+    if let selectedURL = catalog.selectedURL,
+      let selectedIndex = catalog.items.firstIndex(where: { $0.url == selectedURL }) {
+      collectionView.selectItems(at: [IndexPath(item: selectedIndex, section: 0)], scrollPosition: [])
+    } else {
+      collectionView.deselectAll(nil)
+    }
+    isApplyingCatalogMutation = false
+    updateEmptyState()
+    updateVisibleSelection()
+    catalogDidChange?(catalog)
+    updateThumbnailDemand()
   }
 
   private func startScan() {
