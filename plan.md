@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** P0/S1 at `21c798d` (scaffolding: package, app shell, launcher, packaging, tests; the window frame was observed once during scaffolding, before OD2).
+**Last accepted checkpoint:** I1 Discovery at `bc49a2b` (ordered recursive scanning, 128-item backpressured batches, cancellation, and filtering; Discovery suite green).
 **Provisional work:** none.
 **Current steering decision:** parity before optimization; GUI correctness is owner-verified (OD2); perf measured and logged until P3.
-**Next substantive milestone:** I1 discovery, with its full test suite green.
+**Next substantive milestone:** I2 Catalog and grid, with the Catalog and GridCommand suites green.
 
 ## Charter
 
@@ -183,6 +183,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 
 - 2026-10-22 — Preflight. Verified toolchain, SDK symbols, launcher behavior, GUI/automation permissions, and loop timings. Scaffolding accepted at `21c798d` after build, 5 tests, app packaging, launcher error paths, and one windowed launch (1100×792 frame, title from root).
 - 2026-10-22 — Owner answers recorded as OD1–OD3; source spec's GUI integration block superseded by OD2; terminology corrected to call media "items" (the app is `view`).
+- 2026-10-22 — I1 accepted at `bc49a2b`; `./scripts/test.sh --filter Discovery` passed 9 tests covering ordering, filters, root and nested read failures, cancellation, and 127/128/129 batch boundaries. `PathOrder` uses the required comparison options and UTF-8 byte ordering for ties; the no-locale overload matches the canonical traversal vector. The public core surface is one static scan operation with immutable `Sendable` media items; next I2.
 
 ## For the owner afterwards
 
