@@ -49,7 +49,7 @@ final class ThumbnailCoordinator {
     visibleItems = visible
     prefetchItems = prefetch
     guard let scheduler else { return }
-    let scale = grid?.view.window?.backingScaleFactor ?? 1
+    let scale = backingScale
     let visibleKeys = makeKeys(for: visible, scale: scale)
     let prefetchKeys = makeKeys(for: prefetch, scale: scale)
     if initialViewport == nil, !visibleKeys.isEmpty {
@@ -58,6 +58,16 @@ final class ThumbnailCoordinator {
     }
     scheduler.updateDemand(visible: visibleKeys, prefetch: prefetchKeys)
   }
+
+  func cachedImage(for item: MediaItem) -> CGImage? {
+    let image = cache.image(for: makeKey(for: item, scale: backingScale))
+    if image != nil {
+      metrics.firstThumbnailDisplayed()
+    }
+    return image
+  }
+
+  private var backingScale: CGFloat { grid?.view.window?.backingScaleFactor ?? 1 }
 
   func removeItem(at url: URL) {
     scheduler?.removeItem(at: url)
@@ -74,22 +84,24 @@ final class ThumbnailCoordinator {
   }
 
   private func makeKeys(for items: [MediaItem], scale: CGFloat) -> [ThumbnailKey] {
-    items.map { item in
-      guard let key = ThumbnailKey(
-        item: item,
-        pixelSize: Int((160 * scale).rounded()),
-        scale: scale
-      ) else {
-        preconditionFailure("invalid thumbnail dimensions")
-      }
-      return key
+    items.map { makeKey(for: $0, scale: scale) }
+  }
+
+  private func makeKey(for item: MediaItem, scale: CGFloat) -> ThumbnailKey {
+    guard let key = ThumbnailKey(
+      item: item,
+      pixelSize: Int((160 * scale).rounded()),
+      scale: scale
+    ) else {
+      preconditionFailure("invalid thumbnail dimensions")
     }
+    return key
   }
 
   private func receive(key: ThumbnailKey, generation _: UInt64, result: ThumbnailResult) {
     switch result {
     case .image(let image):
-      if grid?.displayThumbnail(image, for: key.url) == true {
+      if key.scale == backingScale, grid?.displayThumbnail(image, for: key.url) == true {
         metrics.firstThumbnailDisplayed()
       }
     case .failure, .cancelled:

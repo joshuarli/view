@@ -21,10 +21,55 @@ struct PreviewSessionTests {
     let began = session.begin(with: catalog)
     #expect(began)
 
-    #expect(session.previewItem(at: 1) == url("two.png"))
+    #expect(session.selectPreviewItem(at: 1) == url("two.png"))
     #expect(session.currentIndex == 1)
-    #expect(session.previewItem(at: 2) == nil)
+    #expect(session.selectPreviewItem(at: 2) == nil)
     #expect(session.currentIndex == 1)
+  }
+
+  @Test func speculativeLookupsDoNotChangeTheCurrentItem() throws {
+    let catalog = try catalog(["one.png", "two.png", "three.png"], selectedIndex: 1)
+    var session = PreviewSession()
+    let began = session.begin(with: catalog)
+    #expect(began)
+
+    #expect(session.previewItem(at: 2) == url("three.png"))
+    #expect(session.previewItem(at: 0) == url("one.png"))
+    #expect(session.previewItem(at: -1) == nil)
+    #expect(session.currentIndex == 1)
+  }
+
+  @Test func catalogAppendsDoNotExpandThePreviewSnapshot() throws {
+    var catalog = try catalog(["one.png", "two.png"], selectedIndex: 1)
+    var session = PreviewSession()
+    let began = session.begin(with: catalog)
+    #expect(began)
+    let snapshot = session
+    catalog.append([MediaItem(url: url("three.png"), kind: .image, modificationDate: nil, fileSize: nil)])
+
+    session.update(with: catalog)
+
+    #expect(session == snapshot)
+    catalog.remove(url("two.png"))
+    session.update(with: catalog)
+    #expect(session.count == 1)
+    #expect(session.currentIndex == 0)
+    #expect(session.previewItem(at: 0) == url("one.png"))
+  }
+
+  @Test func navigationSurvivesUnrelatedRemoval() throws {
+    var catalog = try catalog(["one.png", "two.png", "three.png"], selectedIndex: 0)
+    var session = PreviewSession()
+    let began = session.begin(with: catalog)
+    #expect(began)
+    #expect(session.selectPreviewItem(at: 2) == url("three.png"))
+    #expect(session.previewItem(at: 0) == url("one.png"))
+
+    catalog.remove(url("two.png"))
+    session.update(with: catalog)
+
+    #expect(session.currentIndex == 1)
+    #expect(session.previewItem(at: 1) == url("three.png"))
   }
 
   @Test func removingBeforeCurrentItemShiftsItsIndexByIdentity() throws {

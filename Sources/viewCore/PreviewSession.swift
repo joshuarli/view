@@ -21,10 +21,16 @@ public struct PreviewSession: Sendable, Equatable {
     return true
   }
 
-  public mutating func previewItem(at index: Int) -> URL? {
+  public func previewItem(at index: Int) -> URL? {
     guard urls.indices.contains(index) else { return nil }
-    selectedIndex = index
     return urls[index]
+  }
+
+  @discardableResult
+  public mutating func selectPreviewItem(at index: Int) -> URL? {
+    guard let url = previewItem(at: index) else { return nil }
+    selectedIndex = index
+    return url
   }
 
   public mutating func update(with catalog: Catalog) {
@@ -32,7 +38,9 @@ public struct PreviewSession: Sendable, Equatable {
       return
     }
 
-    let nextURLs = catalog.items.map(\.url)
+    let catalogURLs = Set(catalog.items.map(\.url))
+    let nextURLs = urls.filter { catalogURLs.contains($0) }
+    guard nextURLs != urls else { return }
     guard !nextURLs.isEmpty else {
       urls = []
       selectedIndex = nil

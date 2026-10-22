@@ -54,9 +54,9 @@ final class ThumbnailCell: NSCollectionViewItem {
     updateSelectionAppearance()
   }
 
-  func represent(_ item: MediaItem, isSelected: Bool) {
+  func represent(_ item: MediaItem, isSelected: Bool, image: CGImage?) {
     representedURL = item.url
-    thumbnailView.image = Self.placeholderImage
+    thumbnailView.image = image.map { NSImage(cgImage: $0, size: .zero) } ?? Self.placeholderImage
     videoBadgeView.isHidden = item.kind != .movie
     catalogSelection = isSelected
     updateSelectionAppearance()
@@ -68,7 +68,7 @@ final class ThumbnailCell: NSCollectionViewItem {
   }
 
   func display(_ image: CGImage) {
-    thumbnailView.image = NSImage(cgImage: image, size: NSSize(width: 160, height: 160))
+    thumbnailView.image = NSImage(cgImage: image, size: .zero)
   }
 
   private func updateSelectionAppearance() {

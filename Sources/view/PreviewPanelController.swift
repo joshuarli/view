@@ -8,14 +8,16 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   private let trashController: TrashController
   private var session = PreviewSession()
   private var isControllingPanel = false
+  private var isUpdatingPanel = false
+  private var currentIndexObservation: NSKeyValueObservation?
 
   init(root: RootDirectory, metrics: ViewMetrics) {
     let grid = GridViewController(root: root, metrics: metrics)
     self.grid = grid
     trashController = TrashController(grid: grid)
     super.init(nibName: nil, bundle: nil)
-    grid.catalogDidChange = { [weak self] catalog in
-      self?.catalogDidChange(catalog)
+    grid.catalogItemDidRemove = { [weak self] catalog in
+      self?.catalogItemDidRemove(catalog)
     }
   }
 
@@ -51,15 +53,24 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
       isControllingPanel = true
       panel.dataSource = self
       panel.delegate = self
+      currentIndexObservation = panel.observe(\.currentPreviewItemIndex, options: [.new]) { [weak self] panel, _ in
+        MainActor.assumeIsolated {
+          self?.synchronizeSelection(from: panel)
+        }
+      }
+      isUpdatingPanel = true
       panel.reloadData()
       if let currentIndex = session.currentIndex {
         panel.currentPreviewItemIndex = currentIndex
       }
+      isUpdatingPanel = false
     }
   }
 
   nonisolated override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
     MainActor.assumeIsolated {
+      synchronizeSelection(from: panel)
+      currentIndexObservation = nil
       if (panel.dataSource as AnyObject?) === self {
         panel.dataSource = nil
       }
@@ -75,6 +86,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     guard grid.catalog.selectedURL != nil, let panel = QLPreviewPanel.shared() else { return }
     if panel.isVisible {
       guard (panel.currentController as AnyObject?) === self else { return }
+      synchronizeSelection(from: panel)
       panel.orderOut(sender)
     } else {
       panel.makeKeyAndOrderFront(sender)
@@ -82,6 +94,9 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   }
 
   @objc func trashSelectedItem(_ sender: Any?) {
+    if isControllingPanel, let panel = QLPreviewPanel.shared() {
+      synchronizeSelection(from: panel)
+    }
     trashController.trashSelectedItem()
   }
 
@@ -97,13 +112,17 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     return grid.catalog.selectedURL != nil
   }
 
-  private func catalogDidChange(_ catalog: Catalog) {
+  private func catalogItemDidRemove(_ catalog: Catalog) {
     guard
       isControllingPanel,
       let panel = QLPreviewPanel.shared(),
       (panel.currentController as AnyObject?) === self
     else { return }
+    let previousSession = session
     session.update(with: catalog)
+    guard session != previousSession else { return }
+    isUpdatingPanel = true
+    defer { isUpdatingPanel = false }
     guard session.count > 0 else {
       panel.orderOut(nil)
       return
@@ -111,7 +130,19 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     panel.reloadData()
     if let currentIndex = session.currentIndex {
       panel.currentPreviewItemIndex = currentIndex
+      if let url = session.previewItem(at: currentIndex) {
+        grid.selectFromPreview(url)
+      }
     }
+  }
+
+  private func synchronizeSelection(from panel: QLPreviewPanel) {
+    guard
+      isControllingPanel,
+      !isUpdatingPanel,
+      let url = session.selectPreviewItem(at: panel.currentPreviewItemIndex)
+    else { return }
+    grid.selectFromPreview(url)
   }
 }
 
@@ -121,10 +152,13 @@ extension PreviewPanelController: @MainActor QLPreviewPanelDataSource {
   }
 
   func previewPanel(_ panel: QLPreviewPanel, previewItemAt index: Int) -> QLPreviewItem? {
-    guard let url = session.previewItem(at: index) else { return nil }
-    grid.selectFromPreview(url)
-    return url as NSURL
+    session.previewItem(at: index).map { $0 as NSURL }
   }
 }
 
-extension PreviewPanelController: @MainActor QLPreviewPanelDelegate {}
+extension PreviewPanelController: @MainActor QLPreviewPanelDelegate {
+  func windowWillClose(_ notification: Notification) {
+    guard let panel = notification.object as? QLPreviewPanel else { return }
+    synchronizeSelection(from: panel)
+  }
+}

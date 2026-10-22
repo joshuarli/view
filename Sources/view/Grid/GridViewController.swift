@@ -7,7 +7,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private let root: RootDirectory
   private let metrics: ViewMetrics
   private(set) var catalog = Catalog()
-  var catalogDidChange: ((Catalog) -> Void)?
+  var catalogItemDidRemove: ((Catalog) -> Void)?
   private var scanTask: Task<Void, Never>?
   private var thumbnailCoordinator: ThumbnailCoordinator?
   private var prefetchIndexPaths: Set<IndexPath> = []
@@ -111,7 +111,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       preconditionFailure("collection view requested an item outside the catalog")
     }
     let cell = collectionView.makeItem(withIdentifier: ThumbnailCell.reuseIdentifier, for: indexPath) as! ThumbnailCell
-    cell.represent(item, isSelected: item.url == catalog.selectedURL)
+    cell.represent(item, isSelected: item.url == catalog.selectedURL, image: thumbnailCoordinator?.cachedImage(for: item))
     return cell
   }
 
@@ -183,7 +183,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     isApplyingCatalogMutation = false
     updateEmptyState()
     updateVisibleSelection()
-    catalogDidChange?(catalog)
+    catalogItemDidRemove?(catalog)
     updateThumbnailDemand()
   }
 
@@ -223,7 +223,6 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     metrics.catalogBatchApplied()
     updateEmptyState()
     collectionView.layoutSubtreeIfNeeded()
-    catalogDidChange?(catalog)
     updateThumbnailDemand()
   }
 
@@ -252,6 +251,12 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       name: NSView.boundsDidChangeNotification,
       object: scrollView.contentView
     )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(windowBackingPropertiesDidChange(_:)),
+      name: NSWindow.didChangeBackingPropertiesNotification,
+      object: view.window
+    )
     isObservingScrollBounds = true
   }
 
@@ -262,7 +267,23 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       name: NSView.boundsDidChangeNotification,
       object: scrollView.contentView
     )
+    NotificationCenter.default.removeObserver(
+      self,
+      name: NSWindow.didChangeBackingPropertiesNotification,
+      object: view.window
+    )
     isObservingScrollBounds = false
+  }
+
+  @objc private func windowBackingPropertiesDidChange(_ notification: Notification) {
+    for indexPath in collectionView.indexPathsForVisibleItems() {
+      guard
+        let item = catalog.item(at: indexPath.item),
+        let cell = collectionView.item(at: indexPath) as? ThumbnailCell
+      else { continue }
+      cell.represent(item, isSelected: item.url == catalog.selectedURL, image: thumbnailCoordinator?.cachedImage(for: item))
+    }
+    updateThumbnailDemand()
   }
 
   @objc private func clipViewBoundsDidChange(_ notification: Notification) {
