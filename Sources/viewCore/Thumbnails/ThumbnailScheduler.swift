@@ -74,6 +74,8 @@ public final class ThumbnailScheduler {
   public func updateDemand(visible: [ThumbnailKey], prefetch: [ThumbnailKey]) {
     guard !stopped else { return }
     let nextVisible = uniqueKeys(visible)
+    let previouslyVisible = Set(visibleDemand)
+    let newlyVisible = nextVisible.filter { !previouslyVisible.contains($0) }
     let visibleKeys = Set(nextVisible)
     let nextPrefetch = uniqueKeys(prefetch).filter { !visibleKeys.contains($0) }
     let nextDemand = Set(nextVisible).union(nextPrefetch)
@@ -81,7 +83,7 @@ public final class ThumbnailScheduler {
     for key in Array(demandGenerations.keys) where !nextDemand.contains(key) {
       demandGenerations.removeValue(forKey: key)
       settledGenerations.removeValue(forKey: key)
-      activeRequests[key]?.task.cancel()
+      cancelActiveRequest(for: key)
     }
 
     for key in nextVisible + nextPrefetch where demandGenerations[key] == nil {
@@ -91,6 +93,7 @@ public final class ThumbnailScheduler {
 
     visibleDemand = nextVisible
     prefetchDemand = nextPrefetch
+    preemptPrefetchForVisibleDemand(newlyVisible)
     pump()
   }
 
@@ -100,7 +103,7 @@ public final class ThumbnailScheduler {
     for key in matchingKeys {
       demandGenerations.removeValue(forKey: key)
       settledGenerations.removeValue(forKey: key)
-      activeRequests[key]?.task.cancel()
+      cancelActiveRequest(for: key)
     }
     visibleDemand.removeAll { $0.url == url }
     prefetchDemand.removeAll { $0.url == url }
@@ -169,6 +172,31 @@ public final class ThumbnailScheduler {
     maximumConcurrentRequestCount = max(maximumConcurrentRequestCount, activeRequests.count)
   }
 
+  private func preemptPrefetchForVisibleDemand(_ newlyVisible: [ThumbnailKey]) {
+    guard activeRequests.count >= concurrencyLimit else { return }
+    let hasWaitingVisibleRequest = newlyVisible.contains { key in
+      guard let generation = demandGenerations[key] else { return false }
+      guard settledGenerations[key] != generation, !failedKeys.contains(key) else { return false }
+      if activeRequests[key]?.generation == generation { return false }
+      return cache.image(for: key) == nil
+    }
+    guard hasWaitingVisibleRequest else { return }
+
+    guard let prefetchKey = prefetchDemand.reversed().first(where: { key in
+      guard let request = activeRequests[key] else { return false }
+      guard let generation = demandGenerations[key] else { return false }
+      return request.generation == generation && !request.cancellationRequested
+    }) else { return }
+    cancelActiveRequest(for: prefetchKey)
+  }
+
+  private func cancelActiveRequest(for key: ThumbnailKey) {
+    guard var request = activeRequests[key], !request.cancellationRequested else { return }
+    request.cancellationRequested = true
+    activeRequests[key] = request
+    request.task.cancel()
+  }
+
   private func finishRequest(for key: ThumbnailKey, generation: UInt64, result: ThumbnailResult) {
     guard activeRequests[key]?.generation == generation else { return }
     activeRequests.removeValue(forKey: key)
@@ -196,4 +224,5 @@ public final class ThumbnailScheduler {
 private struct ActiveThumbnailRequest {
   let generation: UInt64
   let task: Task<Void, Never>
+  var cancellationRequested = false
 }

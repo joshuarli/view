@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Synchronization
 import Testing
 @testable import viewCore
 
@@ -25,6 +26,48 @@ struct SchedulerTests {
     #expect(await requests.maximumConcurrentCount == 2)
     let started = await requests.startedRequests
     #expect(started.map(\.key) == Array(keys.prefix(2)))
+    await finishSchedulerRequests(scheduler, requests: requests)
+  }
+
+  @Test func newlyVisibleDemandPreemptsOneRelevantPrefetchWithoutReleasingItsSlot() async {
+    let cache = ThumbnailCache(totalCostLimit: 1024)
+    let requests = RequestHarness()
+    let results = ResultRecorder()
+    let scheduler = ThumbnailScheduler(
+      concurrencyLimit: 3,
+      cache: cache,
+      request: { key, generation in try await requests.requestIgnoringCancellation(key, generation: generation) },
+      resultSink: { results.record(key: $0, generation: $1, result: $2) }
+    )
+    let firstPrefetch = key("first-prefetch.png")
+    let secondPrefetch = key("second-prefetch.png")
+    let thirdPrefetch = key("third-prefetch.png")
+    let firstVisible = key("first-visible.png")
+    let secondVisible = key("second-visible.png")
+    let prefetch = [firstPrefetch, secondPrefetch, thirdPrefetch]
+
+    scheduler.updateDemand(visible: [], prefetch: prefetch)
+    await requests.waitForStartCount(3)
+    let startedPrefetch = await requests.startedRequests
+    scheduler.updateDemand(visible: [firstVisible, secondVisible], prefetch: prefetch)
+    #expect(await requests.cancellationRequests == [startedPrefetch[2]])
+    #expect(scheduler.activeRequestCount == 3)
+    #expect(scheduler.requestCount == 3)
+
+    scheduler.updateDemand(visible: [firstVisible, secondVisible], prefetch: prefetch)
+    #expect(await requests.cancellationRequests.count == 1)
+    #expect(scheduler.activeRequestCount == 3)
+    #expect(scheduler.requestCount == 3)
+
+    await requests.complete(startedPrefetch[2], with: makeImage())
+    await requests.waitForStartCount(4)
+    #expect(await requests.startedRequests.map(\.key) == [
+      firstPrefetch, secondPrefetch, thirdPrefetch, firstVisible,
+    ])
+    #expect(scheduler.activeRequestCount == 3)
+    #expect(await requests.maximumConcurrentCount == 3)
+
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func deduplicatesKeysAcrossVisibleAndPrefetchDemand() async {
@@ -43,6 +86,7 @@ struct SchedulerTests {
     await requests.waitForStartCount(1)
     let started = await requests.startedRequests
     #expect(started.map(\.key) == [requested])
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func visibleDemandPrecedesPrefetchAndDirectionChangesReorderTheQueue() async {
@@ -73,6 +117,7 @@ struct SchedulerTests {
     await results.waitForCount(2)
     await requests.waitForStartCount(3)
     #expect(await requests.startedRequests[2].key == forward)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func cancellationReleasesTheSlotForCurrentDemand() async {
@@ -97,6 +142,7 @@ struct SchedulerTests {
     #expect(scheduler.activeRequestCount == 1)
     #expect(await requests.cancelledCount == 1)
     #expect(await requests.startedRequests[1].key == current)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func cancellationKeepsTheSlotUntilUnderlyingWorkFinishes() async {
@@ -128,6 +174,7 @@ struct SchedulerTests {
     let shutdown = Task { await scheduler.cancelAll() }
     await requests.complete(currentRequest, with: makeImage())
     await shutdown.value
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func cancelAllCancelsAndAwaitsEveryOwnedRequest() async {
@@ -150,6 +197,7 @@ struct SchedulerTests {
     #expect(scheduler.activeRequestCount == 0)
     #expect(await requests.cancelledCount == 2)
     #expect(results.results.isEmpty)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func rapidDirectionChangesKeepOnlyTheLatestBoundedDemand() async {
@@ -184,6 +232,7 @@ struct SchedulerTests {
     await results.waitForCount(2)
     await requests.waitForStartCount(3)
     #expect(await requests.startedRequests[2].key == first)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func staleGenerationCannotPopulateCacheOrReachTheCell() async {
@@ -207,6 +256,7 @@ struct SchedulerTests {
 
     #expect(results.results.isEmpty)
     #expect(cache.image(for: stale) == nil)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func removedItemCannotBeRequestedAgain() async {
@@ -230,6 +280,7 @@ struct SchedulerTests {
     #expect(await requests.startedRequests.count == 1)
     #expect(scheduler.activeRequestCount == 0)
     #expect(results.results.isEmpty)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func cacheHitAvoidsAQuickLookRequest() async {
@@ -250,6 +301,7 @@ struct SchedulerTests {
     #expect(await requests.startedRequests.isEmpty)
     #expect(results.results.count == 1)
     #expect(cache.totalCostBytes == 4)
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func failureIsLatchedForTheSession() async {
@@ -277,6 +329,7 @@ struct SchedulerTests {
     } else {
       Issue.record("Expected a latched thumbnail failure")
     }
+    await finishSchedulerRequests(scheduler, requests: requests)
   }
 
   @Test func cacheEvictionDropsOldestEntriesAndRemovalDropsEveryVersion() {
@@ -313,6 +366,17 @@ struct SchedulerTests {
     ThumbnailKey(item: mediaItem(name), pixelSize: 1, scale: 1)!
   }
 
+  private func finishSchedulerRequests(_ scheduler: ThumbnailScheduler, requests: RequestHarness) async {
+    scheduler.updateDemand(visible: [], prefetch: [])
+    let requestCount = scheduler.requestCount
+    await requests.waitForStartCount(requestCount)
+    await requests.completeOutstandingRequests(with: makeImage())
+    await requests.waitForCompletionCount(requestCount)
+    await requests.awaitCancellationTasks()
+    await scheduler.cancelAll()
+    #expect(scheduler.activeRequestCount == 0)
+  }
+
   private func mediaItem(_ name: String) -> MediaItem {
     MediaItem(
       url: URL(filePath: "/thumbnails/\(name)"),
@@ -339,11 +403,13 @@ struct SchedulerTests {
 private struct StartedRequest: Sendable, Hashable {
   let key: ThumbnailKey
   let generation: UInt64
+  let attempt: Int
 }
 
 private actor RequestHarness {
   private var continuations: [StartedRequest: CheckedContinuation<CGImage, any Error>] = [:]
   private var cancelledBeforeContinuation: Set<StartedRequest> = []
+  private var resolvedRequests: Set<StartedRequest> = []
   private var startWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
   private var completionWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
   private var starts: [StartedRequest] = []
@@ -351,6 +417,8 @@ private actor RequestHarness {
   private var maximumCount = 0
   private var completedCount = 0
   private var cancellationCount = 0
+  private let cancellationRecorder = CancellationRecorder()
+  private let cancellationTasks = CancellationTaskRegistry()
 
   private let respondsToCancellation: Bool
   private let failure: RequestFailure?
@@ -363,6 +431,7 @@ private actor RequestHarness {
   var startedRequests: [StartedRequest] { starts }
   var maximumConcurrentCount: Int { maximumCount }
   var cancelledCount: Int { cancellationCount }
+  var cancellationRequests: [StartedRequest] { cancellationRecorder.requests }
 
   func request(_ key: ThumbnailKey, generation: UInt64) async throws -> CGImage {
     try await perform(key, generation: generation, ignoresCancellation: false)
@@ -384,7 +453,23 @@ private actor RequestHarness {
 
   func complete(_ request: StartedRequest, with image: CGImage) {
     guard let continuation = continuations.removeValue(forKey: request) else { return }
+    resolvedRequests.insert(request)
     continuation.resume(returning: image)
+  }
+
+  func completeOutstandingRequests(with image: CGImage) {
+    let pending = continuations
+    continuations.removeAll(keepingCapacity: false)
+    for (request, continuation) in pending {
+      resolvedRequests.insert(request)
+      continuation.resume(returning: image)
+    }
+  }
+
+  func awaitCancellationTasks() async {
+    for task in cancellationTasks.take() {
+      await task.value
+    }
   }
 
   private func perform(
@@ -392,12 +477,15 @@ private actor RequestHarness {
     generation: UInt64,
     ignoresCancellation: Bool
   ) async throws -> CGImage {
-    let request = StartedRequest(key: key, generation: generation)
+    let request = StartedRequest(key: key, generation: generation, attempt: starts.count)
+    let cancellationRecorder = self.cancellationRecorder
+    let cancellationTasks = self.cancellationTasks
     starts.append(request)
     currentConcurrentCount += 1
     maximumCount = max(maximumCount, currentConcurrentCount)
     resumeStartWaiters()
     defer {
+      resolvedRequests.insert(request)
       currentConcurrentCount -= 1
       completedCount += 1
       resumeCompletionWaiters()
@@ -410,20 +498,24 @@ private actor RequestHarness {
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
         if cancelledBeforeContinuation.remove(request) != nil {
+          resolvedRequests.insert(request)
           continuation.resume(throwing: CancellationError())
         } else {
           continuations[request] = continuation
         }
       }
     } onCancel: {
+      cancellationRecorder.record(request)
       guard respondsToCancellation, !ignoresCancellation else { return }
-      Task { await self.cancel(request) }
+      cancellationTasks.append(Task { await self.cancel(request) })
     }
   }
 
   private func cancel(_ request: StartedRequest) {
+    guard !resolvedRequests.contains(request), !cancelledBeforeContinuation.contains(request) else { return }
     cancellationCount += 1
     if let continuation = continuations.removeValue(forKey: request) {
+      resolvedRequests.insert(request)
       continuation.resume(throwing: CancellationError())
     } else {
       cancelledBeforeContinuation.insert(request)
@@ -440,6 +532,33 @@ private actor RequestHarness {
     let ready = completionWaiters.filter { completedCount >= $0.0 }
     completionWaiters.removeAll { completedCount >= $0.0 }
     ready.forEach { $0.1.resume() }
+  }
+}
+
+private final class CancellationRecorder: Sendable {
+  private let state = Mutex<[StartedRequest]>([])
+
+  var requests: [StartedRequest] {
+    state.withLock { $0 }
+  }
+
+  func record(_ request: StartedRequest) {
+    state.withLock { $0.append(request) }
+  }
+}
+
+private final class CancellationTaskRegistry: Sendable {
+  private let state = Mutex<[Task<Void, Never>]>([])
+
+  func append(_ task: Task<Void, Never>) {
+    state.withLock { $0.append(task) }
+  }
+
+  func take() -> [Task<Void, Never>] {
+    state.withLock { state in
+      defer { state.removeAll(keepingCapacity: false) }
+      return state
+    }
   }
 }
 
