@@ -17,10 +17,10 @@
 | D7 | Swift 6 language mode with zero concurrency escape hatches; warnings as errors; tests for every behavior listed in Acceptance. |
 | D8 | Measured performance, minimal architecture, short docs, and a final report with the plan's seven required sections. |
 
-**Last accepted checkpoint:** O2 Tune (measured thresholds pass; no tuning change made).
+**Last accepted checkpoint:** O3 ImageIO experiment (not run; numeric triggers missed, signpost trigger unmeasured).
 **Provisional work:** none.
 **Current steering decision:** keep existing settings because the measured gates pass; GUI correctness is owner-verified (OD2), and scroll memory remains unmeasured.
-**Next substantive milestone:** O3's conditional trigger check, then O4 Simplify.
+**Next substantive milestone:** O4 Simplify.
 
 ## Charter
 
@@ -191,6 +191,7 @@ Campaign-level: no CI, no benchmark framework or diagnostics UI, no GUI automati
 - 2026-10-22 — I6 accepted at `ace0fce`; `./scripts/test.sh` passed all 49 tests and `swift build -c release` passed. Release output contains only the inherited Command Line Tools missing linker search-path warnings recorded in P1; no Swift warnings or errors appeared. Added exact URL identity checks for unusual names, sink-failure propagation, and scheduler shutdown coverage. App termination now awaits scan cancellation, scheduler/Quick Look request cancellation, and pending recycle completion. The root scanner's typed failure reaches the native alert path; actual panel, alert, thumbnail, and Trash appearance remain owner-verified under OD2. No command-line behavior changed. Next O1.
 - 2026-10-22 — O1 accepted after three direct release launches on the generated 2,000-item corpus. `perf-gate-ready` returned 0 before and after each run. Median `first-thumbnail-ms` was 146.0, `visible-populated-ms` was 171.5, and `scan-complete-ms` was 205.0; each run scanned 2,000 items in 16 batches. The 980 copies were added to the 1,000 varied PNGs and 20 movies to match O2's 2,000-item scan gate. Peak physical footprint ranged from 49 to 54 MB; idle CPU mean ranged from 0.00% to 0.09%. Scroll-pass memory growth was not measured because OD2 excludes GUI automation. Results and commands are in `docs/performance.md`; next O2.
 - 2026-10-22 — O2 accepted: all measured thresholds pass on O1, and the post-fix gated spot check remained within 1.03× of O1's observed ranges. First-thumbnail, initial-viewport, and scan medians were 146.0 ms, 171.5 ms, and 205.0 ms; the post-fix sample was 156.8 ms, 177.9 ms, and 211.4 ms. The 2,000-item scan completed in 16 batches, concurrency peaked at 4, cache cost was 9,216,000 bytes, idle CPU mean was 0.01%, and median RSS was 100,064 KiB in the spot check. No tuning changed because the thresholds already pass. The second-pass RSS gate remains unmeasured under OD2; next O3 trigger check.
+- 2026-10-22 — O3 not run: O1 first-thumbnail p50 was 146.0 ms against a 600 ms trigger, and initial-viewport p50 was 171.5 ms against a 2,500 ms trigger. The signpost condition was not measured, and no other evidence showed Quick Look dominating, so there was no measured reason to run the one-attempt ImageIO experiment. No alternate thumbnail path was added; next O4.
 
 ## For the owner afterwards
 
