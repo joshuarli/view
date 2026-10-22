@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+self=$0
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+repo=$(cd "$(dirname "$self")/.." && pwd -P)
+
+if [ "$#" -gt 1 ]; then
+  echo "usage: view [directory]" >&2
+  exit 2
+fi
+
+app=${VIEW_APP:-$repo/View.app}
+if [ ! -d "$app" ]; then
+  echo "view: missing $app; run ./scripts/build-app.sh" >&2
+  exit 1
+fi
+
+root=${1:-.}
+case $root in
+  "~") root=$HOME ;;
+  "~/"*) root=$HOME/${root#\~/} ;;
+esac
+
+if [ ! -d "$root" ]; then
+  if [ -e "$root" ]; then
+    echo "view: not a directory: $root" >&2
+  else
+    echo "view: no such directory: $root" >&2
+  fi
+  exit 1
+fi
+root=$(cd "$root" && pwd -P)
+
+exec open -n -a "$app" --args "$root"
