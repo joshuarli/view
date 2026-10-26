@@ -26,6 +26,10 @@ public struct PreviewSession: Sendable, Equatable {
     return urls[index]
   }
 
+  public func index(of url: URL) -> Int? {
+    urls.firstIndex(of: url)
+  }
+
   @discardableResult
   public mutating func selectPreviewItem(at index: Int) -> URL? {
     guard let url = previewItem(at: index) else { return nil }

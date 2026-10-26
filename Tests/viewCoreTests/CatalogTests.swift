@@ -65,6 +65,95 @@ struct CatalogTests {
     #expect(catalog.selectedURL == nil)
   }
 
+  @Test func additionalSelectionKeepsTheOriginalAnchor() throws {
+    var catalog = Catalog()
+    let items = [item("first.png"), item("second.png"), item("third.png")]
+    catalog.append(items)
+
+    try catalog.select(items[0].url)
+    try catalog.selectAdditional(items[1].url)
+    try catalog.selectAdditional(items[2].url)
+    try catalog.selectAdditional(items[1].url)
+
+    #expect(catalog.selectedURL == items[0].url)
+    #expect(catalog.selectedURLs == [items[0].url, items[1].url, items[2].url])
+  }
+
+  @Test func rejectsAdditionalSelectionOutsideCatalog() throws {
+    var catalog = Catalog()
+    catalog.append([item("first.png")])
+    try catalog.select(item("first.png").url)
+    let missing = item("missing.png")
+
+    #expect(throws: CatalogError.itemNotFound(missing.url)) {
+      try catalog.selectAdditional(missing.url)
+    }
+    #expect(catalog.selectedURLs == [item("first.png").url])
+  }
+
+  @Test func deselectingTheAnchorPromotesTheNextSelection() throws {
+    var catalog = Catalog()
+    let items = [item("first.png"), item("second.png"), item("third.png")]
+    catalog.append(items)
+    try catalog.select(items[0].url)
+    try catalog.selectAdditional(items[1].url)
+
+    catalog.deselect(items[0].url)
+
+    #expect(catalog.selectedURL == items[1].url)
+    #expect(catalog.selectedURLs == [items[1].url])
+  }
+
+  @Test func removingARangeLeavesTheNeighborSelected() throws {
+    var catalog = Catalog()
+    let items = [item("first.png"), item("second.png"), item("third.png"), item("fourth.png")]
+    catalog.append(items)
+    try catalog.select(items[1].url)
+    try catalog.selectAdditional(items[2].url)
+
+    #expect(catalog.remove(items[1].url) == 1)
+    #expect(catalog.selectedURL == items[2].url)
+
+    #expect(catalog.remove(items[2].url) == 1)
+    #expect(catalog.selectedURL == items[3].url)
+    #expect(catalog.items == [items[0], items[3]])
+  }
+
+  @Test func rangeSelectionKeepsTheAnchorFirst() throws {
+    var catalog = Catalog()
+    let items = [item("first.png"), item("second.png"), item("third.png"), item("fourth.png")]
+    catalog.append(items)
+
+    try catalog.selectRange(anchor: items[1].url, clicked: items[3].url)
+
+    #expect(catalog.selectedURL == items[1].url)
+    #expect(catalog.selectedURLs == [items[1].url, items[2].url, items[3].url])
+  }
+
+  @Test func rangeSelectionExtendsUpwardWithTheAnchorFirst() throws {
+    var catalog = Catalog()
+    let items = [item("first.png"), item("second.png"), item("third.png")]
+    catalog.append(items)
+
+    try catalog.selectRange(anchor: items[2].url, clicked: items[0].url)
+
+    #expect(catalog.selectedURL == items[2].url)
+    #expect(catalog.selectedURLs == [items[2].url, items[0].url, items[1].url])
+  }
+
+  @Test func rangeSelectionOutsideCatalogThrows() {
+    var catalog = Catalog()
+    catalog.append([item("first.png")])
+
+    #expect(throws: CatalogError.itemNotFound(item("missing.png").url)) {
+      try catalog.selectRange(anchor: item("missing.png").url, clicked: item("first.png").url)
+    }
+    #expect(throws: CatalogError.itemNotFound(item("missing.png").url)) {
+      try catalog.selectRange(anchor: item("first.png").url, clicked: item("missing.png").url)
+    }
+    #expect(catalog.selectedURL == nil)
+  }
+
   private func item(_ name: String) -> MediaItem {
     MediaItem(
       url: URL(filePath: "/catalog/\(name)"),

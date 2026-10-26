@@ -76,6 +76,24 @@ struct DiscoveryTests {
     #expect(items.map(\.url.path) == [nested.path, visible.path])
   }
 
+  @Test func hiddenDirectoriesAreNeverTraversed() async throws {
+    let root = try TestDirectory.make()
+    defer { root.remove() }
+    let visible = try createMedia("visible.png", in: root.url)
+    let nested = try createMedia("nested/inside.png", in: root.url)
+    try createMedia(".secret/nested.png", in: root.url)
+    try createMedia("nested/.concealed/deep.png", in: root.url)
+
+    let batches = BatchRecorder()
+    _ = try await DirectoryScanner.scan(
+      root: RootDirectory(url: root.url),
+      batchSink: { await batches.append($0) }
+    )
+
+    let items = await batches.values.flatMap { $0 }
+    #expect(items.map(\.url.path) == [nested.path, visible.path])
+  }
+
   @Test func skipsUnreadableNestedDirectoryAndCountsIt() async throws {
     let root = try TestDirectory.make()
     defer { root.remove() }

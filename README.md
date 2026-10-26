@@ -13,15 +13,16 @@ make release
 | --- | --- |
 | Launch with directory | Recursively discover and display media |
 | Click thumbnail | Select item |
+| Shift+Click | Select a range of items |
 | Arrow keys | Navigate the grid |
 | Space | Toggle native macOS Quick Look |
-| Ctrl+Delete | Move selected file to Trash |
+| Delete or Ctrl+Delete | Move the selection to Trash |
 | Escape | Close Quick Look, when open |
 | Cmd+Q | Quit |
 
 Normal trackpad and mouse scrolling and window resizing work. Quick Look handles image display and video playback, zooming, and adjacent-item navigation. If the directory contains no media, an empty state shows the root path instead of opening Finder.
 
-Without a directory, the launcher opens the current directory. It expects `View.app` in the repository; set `VIEW_APP` to use another app bundle.
+Without a directory, the launcher opens the current directory. It expects `View.app` in the repository; set `VIEW_APP` to use another app bundle. Trashing plays the system trash sound.
 
 ## Non-goals
 

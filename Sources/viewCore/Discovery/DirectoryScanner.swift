@@ -83,7 +83,7 @@ public enum DirectoryScanner {
       stack.append(frame)
       try Task.checkCancellation()
 
-      guard !entry.isSymbolicLink, !entry.isHidden, !entry.isPackage else { continue }
+      guard !entry.isSymbolicLink, !entry.isHidden, !entry.isPackage, !entry.name.hasPrefix(".") else { continue }
 
       if entry.isDirectory {
         do {

@@ -118,8 +118,28 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   }
 
   func previewSelectionDidChange() {
-    guard QLPreviewPanel.sharedPreviewPanelExists() else { return }
-    QLPreviewPanel.shared()?.updateController()
+    guard QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared() else { return }
+    guard !isUpdatingPanel else { return }
+    guard isControllingPanel, isCurrentController(panel) else {
+      panel.updateController()
+      return
+    }
+    guard let selectedURL = grid.catalog.selectedURL else { return }
+    if let index = session.index(of: selectedURL) {
+      guard session.currentIndex != index else { return }
+      _ = session.selectPreviewItem(at: index)
+      isUpdatingPanel = true
+      panel.currentPreviewItemIndex = index
+      isUpdatingPanel = false
+    } else {
+      guard session.begin(with: grid.catalog) else { return }
+      isUpdatingPanel = true
+      panel.reloadData()
+      if let currentIndex = session.currentIndex {
+        panel.currentPreviewItemIndex = currentIndex
+      }
+      isUpdatingPanel = false
+    }
   }
 
   private func catalogItemDidRemove(_ catalog: Catalog) {
@@ -189,7 +209,7 @@ extension PreviewPanelController: @MainActor QLPreviewPanelDelegate {
       togglePreview(event)
       return true
     }
-    if event.keyCode == 51, flags == .control {
+    if event.keyCode == 51, flags.isEmpty || flags == .control {
       trashSelectedItem(event)
       return true
     }

@@ -2,12 +2,13 @@ import Foundation
 
 public struct Catalog: Sendable, Equatable {
   private var storage: [MediaItem] = []
-  private var selection: URL?
+  private var selection: [URL] = []
 
   public init() {}
 
   public var items: [MediaItem] { storage }
-  public var selectedURL: URL? { selection }
+  public var selectedURL: URL? { selection.first }
+  public var selectedURLs: [URL] { selection }
   public var count: Int { storage.count }
   public var isEmpty: Bool { storage.isEmpty }
 
@@ -27,19 +28,47 @@ public struct Catalog: Sendable, Equatable {
     guard storage.contains(where: { $0.url == url }) else {
       throw CatalogError.itemNotFound(url)
     }
-    selection = url
+    selection = [url]
+  }
+
+  public mutating func selectAdditional(_ url: URL) throws {
+    guard storage.contains(where: { $0.url == url }) else {
+      throw CatalogError.itemNotFound(url)
+    }
+    if !selection.contains(url) {
+      selection.append(url)
+    }
+  }
+
+  public mutating func deselect(_ url: URL) {
+    selection.removeAll { $0 == url }
+  }
+
+  public mutating func selectRange(anchor: URL, clicked: URL) throws {
+    guard storage.contains(where: { $0.url == anchor }) else {
+      throw CatalogError.itemNotFound(anchor)
+    }
+    guard let anchorIndex = storage.firstIndex(where: { $0.url == anchor }),
+      let clickedIndex = storage.firstIndex(where: { $0.url == clicked })
+    else {
+      throw CatalogError.itemNotFound(clicked)
+    }
+    let lower = min(anchorIndex, clickedIndex)
+    let upper = max(anchorIndex, clickedIndex)
+    selection = [anchor] + storage[lower...upper].map(\.url).filter { $0 != anchor }
   }
 
   public mutating func clearSelection() {
-    selection = nil
+    selection = []
   }
 
   @discardableResult
   public mutating func remove(_ url: URL) -> Int? {
     guard let index = storage.firstIndex(where: { $0.url == url }) else { return nil }
     storage.remove(at: index)
-    if selection == url {
-      selection = index < storage.count ? storage[index].url : storage.last?.url
+    selection.removeAll { $0 == url }
+    if selection.isEmpty, !storage.isEmpty {
+      selection = [index < storage.count ? storage[index].url : storage[storage.count - 1].url]
     }
     return index
   }

@@ -15,6 +15,16 @@ struct PreviewSessionTests {
     #expect(session.previewItem(at: 1) == url("two.png"))
   }
 
+  @Test func indexLookupFindsItemsByIdentity() throws {
+    let catalog = try catalog(["one.png", "two.png", "three.png"], selectedIndex: 1)
+    var session = PreviewSession()
+    let began = session.begin(with: catalog)
+    #expect(began)
+    #expect(session.index(of: url("two.png")) == 1)
+    #expect(session.index(of: url("one.png")) == 0)
+    #expect(session.index(of: url("missing.png")) == nil)
+  }
+
   @Test func advancingRecordsOnlyAnIndexInsideTheSnapshot() throws {
     let catalog = try catalog(["one.png", "two.png"], selectedIndex: 0)
     var session = PreviewSession()
