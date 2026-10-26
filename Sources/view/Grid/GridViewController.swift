@@ -225,12 +225,22 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     selectionDidChange?()
   }
 
-  func removeCatalogItem(_ url: URL) {
-    guard let removedIndex = catalog.remove(url) else { return }
-    thumbnailCoordinator?.removeItem(at: url)
+  func removeCatalogItems(_ urls: [URL]) {
+    guard !urls.isEmpty else { return }
+    let urlSet = Set(urls)
+    let removedIndexPaths = Set(catalog.items.indices
+      .filter { urlSet.contains(catalog.items[$0].url) }
+      .map { IndexPath(item: $0, section: 0) })
+    guard !removedIndexPaths.isEmpty else { return }
+    for url in urls {
+      thumbnailCoordinator?.removeItem(at: url)
+    }
     prefetchIndexPaths.removeAll(keepingCapacity: false)
     isApplyingCatalogMutation = true
-    collectionView.deleteItems(at: [IndexPath(item: removedIndex, section: 0)])
+    for url in urls {
+      catalog.remove(url)
+    }
+    collectionView.deleteItems(at: removedIndexPaths)
     collectionView.deselectAll(nil)
     let selectedIndexPaths = Set(catalog.selectedURLs.compactMap { selectedURL in
       catalog.items.firstIndex(where: { $0.url == selectedURL })

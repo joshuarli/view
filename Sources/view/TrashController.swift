@@ -19,25 +19,32 @@ final class TrashController {
     task = Task {
       defer { task = nil }
       var firstError: (any Error)?
-      var trashedCount = 0
+      var trashed: [URL] = []
+      trashed.reserveCapacity(urls.count)
+      var cancelled = false
       for url in urls {
         do {
           _ = try await service.move(
             url,
             recycle: { source in try await NSWorkspace.shared.recycle([source]) },
-            removeFromCatalog: { source in grid.removeCatalogItem(source) }
+            removeFromCatalog: { _ in }
           )
-          trashedCount += 1
+          trashed.append(url)
         } catch is CancellationError {
-          return
+          cancelled = true
+          break
         } catch {
           if firstError == nil {
             firstError = error
           }
         }
       }
-      if trashedCount > 0 {
+      if !trashed.isEmpty {
+        grid.removeCatalogItems(trashed)
         TrashSound.play()
+      }
+      if cancelled {
+        return
       }
       if let firstError {
         presentError(firstError)
@@ -65,15 +72,17 @@ private enum TrashSound {
     "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/dock/drag to trash.aif",
   ]
 
-  private static var player: NSSound?
+  private static var cachedSound: NSSound?
 
   static func play() {
-    for path in candidates {
-      guard FileManager.default.fileExists(atPath: path) else { continue }
-      guard let sound = NSSound(contentsOfFile: path, byReference: true) else { continue }
-      player = sound
-      sound.play()
-      return
+    if cachedSound == nil {
+      for path in candidates where FileManager.default.fileExists(atPath: path) {
+        if let sound = NSSound(contentsOfFile: path, byReference: true) {
+          cachedSound = sound
+          break
+        }
+      }
     }
+    cachedSound?.play()
   }
 }

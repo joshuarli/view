@@ -10,6 +10,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   private var isControllingPanel = false
   private var isUpdatingPanel = false
   private var currentIndexObservation: NSKeyValueObservation?
+  private var displayStates: [URL: Any] = [:]
 
   init(root: RootDirectory, metrics: ViewMetrics) {
     let grid = GridViewController(root: root, metrics: metrics)
@@ -50,6 +51,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
 
   nonisolated override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
     MainActor.assumeIsolated {
+      displayStates.removeAll()
       guard session.begin(with: grid.catalog) else {
         panel.orderOut(nil)
         return
@@ -82,6 +84,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
         panel.delegate = nil
       }
       isControllingPanel = false
+      displayStates.removeAll()
       session.end()
     }
   }
@@ -125,12 +128,11 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
       return
     }
     guard let selectedURL = grid.catalog.selectedURL else { return }
+    saveDisplayState(in: panel)
     if let index = session.index(of: selectedURL) {
       guard session.currentIndex != index else { return }
       _ = session.selectPreviewItem(at: index)
-      isUpdatingPanel = true
-      panel.currentPreviewItemIndex = index
-      isUpdatingPanel = false
+      setPanelIndex(index, in: panel)
     } else {
       guard session.begin(with: grid.catalog) else { return }
       isUpdatingPanel = true
@@ -139,6 +141,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
         panel.currentPreviewItemIndex = currentIndex
       }
       isUpdatingPanel = false
+      restoreDisplayState(for: selectedURL, in: panel)
     }
   }
 
@@ -148,6 +151,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
       let panel = QLPreviewPanel.shared(),
       isCurrentController(panel)
     else { return }
+    saveDisplayState(in: panel)
     let previousSession = session
     session.update(with: catalog)
     guard session != previousSession else { return }
@@ -161,27 +165,49 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     if let currentIndex = session.currentIndex {
       panel.currentPreviewItemIndex = currentIndex
       if let url = session.previewItem(at: currentIndex) {
+        restoreDisplayState(for: url, in: panel)
         grid.selectFromPreview(url)
       }
     }
   }
 
   private func synchronizeSelection(from panel: QLPreviewPanel) {
-    guard
-      isControllingPanel,
-      !isUpdatingPanel,
-      let url = session.selectPreviewItem(at: panel.currentPreviewItemIndex)
-    else { return }
+    guard isControllingPanel, !isUpdatingPanel else { return }
+    let incoming = panel.currentPreviewItemIndex
+    saveDisplayState(in: panel)
+    guard let url = session.selectPreviewItem(at: incoming) else { return }
+    restoreDisplayState(for: url, in: panel)
     grid.selectFromPreview(url)
   }
 
   private func stepPreviewPanel(_ panel: QLPreviewPanel, by delta: Int) {
     let next = (session.currentIndex ?? 0) + delta
+    saveDisplayState(in: panel)
     guard let url = session.selectPreviewItem(at: next) else { return }
-    isUpdatingPanel = true
-    panel.currentPreviewItemIndex = next
-    isUpdatingPanel = false
+    setPanelIndex(next, in: panel)
     grid.selectFromPreview(url)
+  }
+
+  private func setPanelIndex(_ index: Int, in panel: QLPreviewPanel) {
+    isUpdatingPanel = true
+    panel.currentPreviewItemIndex = index
+    isUpdatingPanel = false
+    if let url = session.previewItem(at: index) {
+      restoreDisplayState(for: url, in: panel)
+    }
+  }
+
+  private func saveDisplayState(in panel: QLPreviewPanel) {
+    guard let current = session.currentIndex,
+      let url = session.previewItem(at: current),
+      let state = panel.displayState
+    else { return }
+    displayStates[url] = state
+  }
+
+  private func restoreDisplayState(for url: URL, in panel: QLPreviewPanel) {
+    guard let state = displayStates[url] else { return }
+    panel.displayState = state
   }
 
   private func isCurrentController(_ panel: QLPreviewPanel) -> Bool {
