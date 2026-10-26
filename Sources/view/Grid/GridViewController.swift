@@ -221,6 +221,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
     isApplyingCatalogMutation = false
     updateVisibleSelection()
+    scrollSelectionIntoView()
     selectionDidChange?()
   }
 
@@ -242,6 +243,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     syncAnchor()
     updateEmptyState()
     updateVisibleSelection()
+    scrollSelectionIntoView()
     catalogItemDidRemove?(catalog)
     selectionDidChange?()
     updateThumbnailDemand()
@@ -296,6 +298,15 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     anchorIndex = catalog.selectedURL.flatMap { url in
       catalog.items.firstIndex(where: { $0.url == url })
     }
+  }
+
+  private func scrollSelectionIntoView() {
+    guard let selectedURL = catalog.selectedURL,
+      let index = catalog.items.firstIndex(where: { $0.url == selectedURL })
+    else { return }
+    let path = IndexPath(item: index, section: 0)
+    guard !collectionView.indexPathsForVisibleItems().contains(path) else { return }
+    collectionView.scrollToItems(at: [path], scrollPosition: [.centeredVertically])
   }
 
   private func updateVisibleSelection() {
@@ -461,15 +472,20 @@ final class GridCollectionView: NSCollectionView {
   weak var keyHandler: GridViewController?
 
   override func mouseDown(with event: NSEvent) {
+    let location = convert(event.locationInWindow, from: nil)
+    let clicked = indexPathForItem(at: location)?.item
+    if event.clickCount > 1, clicked != nil, let handler = keyHandler {
+      handler.previewHost?.togglePreview(event)
+      return
+    }
     if event.modifierFlags.contains(.shift),
       let handler = keyHandler,
-      let anchor = handler.anchorIndex
+      let anchor = handler.anchorIndex,
+      anchor < handler.catalog.count,
+      let clicked
     {
-      let location = convert(event.locationInWindow, from: nil)
-      if let clicked = indexPathForItem(at: location)?.item {
-        handler.selectRange(from: anchor, to: clicked)
-        return
-      }
+      handler.selectRange(from: anchor, to: clicked)
+      return
     }
     super.mouseDown(with: event)
   }

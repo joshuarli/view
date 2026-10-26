@@ -13,6 +13,7 @@ make release
 | --- | --- |
 | Launch with directory | Recursively discover and display media |
 | Click thumbnail | Select item |
+| Double-click thumbnail | Toggle native macOS Quick Look |
 | Shift+Click | Select a range of items |
 | Arrow keys | Navigate the grid |
 | Space | Toggle native macOS Quick Look |

@@ -175,6 +175,15 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     grid.selectFromPreview(url)
   }
 
+  private func stepPreviewPanel(_ panel: QLPreviewPanel, by delta: Int) {
+    let next = (session.currentIndex ?? 0) + delta
+    guard let url = session.selectPreviewItem(at: next) else { return }
+    isUpdatingPanel = true
+    panel.currentPreviewItemIndex = next
+    isUpdatingPanel = false
+    grid.selectFromPreview(url)
+  }
+
   private func isCurrentController(_ panel: QLPreviewPanel) -> Bool {
     let controller = panel.currentController as AnyObject?
     return controller === self || controller === grid
@@ -203,6 +212,14 @@ extension PreviewPanelController: @MainActor QLPreviewPanelDelegate {
     let flags = event.modifierFlags.intersection([.command, .control, .option])
     if event.keyCode == 53 {
       panel.orderOut(nil)
+      return true
+    }
+    if event.keyCode == 126 {
+      stepPreviewPanel(panel, by: -1)
+      return true
+    }
+    if event.keyCode == 125 {
+      stepPreviewPanel(panel, by: 1)
       return true
     }
     if event.charactersIgnoringModifiers == " ", flags.isEmpty {
