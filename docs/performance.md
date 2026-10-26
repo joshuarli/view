@@ -1,4 +1,17 @@
-# Performance measurements
+# Performance
+
+## Design budgets
+
+- Thumbnail cache: ~96 MiB, memory-only, evicted under pressure.
+- App-issued concurrent thumbnail requests: at most 4 on local volumes, 2 on remote.
+- Blocking image or I/O work on the main actor: zero.
+- Live cells and retained buffers: proportional to the viewport plus one prefetch viewport, not the catalog size.
+- Idle work after scan and prefetch: effectively zero. No redraw loop, no polling timer, no eager decode of every file.
+- Priorities in order: time to first thumbnails, smooth scrolling, minimal disk reads, bounded memory and concurrency, UI responsiveness under load, negligible idle CPU.
+
+Measure window presentation, first discovered batch, first thumbnail, visible-viewport population, scan completion, fast-scroll responsiveness, cache warm versus cold behavior, peak and steady RSS, idle CPU, and concurrent request count. Do not ship a benchmarking UI.
+
+## Measurements
 
 Measured 2026-10-22 on macOS 27.0.1, arm64, Swift 6.4, macOS 27.0 SDK, with 18 CPU cores. The release app ran three times against a 2,000-item, 7.8 MB corpus: 1,000 varied PNGs, 980 PNG copies, and 20 one-second H.264 movies, plus hidden, packaged, linked, text, and audio entries. `perf-gate-ready` returned 0 before and after each run.
 

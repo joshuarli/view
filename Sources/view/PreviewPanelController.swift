@@ -16,8 +16,12 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     self.grid = grid
     trashController = TrashController(grid: grid)
     super.init(nibName: nil, bundle: nil)
+    grid.previewHost = self
     grid.catalogItemDidRemove = { [weak self] catalog in
       self?.catalogItemDidRemove(catalog)
+    }
+    grid.selectionDidChange = { [weak self] in
+      self?.previewSelectionDidChange()
     }
   }
 
@@ -85,10 +89,11 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   @objc func togglePreview(_ sender: Any?) {
     guard grid.catalog.selectedURL != nil, let panel = QLPreviewPanel.shared() else { return }
     if panel.isVisible {
-      guard (panel.currentController as AnyObject?) === self else { return }
+      guard isCurrentController(panel) else { return }
       synchronizeSelection(from: panel)
       panel.orderOut(sender)
     } else {
+      panel.updateController()
       panel.makeKeyAndOrderFront(sender)
     }
   }
@@ -112,11 +117,16 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     return grid.catalog.selectedURL != nil
   }
 
+  func previewSelectionDidChange() {
+    guard QLPreviewPanel.sharedPreviewPanelExists() else { return }
+    QLPreviewPanel.shared()?.updateController()
+  }
+
   private func catalogItemDidRemove(_ catalog: Catalog) {
     guard
       isControllingPanel,
       let panel = QLPreviewPanel.shared(),
-      (panel.currentController as AnyObject?) === self
+      isCurrentController(panel)
     else { return }
     let previousSession = session
     session.update(with: catalog)
@@ -144,6 +154,11 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     else { return }
     grid.selectFromPreview(url)
   }
+
+  private func isCurrentController(_ panel: QLPreviewPanel) -> Bool {
+    let controller = panel.currentController as AnyObject?
+    return controller === self || controller === grid
+  }
 }
 
 extension PreviewPanelController: @MainActor QLPreviewPanelDataSource {
@@ -160,5 +175,24 @@ extension PreviewPanelController: @MainActor QLPreviewPanelDelegate {
   func windowWillClose(_ notification: Notification) {
     guard let panel = notification.object as? QLPreviewPanel else { return }
     synchronizeSelection(from: panel)
+  }
+
+  func previewPanel(_ panel: QLPreviewPanel, handle event: NSEvent) -> Bool {
+    guard isCurrentController(panel) else { return false }
+    guard event.type == .keyDown else { return false }
+    let flags = event.modifierFlags.intersection([.command, .control, .option])
+    if event.keyCode == 53 {
+      panel.orderOut(nil)
+      return true
+    }
+    if event.charactersIgnoringModifiers == " ", flags.isEmpty {
+      togglePreview(event)
+      return true
+    }
+    if event.keyCode == 51, flags == .control {
+      trashSelectedItem(event)
+      return true
+    }
+    return false
   }
 }

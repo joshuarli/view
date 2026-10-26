@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import QuickLookUI
 import viewCore
 
 @MainActor
@@ -8,6 +9,8 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private let metrics: ViewMetrics
   private(set) var catalog = Catalog()
   var catalogItemDidRemove: ((Catalog) -> Void)?
+  var selectionDidChange: (() -> Void)?
+  weak var previewHost: PreviewPanelController?
   private var scanTask: Task<Void, Never>?
   private var thumbnailCoordinator: ThumbnailCoordinator?
   private var prefetchIndexPaths: Set<IndexPath> = []
@@ -16,7 +19,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private var isObservingScrollBounds = false
   private var isApplyingCatalogMutation = false
   private var scrollView: NSScrollView!
-  private(set) var collectionView: NSCollectionView!
+  private(set) var collectionView: GridCollectionView!
   private var emptyStateLabel: NSTextField!
 
   init(root: RootDirectory, metrics: ViewMetrics) {
@@ -41,7 +44,8 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     layout.minimumLineSpacing = 10
     layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
 
-    collectionView = NSCollectionView(frame: .zero)
+    collectionView = GridCollectionView(frame: .zero)
+    collectionView.keyHandler = self
     collectionView.collectionViewLayout = layout
     collectionView.dataSource = self
     collectionView.delegate = self
@@ -124,6 +128,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       preconditionFailure(error.localizedDescription)
     }
     updateVisibleSelection()
+    selectionDidChange?()
   }
 
   func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
@@ -132,6 +137,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       catalog.clearSelection()
     }
     updateVisibleSelection()
+    selectionDidChange?()
   }
 
   func collectionView(_ collectionView: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
@@ -166,6 +172,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     }
     collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
     updateVisibleSelection()
+    selectionDidChange?()
   }
 
   func removeCatalogItem(_ url: URL) {
@@ -184,6 +191,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     updateEmptyState()
     updateVisibleSelection()
     catalogItemDidRemove?(catalog)
+    selectionDidChange?()
     updateThumbnailDemand()
   }
 
@@ -333,8 +341,70 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     alert.beginSheetModal(for: window) { _ in }
   }
 
+  nonisolated override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+    MainActor.assumeIsolated {
+      if let host = previewHost {
+        return host.acceptsPreviewPanelControl(panel)
+      }
+      return catalog.selectedURL != nil
+    }
+  }
+
+  nonisolated override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+    MainActor.assumeIsolated {
+      if let host = previewHost {
+        host.beginPreviewPanelControl(panel)
+      } else {
+        panel.orderOut(nil)
+      }
+    }
+  }
+
+  nonisolated override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+    MainActor.assumeIsolated {
+      previewHost?.endPreviewPanelControl(panel)
+    }
+  }
+
+  override func keyDown(with event: NSEvent) {
+    if handleCollectionKeyDown(event) {
+      return
+    }
+    super.keyDown(with: event)
+  }
+
+  func handleCollectionKeyDown(_ event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection([.command, .control, .option])
+    if event.keyCode == 53 {
+      return true
+    }
+    if event.charactersIgnoringModifiers == " ", flags.isEmpty {
+      guard catalog.selectedURL != nil else { return false }
+      previewHost?.togglePreview(event)
+      return true
+    }
+    if event.keyCode == 51, flags == .control {
+      guard catalog.selectedURL != nil else { return false }
+      previewHost?.trashSelectedItem(event)
+      return true
+    }
+    return false
+  }
+
   private enum ScrollDirection {
     case down
     case up
+  }
+}
+
+@MainActor
+final class GridCollectionView: NSCollectionView {
+  weak var keyHandler: GridViewController?
+
+  override func keyDown(with event: NSEvent) {
+    if let handler = keyHandler, handler.handleCollectionKeyDown(event) {
+      return
+    }
+    super.keyDown(with: event)
   }
 }
