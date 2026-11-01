@@ -15,6 +15,8 @@ Measure window presentation, first discovered batch, first thumbnail, visible-vi
 
 Measured 2026-10-22 on macOS 27.0.1, arm64, Swift 6.4, macOS 27.0 SDK, with 18 CPU cores. The release app ran three times against a 2,000-item, 7.8 MB corpus: 1,000 varied PNGs, 980 PNG copies, and 20 one-second H.264 movies, plus hidden, packaged, linked, text, and audio entries. `perf-gate-ready` returned 0 before and after each run.
 
+These launch numbers come from the original flattened grid, now selected with `--recursive`. Browser mode lists one directory and has not been measured separately.
+
 After a five-second settle, CPU and RSS were sampled ten times over 20 seconds; physical footprint was sampled during each run. Latency values below are the median and range across three launches. This is a recorded baseline, not a comparison or speedup claim.
 
 | Metric | Median | Range |

@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-public enum ThumbnailVolume: Sendable {
+public enum ThumbnailVolume: Sendable, Equatable {
   case local
   case other
 

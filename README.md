@@ -1,39 +1,45 @@
 # view
 
-A native macOS browser for images and videos in a directory. It opens one window with a flattened thumbnail grid of every supported image and video found recursively beneath the supplied root. There is no sidebar, folder tree, library, or chrome.
+A native macOS browser for images and videos. By default it opens one folder at a time: subfolders and supported images and videos in a thumbnail grid, with folders first and files ordered by descending size. Double-click or press Return on a folder to enter it, and Backspace or Cmd+Up to go back up. `--recursive` instead flattens an entire tree into a single grid.
 
 ```sh
 make release
 ./bin/view ~/Pictures
+./bin/view --recursive ~/Pictures
 ```
 
 ## Interaction model
 
 | Interaction | Behavior |
 | --- | --- |
-| Launch with directory | Recursively discover and display media |
+| Launch with directory | Browse that folder's subfolders and media |
+| Double-click or Return on a folder | Enter the folder (browse mode) |
+| Double-click or Return on media | Toggle native macOS Quick Look |
+| Backspace or Cmd+Up | Go to the enclosing folder (browse mode) |
 | Click thumbnail | Select item |
-| Double-click thumbnail | Toggle native macOS Quick Look |
 | Shift+Click | Select a range of items |
 | Arrow keys | Navigate the grid |
+| Cmd+Delete or Ctrl+Delete | Move the selection to Trash |
+| Delete (in `--recursive` mode) | Move the selection to Trash |
 | Space | Toggle native macOS Quick Look |
-| Delete or Ctrl+Delete | Move the selection to Trash |
 | Escape | Close Quick Look, when open |
 | Cmd+Q | Quit |
 
-Normal trackpad and mouse scrolling and window resizing work. Quick Look handles image display and video playback, zooming, and adjacent-item navigation. If the directory contains no media, an empty state shows the root path instead of opening Finder.
+Folders sort first by natural name. Files sort by descending size, with files of unknown size and equal size falling back to natural name order. `--recursive` restores the flattened grid: every image and video beneath the root, in natural relative-path order, where Delete trashes the selection as in earlier versions.
 
-Without a directory, the launcher opens the current directory. It expects `View.app` in the repository; set `VIEW_APP` to use another app bundle. Trashing plays the system trash sound.
+Normal trackpad and mouse scrolling and window resizing work. Quick Look handles image display and video playback, zooming, and adjacent-item navigation. If a folder has no images or videos, an empty state shows the folder path and how to go up. In browse mode, Backspace closes Quick Look while the panel is key.
+
+Without a directory, the launcher opens the current directory. It expects `View.app` in the repository; set `VIEW_APP` to use another app bundle. Trashing plays the system trash sound. `view --help` prints usage.
 
 ## Non-goals
 
-Directory browsing, search, tagging, libraries, editing, custom video playback, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope. The only destructive operation is moving a file to Trash, which follows Finder semantics and is recoverable.
+Search, tagging, libraries, editing, custom video playback, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope. The only destructive operation is moving a file or folder to Trash, which follows Finder semantics and is recoverable.
 
 ## Layout
 
-- `Sources/viewCore`: scanner, catalog, thumbnails, trash, preview session. See [docs/architecture.md](docs/architecture.md).
+- `Sources/viewCore`: directory listing and recursive scanner, catalog, thumbnails, trash, preview session, launch options. See [docs/architecture.md](docs/architecture.md).
 - `Sources/view`: AppKit window, grid, Quick Look panel, coordinators.
-- `Tests/viewCoreTests`: Swift Testing suites for discovery, scheduling, catalog, trash.
+- `Tests/viewCoreTests`: Swift Testing suites for discovery, catalog, launch options, scheduling, trash.
 - `scripts/build-app.sh`: packages `View.app` from a release build. `make release` runs it.
 - `bin/view`: terminal entry point. Resolves the root to an absolute URL and opens the app.
 - `docs/performance.md`: design budgets and measured baselines.

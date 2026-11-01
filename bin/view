@@ -11,8 +11,33 @@ while [ -L "$self" ]; do
 done
 repo=$(cd "$(dirname "$self")/.." && pwd -P)
 
+mode=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    -r|--recursive)
+      mode=--recursive
+      shift
+      ;;
+    -h|--help)
+      echo "usage: view [--recursive] [directory]"
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "view: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 if [ "$#" -gt 1 ]; then
-  echo "usage: view [directory]" >&2
+  echo "usage: view [--recursive] [directory]" >&2
   exit 2
 fi
 
@@ -38,4 +63,7 @@ if [ ! -d "$root" ]; then
 fi
 root=$(cd "$root" && pwd -P)
 
+if [ -n "$mode" ]; then
+  exec open -n -a "$app" --args "$mode" "$root"
+fi
 exec open -n -a "$app" --args "$root"

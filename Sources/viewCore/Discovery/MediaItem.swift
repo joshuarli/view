@@ -1,8 +1,9 @@
 import Foundation
 
-public enum MediaKind: Sendable, Equatable {
+public enum MediaKind: Sendable, Hashable {
   case image
   case movie
+  case directory
 }
 
 public struct MediaItem: Sendable, Equatable, Identifiable {

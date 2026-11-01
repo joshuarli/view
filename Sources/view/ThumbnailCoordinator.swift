@@ -11,6 +11,7 @@ final class ThumbnailCoordinator {
   private let cache = ThumbnailCache()
   private let metrics: ViewMetrics
   private var scheduler: ThumbnailScheduler?
+  private var volume: ThumbnailVolume?
   private var visibleItems: [MediaItem] = []
   private var prefetchItems: [MediaItem] = []
   private var initialViewport: Set<ThumbnailKey>?
@@ -22,8 +23,10 @@ final class ThumbnailCoordinator {
     self.metrics = metrics
   }
 
-  func configure(volume: ThumbnailVolume) {
-    guard scheduler == nil else { preconditionFailure("thumbnail scheduler already configured") }
+  func setVolume(_ volume: ThumbnailVolume) async {
+    guard self.volume != volume || scheduler == nil else { return }
+    await scheduler?.cancelAll()
+    self.volume = volume
     scheduler = ThumbnailScheduler(
       volume: volume,
       cache: cache,
@@ -299,23 +302,26 @@ private actor QuickLookRequestBox {
   private let generator = QLThumbnailGenerator.shared
   private let request: QLThumbnailGenerator.Request
   private let url: URL
+  private let acceptsIconOnly: Bool
   private var isCancelled = false
 
   init(key: ThumbnailKey) {
     let pointSize = CGFloat(key.pixelSize) / key.scale
     url = key.url
+    acceptsIconOnly = key.kind == .directory
     request = QLThumbnailGenerator.Request(
       fileAt: key.url,
       size: NSSize(width: pointSize, height: pointSize),
       scale: key.scale,
-      representationTypes: .thumbnail
+      representationTypes: acceptsIconOnly ? [.thumbnail, .icon] : .thumbnail
     )
-    request.iconMode = false
+    request.iconMode = acceptsIconOnly
   }
 
   func generate() async throws -> CGImage {
     guard !isCancelled else { throw CancellationError() }
     let url = self.url
+    let acceptsIconOnly = self.acceptsIconOnly
     return try await withCheckedThrowingContinuation { continuation in
       generator.generateBestRepresentation(for: request) { representation, error in
         guard let representation else {
@@ -326,7 +332,7 @@ private actor QuickLookRequestBox {
           }
           return
         }
-        guard representation.type != .icon else {
+        guard representation.type != .icon || acceptsIconOnly else {
           continuation.resume(throwing: ThumbnailRequestFailure.iconOnly(url))
           return
         }

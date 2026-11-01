@@ -6,11 +6,16 @@ struct ViewApp {
   private static var delegate: ViewAppDelegate?
 
   static func main() {
-    let metrics = ViewMetrics(enabled: ProcessInfo.processInfo.environment["VIEW_METRICS"] == "1")
-    let root: RootDirectory
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.contains("--help") || arguments.contains("-h") {
+      printUsage()
+      return
+    }
+
+    let options: LaunchOptions
     do {
-      root = try RootDirectory.resolve(
-        argument: CommandLine.arguments.dropFirst().first,
+      options = try LaunchOptions.resolve(
+        arguments: arguments,
         currentDirectory: FileManager.default.currentDirectoryPath
       )
     } catch {
@@ -18,24 +23,33 @@ struct ViewApp {
       exit(1)
     }
 
+    let metrics = ViewMetrics(enabled: ProcessInfo.processInfo.environment["VIEW_METRICS"] == "1")
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
-    let delegate = ViewAppDelegate(root: root, metrics: metrics)
+    let delegate = ViewAppDelegate(root: options.root, mode: options.mode, metrics: metrics)
     Self.delegate = delegate
     app.delegate = delegate
     app.run()
+  }
+
+  private static func printUsage() {
+    print("usage: view [--recursive] [directory]")
+    print("  Browse one directory at a time, largest files first.")
+    print("  --recursive  flatten the whole tree into one grid")
   }
 }
 
 @MainActor
 final class ViewAppDelegate: NSObject, NSApplicationDelegate {
   private let root: RootDirectory
+  private let mode: BrowserMode
   private let metrics: ViewMetrics
   private var window: NSWindow?
   private var shutdownTask: Task<Void, Never>?
 
-  init(root: RootDirectory, metrics: ViewMetrics) {
+  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
     self.root = root
+    self.mode = mode
     self.metrics = metrics
   }
 
@@ -47,7 +61,7 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
       defer: false
     )
     window.title = root.url.lastPathComponent
-    let previewController = PreviewPanelController(root: root, metrics: metrics)
+    let previewController = PreviewPanelController(root: root, mode: mode, metrics: metrics)
     window.contentViewController = previewController
     installMainMenu(previewController: previewController)
     window.setContentSize(NSSize(width: 1100, height: 760))

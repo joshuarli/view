@@ -3,6 +3,8 @@ import Foundation
 public enum LaunchError: Error, Equatable, Sendable {
   case notFound(String)
   case notDirectory(String)
+  case unknownOption(String)
+  case unexpectedArgument(String)
 }
 
 extension LaunchError: LocalizedError {
@@ -10,6 +12,8 @@ extension LaunchError: LocalizedError {
     switch self {
     case .notFound(let path): "no such directory: \(path)"
     case .notDirectory(let path): "not a directory: \(path)"
+    case .unknownOption(let option): "unknown option: \(option)"
+    case .unexpectedArgument(let argument): "unexpected argument: \(argument)"
     }
   }
 }

@@ -6,20 +6,22 @@ import viewCore
 final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   private let grid: GridViewController
   private let trashController: TrashController
+  private let mode: BrowserMode
   private var session = PreviewSession()
   private var isControllingPanel = false
   private var isUpdatingPanel = false
   private var currentIndexObservation: NSKeyValueObservation?
   private var displayStates: [URL: Any] = [:]
 
-  init(root: RootDirectory, metrics: ViewMetrics) {
-    let grid = GridViewController(root: root, metrics: metrics)
+  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
+    let grid = GridViewController(root: root, mode: mode, metrics: metrics)
     self.grid = grid
+    self.mode = mode
     trashController = TrashController(grid: grid)
     super.init(nibName: nil, bundle: nil)
     grid.previewHost = self
-    grid.catalogItemDidRemove = { [weak self] catalog in
-      self?.catalogItemDidRemove(catalog)
+    grid.catalogDidChange = { [weak self] catalog in
+      self?.catalogDidChange(catalog)
     }
     grid.selectionDidChange = { [weak self] in
       self?.previewSelectionDidChange()
@@ -145,7 +147,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     }
   }
 
-  private func catalogItemDidRemove(_ catalog: Catalog) {
+  private func catalogDidChange(_ catalog: Catalog) {
     guard
       isControllingPanel,
       let panel = QLPreviewPanel.shared(),
@@ -252,9 +254,15 @@ extension PreviewPanelController: @MainActor QLPreviewPanelDelegate {
       togglePreview(event)
       return true
     }
-    if event.keyCode == 51, flags.isEmpty || flags == .control {
-      trashSelectedItem(event)
-      return true
+    if event.keyCode == 51 {
+      if mode == .browser, flags.isEmpty {
+        panel.orderOut(nil)
+        return true
+      }
+      if flags.isEmpty || flags == .control || flags == .command {
+        trashSelectedItem(event)
+        return true
+      }
     }
     return false
   }

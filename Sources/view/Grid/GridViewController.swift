@@ -7,14 +7,16 @@ import viewCore
 final class GridViewController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate, NSCollectionViewPrefetching {
   private static let prefetchViewportCount = 2
 
-  private let root: RootDirectory
+  private let mode: BrowserMode
   private let metrics: ViewMetrics
+  private(set) var root: RootDirectory
   private(set) var catalog = Catalog()
-  var catalogItemDidRemove: ((Catalog) -> Void)?
+  var catalogDidChange: ((Catalog) -> Void)?
   var selectionDidChange: (() -> Void)?
   weak var previewHost: PreviewPanelController?
   var anchorIndex: Int?
   private var scanTask: Task<Void, Never>?
+  private var scanGeneration = 0
   private var thumbnailCoordinator: ThumbnailCoordinator?
   private var prefetchIndexPaths: Set<IndexPath> = []
   private var lastScrollOriginY: CGFloat = 0
@@ -25,8 +27,9 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private(set) var collectionView: GridCollectionView!
   private var emptyStateLabel: NSTextField!
 
-  init(root: RootDirectory, metrics: ViewMetrics) {
+  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
     self.root = root
+    self.mode = mode
     self.metrics = metrics
     super.init(nibName: nil, bundle: nil)
   }
@@ -42,7 +45,10 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     rootView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
     let layout = NSCollectionViewFlowLayout()
-    layout.itemSize = NSSize(width: 160, height: 160)
+    layout.itemSize =
+      mode == .browser
+      ? NSSize(width: 160, height: 180)
+      : NSSize(width: 160, height: 160)
     layout.minimumInteritemSpacing = 10
     layout.minimumLineSpacing = 10
     layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
@@ -69,10 +75,11 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     scrollView.contentView.postsBoundsChangedNotifications = true
     scrollView.documentView = collectionView
 
-    emptyStateLabel = NSTextField(labelWithString: root.url.path)
+    emptyStateLabel = NSTextField(labelWithString: emptyStateText)
     emptyStateLabel.textColor = .secondaryLabelColor
     emptyStateLabel.alignment = .center
-    emptyStateLabel.lineBreakMode = .byTruncatingMiddle
+    emptyStateLabel.maximumNumberOfLines = mode == .browser ? 2 : 1
+    emptyStateLabel.lineBreakMode = mode == .browser ? .byTruncatingTail : .byTruncatingMiddle
     emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
 
     rootView.addSubview(scrollView)
@@ -97,6 +104,8 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       thumbnailCoordinator = ThumbnailCoordinator(grid: self, metrics: metrics)
     }
     beginObservingScrollBounds()
+    updateLocationPresentation()
+    _ = view.window?.makeFirstResponder(collectionView)
     guard scanTask == nil else { return }
     startScan()
   }
@@ -118,6 +127,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       preconditionFailure("collection view requested an item outside the catalog")
     }
     let cell = collectionView.makeItem(withIdentifier: ThumbnailCell.reuseIdentifier, for: indexPath) as! ThumbnailCell
+    cell.setCaptionStyle(captionStyle)
     cell.represent(item, isSelected: catalog.selectedURLs.contains(item.url), image: thumbnailCoordinator?.cachedImage(for: item))
     return cell
   }
@@ -209,20 +219,49 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   func selectFromPreview(_ url: URL) {
-    guard let index = catalog.items.firstIndex(where: { $0.url == url }) else { return }
-    do {
-      try catalog.select(url)
-    } catch {
-      preconditionFailure(error.localizedDescription)
+    selectCatalogItem(url)
+  }
+
+  func activateItem(at index: Int) {
+    guard let item = catalog.item(at: index) else { return }
+    if mode == .browser, item.kind == .directory {
+      navigate(to: item.url)
+    } else {
+      previewHost?.togglePreview(nil)
     }
-    anchorIndex = index
+  }
+
+  func navigate(to directory: URL, selecting selection: URL? = nil) {
+    guard mode == .browser else { return }
+    let target = directory.standardizedFileURL
+    guard target.path != root.url.path else { return }
+
+    scanGeneration += 1
+    let previous = scanTask
+    previous?.cancel()
+    scanTask = nil
+    root = RootDirectory(url: target)
+
+    catalog = Catalog()
+    anchorIndex = nil
+    prefetchIndexPaths.removeAll(keepingCapacity: false)
     isApplyingCatalogMutation = true
     collectionView.deselectAll(nil)
-    collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
     isApplyingCatalogMutation = false
-    updateVisibleSelection()
-    scrollSelectionIntoView()
-    selectionDidChange?()
+    collectionView.reloadData()
+    scrollToTop()
+    updateEmptyState()
+    updateLocationPresentation()
+    updateThumbnailDemand()
+    catalogDidChange?(catalog)
+    startScan(selecting: selection, after: previous)
+  }
+
+  func navigateToParent() {
+    guard mode == .browser else { return }
+    let parent = root.url.deletingLastPathComponent().standardizedFileURL
+    guard parent.path != root.url.path else { return }
+    navigate(to: parent, selecting: root.url)
   }
 
   func removeCatalogItems(_ urls: [URL]) {
@@ -254,40 +293,82 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     updateEmptyState()
     updateVisibleSelection()
     scrollSelectionIntoView()
-    catalogItemDidRemove?(catalog)
+    catalogDidChange?(catalog)
     selectionDidChange?()
     updateThumbnailDemand()
   }
 
   func cancelWork() async {
+    scanGeneration += 1
     scanTask?.cancel()
     await scanTask?.value
     await thumbnailCoordinator?.cancelAll()
   }
 
-  private func startScan() {
+  private var captionStyle: ThumbnailCaptionStyle {
+    mode == .browser ? .nameAndSize : .none
+  }
+
+  private var selectedIndex: Int? {
+    guard let selectedURL = catalog.selectedURL else { return nil }
+    return catalog.items.firstIndex(where: { $0.url == selectedURL })
+  }
+
+  private var emptyStateText: String {
+    switch mode {
+    case .browser:
+      "\(root.url.path)\nNo images or videos here. Press ⌫ to go up."
+    case .recursive:
+      root.url.path
+    }
+  }
+
+  private func startScan(selecting selection: URL? = nil, after previous: Task<Void, Never>? = nil) {
+    let generation = scanGeneration
     let root = self.root
-    metrics.scanStarted()
-    scanTask = Task { [weak self, root] in
+    scanTask = Task { [weak self] in
+      await previous?.value
+      guard let self, generation == self.scanGeneration else { return }
+      self.metrics.scanStarted()
       do {
         let volume = try await ThumbnailCoordinator.volume(for: root)
-        guard let self else { return }
-        guard !Task.isCancelled else { throw CancellationError() }
-        self.thumbnailCoordinator?.configure(volume: volume)
-        let summary = try await DirectoryScanner.scan(root: root) { [weak self] batch in
-          await self?.append(batch)
+        guard !Task.isCancelled, generation == self.scanGeneration else {
+          throw CancellationError()
         }
-        self.metrics.scanCompleted(summary)
+        await self.thumbnailCoordinator?.setVolume(volume)
+        guard !Task.isCancelled, generation == self.scanGeneration else {
+          throw CancellationError()
+        }
+        switch self.mode {
+        case .browser:
+          let entries = try await DirectoryLister.list(directory: root.url)
+          guard generation == self.scanGeneration else { return }
+          self.applyListing(entries, selecting: selection)
+          self.metrics.scanCompleted(
+            DirectoryScanSummary(
+              itemCount: entries.count,
+              batchCount: entries.isEmpty ? 0 : 1,
+              skippedDirectoryCount: 0
+            )
+          )
+        case .recursive:
+          let summary = try await DirectoryScanner.scan(root: root) { [weak self] batch in
+            await self?.append(batch, generation: generation)
+          }
+          guard generation == self.scanGeneration else { return }
+          self.metrics.scanCompleted(summary)
+        }
       } catch is CancellationError {
-        self?.metrics.scanFailed()
+        self.metrics.scanFailed()
       } catch {
-        self?.metrics.scanFailed()
-        self?.presentScanError(error)
+        self.metrics.scanFailed()
+        self.presentScanError(error)
       }
     }
   }
 
-  private func append(_ batch: [MediaItem]) {
+  private func append(_ batch: [MediaItem], generation: Int) {
+    guard generation == scanGeneration else { return }
     let insertedIndices = catalog.append(batch)
     guard !insertedIndices.isEmpty else { return }
     let indexPaths = Set(insertedIndices.map { IndexPath(item: $0, section: 0) })
@@ -298,8 +379,48 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     updateThumbnailDemand()
   }
 
+  private func applyListing(_ entries: [MediaItem], selecting selection: URL?) {
+    guard !entries.isEmpty else {
+      updateEmptyState()
+      updateThumbnailDemand()
+      return
+    }
+    catalog.append(entries)
+    collectionView.reloadData()
+    metrics.catalogBatchApplied()
+    updateEmptyState()
+    collectionView.layoutSubtreeIfNeeded()
+    if let selection, catalog.items.contains(where: { $0.url == selection }) {
+      selectCatalogItem(selection)
+    }
+    updateThumbnailDemand()
+  }
+
+  private func selectCatalogItem(_ url: URL) {
+    guard let index = catalog.items.firstIndex(where: { $0.url == url }) else { return }
+    do {
+      try catalog.select(url)
+    } catch {
+      preconditionFailure(error.localizedDescription)
+    }
+    anchorIndex = index
+    isApplyingCatalogMutation = true
+    collectionView.deselectAll(nil)
+    collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
+    isApplyingCatalogMutation = false
+    updateVisibleSelection()
+    scrollSelectionIntoView()
+    selectionDidChange?()
+  }
+
+  private func updateLocationPresentation() {
+    view.window?.title = root.url.lastPathComponent
+    view.window?.representedURL = root.url
+  }
+
   private func updateEmptyState() {
     let isEmpty = catalog.isEmpty
+    emptyStateLabel?.stringValue = emptyStateText
     scrollView?.isHidden = isEmpty
     emptyStateLabel?.isHidden = !isEmpty
   }
@@ -308,6 +429,13 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     anchorIndex = catalog.selectedURL.flatMap { url in
       catalog.items.firstIndex(where: { $0.url == url })
     }
+  }
+
+  private func scrollToTop() {
+    scrollDirection = .down
+    lastScrollOriginY = 0
+    scrollView.contentView.scroll(to: .zero)
+    scrollView.reflectScrolledClipView(scrollView.contentView)
   }
 
   private func scrollSelectionIntoView() {
@@ -368,6 +496,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
         let item = catalog.item(at: indexPath.item),
         let cell = collectionView.item(at: indexPath) as? ThumbnailCell
       else { continue }
+      cell.setCaptionStyle(captionStyle)
       cell.represent(item, isSelected: catalog.selectedURLs.contains(item.url), image: thumbnailCoordinator?.cachedImage(for: item))
     }
     updateThumbnailDemand()
@@ -463,6 +592,25 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       previewHost?.togglePreview(event)
       return true
     }
+    if event.keyCode == 36, flags.isEmpty, let selectedIndex {
+      activateItem(at: selectedIndex)
+      return true
+    }
+    if mode == .browser {
+      if event.keyCode == 51, flags.isEmpty {
+        navigateToParent()
+        return true
+      }
+      if event.keyCode == 126, flags == .command {
+        navigateToParent()
+        return true
+      }
+      if event.keyCode == 51, flags == .command {
+        guard catalog.selectedURL != nil else { return false }
+        previewHost?.trashSelectedItem(event)
+        return true
+      }
+    }
     if event.keyCode == 51, flags.isEmpty || flags == .control {
       guard catalog.selectedURL != nil else { return false }
       previewHost?.trashSelectedItem(event)
@@ -484,8 +632,8 @@ final class GridCollectionView: NSCollectionView {
   override func mouseDown(with event: NSEvent) {
     let location = convert(event.locationInWindow, from: nil)
     let clicked = indexPathForItem(at: location)?.item
-    if event.clickCount > 1, clicked != nil, let handler = keyHandler {
-      handler.previewHost?.togglePreview(event)
+    if event.clickCount > 1, let clicked, let handler = keyHandler {
+      handler.activateItem(at: clicked)
       return
     }
     if event.modifierFlags.contains(.shift),

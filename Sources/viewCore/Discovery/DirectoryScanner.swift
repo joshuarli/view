@@ -5,6 +5,12 @@ public struct DirectoryScanSummary: Sendable, Equatable {
   public let itemCount: Int
   public let batchCount: Int
   public let skippedDirectoryCount: Int
+
+  public init(itemCount: Int, batchCount: Int, skippedDirectoryCount: Int) {
+    self.itemCount = itemCount
+    self.batchCount = batchCount
+    self.skippedDirectoryCount = skippedDirectoryCount
+  }
 }
 
 public enum DirectoryScannerError: Error, Equatable, Sendable {
@@ -28,17 +34,6 @@ extension DirectoryScannerError: LocalizedError {
 
 public enum DirectoryScanner {
   private static let batchSize = 128
-  private static let resourceKeys: Set<URLResourceKey> = [
-    .isDirectoryKey,
-    .isRegularFileKey,
-    .isSymbolicLinkKey,
-    .isPackageKey,
-    .isHiddenKey,
-    .nameKey,
-    .contentTypeKey,
-    .contentModificationDateKey,
-    .fileSizeKey,
-  ]
 
   @concurrent
   public static func scan(
@@ -68,7 +63,10 @@ public enum DirectoryScanner {
     try Task.checkCancellation()
     var stack = [
       DirectoryFrame(
-        entries: try Self.readRootEntries(at: root.url, readResourceValues: readResourceValues),
+        entries: try DirectoryEntryReader.readRoot(
+          at: root.url,
+          readResourceValues: readResourceValues
+        ),
         nextEntry: 0
       ),
     ]
@@ -87,7 +85,10 @@ public enum DirectoryScanner {
 
       if entry.isDirectory {
         do {
-          let children = try Self.readEntries(at: entry.url, readResourceValues: readResourceValues)
+          let children = try DirectoryEntryReader.read(
+            at: entry.url,
+            readResourceValues: readResourceValues
+          )
           stack.append(DirectoryFrame(entries: children, nextEntry: 0))
         } catch is DirectoryReadError {
           skippedDirectoryCount += 1
@@ -135,97 +136,9 @@ public enum DirectoryScanner {
       skippedDirectoryCount: skippedDirectoryCount
     )
   }
-
-  private static func readRootEntries(
-    at url: URL,
-    readResourceValues: @Sendable (URL, Set<URLResourceKey>) throws -> URLResourceValues
-  ) throws -> [DirectoryEntry] {
-    do {
-      return try readEntries(at: url, readResourceValues: readResourceValues)
-    } catch let error as DirectoryReadError {
-      throw DirectoryScannerError.rootUnreadable(path: url.path, reason: error.reason)
-    }
-  }
-
-  private static func readEntries(
-    at url: URL,
-    readResourceValues: @Sendable (URL, Set<URLResourceKey>) throws -> URLResourceValues
-  ) throws -> [DirectoryEntry] {
-    let urls: [URL]
-    do {
-      urls = try FileManager.default.contentsOfDirectory(
-        at: url,
-        includingPropertiesForKeys: Array(resourceKeys)
-      )
-    } catch {
-      throw DirectoryReadError(reason: error.localizedDescription)
-    }
-
-    var entries: [DirectoryEntry] = []
-    entries.reserveCapacity(urls.count)
-    for entryURL in urls {
-      try Task.checkCancellation()
-      let values: URLResourceValues
-      do {
-        values = try readResourceValues(entryURL, resourceKeys)
-      } catch let error as CancellationError {
-        throw error
-      } catch {
-        continue
-      }
-      do {
-        entries.append(try DirectoryEntry(url: entryURL, values: values))
-      } catch is DirectoryScannerError {
-        continue
-      }
-    }
-    entries.sort { PathOrder.comesBefore($0.name, $1.name) }
-    return entries
-  }
 }
 
 private struct DirectoryFrame {
   let entries: [DirectoryEntry]
   var nextEntry: Int
-}
-
-private struct DirectoryEntry {
-  let url: URL
-  let name: String
-  let isDirectory: Bool
-  let isRegularFile: Bool
-  let isSymbolicLink: Bool
-  let isPackage: Bool
-  let isHidden: Bool
-  let contentType: UTType?
-  let modificationDate: Date?
-  let fileSize: Int?
-
-  init(url: URL, values: URLResourceValues) throws {
-    self.url = url
-    name = try Self.required(values.name, key: URLResourceKey.nameKey, url: url)
-    isDirectory = try Self.required(values.isDirectory, key: .isDirectoryKey, url: url)
-    isRegularFile = try Self.required(values.isRegularFile, key: .isRegularFileKey, url: url)
-    isSymbolicLink = try Self.required(values.isSymbolicLink, key: .isSymbolicLinkKey, url: url)
-    isPackage = try Self.required(values.isPackage, key: .isPackageKey, url: url)
-    isHidden = try Self.required(values.isHidden, key: .isHiddenKey, url: url)
-    contentType = values.contentType
-    modificationDate = values.contentModificationDate
-    fileSize = values.fileSize
-  }
-
-  private static func required<Value>(
-    _ value: Value?,
-    key: URLResourceKey,
-    url: URL
-  ) throws -> Value {
-    guard let value else {
-      throw DirectoryScannerError.metadataUnavailable(path: url.path, key: key.rawValue)
-    }
-    return value
-  }
-}
-
-private struct DirectoryReadError: Error {
-  let reason: String
 }
