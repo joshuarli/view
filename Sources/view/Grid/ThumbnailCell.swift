@@ -90,6 +90,7 @@ final class ThumbnailCell: NSCollectionViewItem {
     thumbnailView.image = Self.placeholderImage(for: .image)
     videoBadgeView.isHidden = true
     nameLabel.stringValue = ""
+    nameLabel.font = .systemFont(ofSize: 12)
     detailLabel.stringValue = ""
     catalogSelection = false
     updateSelectionAppearance()
@@ -115,6 +116,7 @@ final class ThumbnailCell: NSCollectionViewItem {
     thumbnailView.image = image.map { NSImage(cgImage: $0, size: .zero) } ?? Self.placeholderImage(for: item.kind)
     videoBadgeView.isHidden = item.kind != .movie
     nameLabel.stringValue = item.url.lastPathComponent
+    nameLabel.font = item.kind == .directory ? .systemFont(ofSize: 12, weight: .medium) : .systemFont(ofSize: 12)
     detailLabel.stringValue = Self.detailText(for: item)
     catalogSelection = isSelected
     updateSelectionAppearance()
