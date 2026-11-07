@@ -31,6 +31,10 @@ final class ThumbnailCell: NSCollectionViewItem {
     thumbnailView.imageScaling = .scaleProportionallyUpOrDown
     thumbnailView.imageAlignment = .alignCenter
     thumbnailView.translatesAutoresizingMaskIntoConstraints = false
+    thumbnailView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    thumbnailView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+    thumbnailView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    thumbnailView.setContentHuggingPriority(.defaultLow, for: .vertical)
 
     videoBadgeView.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?
       .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .regular))
