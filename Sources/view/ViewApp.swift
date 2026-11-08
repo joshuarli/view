@@ -94,14 +94,18 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
 
   private func installSignalHandlers() {
     for code in [SIGINT, SIGTERM] {
-      signal(code, SIG_IGN)
-      let source = DispatchSource.makeSignalSource(signal: code, queue: .main)
-      source.setEventHandler {
-        NSApp.terminate(nil)
-      }
-      source.resume()
-      signalSources.append(source)
+      signalSources.append(Self.makeSignalSource(for: code))
     }
+  }
+
+  nonisolated private static func makeSignalSource(for code: Int32) -> DispatchSourceSignal {
+    signal(code, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: code, queue: DispatchQueue.global())
+    source.setEventHandler {
+      _exit(0)
+    }
+    source.resume()
+    return source
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
