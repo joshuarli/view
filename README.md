@@ -21,6 +21,8 @@ make release
 | Arrow keys | Navigate the grid |
 | Cmd+Delete or Ctrl+Delete | Move the selection to Trash |
 | Delete (in `--recursive` mode) | Move the selection to Trash |
+| Cmd+Z | Undo Move to Trash (restore the files) |
+| Cmd+Shift+Z | Redo Move to Trash (trash them again) |
 | Space | Toggle native macOS Quick Look |
 | Escape | Close Quick Look, when open |
 | Cmd+Q | Quit |

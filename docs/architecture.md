@@ -41,11 +41,12 @@ The app owns no persistent database. Files trashed by the app are removed from t
 - `LaunchOptions.swift`: parses `[--recursive] [directory]` and selects browser mode by default.
 - `Catalog.swift`: flat ordered array plus stable selection by URL. The selection is an anchor-first list: plain clicks replace it, Shift+Click extends the inclusive span from the anchor (last plain click). Append preserves selection; removing the last selected entry picks the neighbor at the removal index, else the final item.
 - `PreviewSession.swift`: stable snapshot of URLs plus the selected index for Quick Look. Survives scan appends and trash removals by identity, never by stale index.
-- `Trash.swift`: `TrashService` guards one in-flight operation per URL and only removes from the catalog after `recycle` confirms.
+- `Trash.swift`: `TrashService` guards one in-flight operation per URL and only removes from the catalog after `recycle` confirms. `restore` moves a trashed file back.
+- `TrashHistory.swift`: undo/redo stacks for trash operations. Each transaction records the items, their trash locations, their catalog positions, and the selection before trashing.
 - `Thumbnails/ThumbnailScheduler.swift`: priority queue with visible first, one viewport of scroll-direction prefetch, deduplication, per-key generations to discard stale completions, and cancellation propagation. Advances on demand completion, never on a timer.
 - `Thumbnails/ThumbnailCache.swift`: `NSCache` with explicit byte-cost accounting and a 96 MiB default limit. Keys include path, kind, pixel size, and scale.
 - `Thumbnails/ThumbnailKey.swift`: request identity.
-- `GridCommand.swift`: Space and Ctrl+Delete shortcuts.
+- `GridCommand.swift`: Space, Ctrl+Delete, and Cmd+Z / Cmd+Shift+Z undo/redo shortcuts.
 
 `view` is `@MainActor` AppKit:
 
@@ -54,7 +55,7 @@ The app owns no persistent database. Files trashed by the app are removed from t
 - `Grid/ThumbnailCell.swift`: reusable item with aspect-fit image, play badge for movies, folder placeholder, selection tint, and name/size captions in browser mode. Never does I/O.
 - `PreviewPanelController.swift`: owns the `PreviewSession` and the `QLPreviewPanel` data source and delegate. Space and double-click toggle via menu and `keyDown`; Up/Down step through items while the panel is key. Caches per-item `displayState` so scrubbing back and revisiting restores instantly. `updateController` refreshes the responder-chain controller on selection change and before showing. `previewPanel(_:handle:)` handles Space, Escape, Backspace, Delete, and Ctrl+Delete while the panel is key. In browser mode Backspace closes the panel and Cmd+Delete trashes; in recursive mode Backspace keeps its original trash behavior. Selection stays consistent in both directions.
 - `ThumbnailCoordinator.swift`: bridges demand to the scheduler at the current backing scale, serves cache hits, requests folder icons through Quick Look's icon representation, and recreates the scheduler when the local/remote volume class changes. Records lightweight `VIEW_METRICS` signposts.
-- `TrashController.swift`: trashes every selected URL in one guarded operation, applies a single batched collection-view removal so a range disappears in one pop, plays the cached system trash sound once on success, and surfaces the first failure as a sheet.
+- `TrashController.swift`: trashes every selected URL in one guarded operation, applies a single batched collection-view removal so a range disappears in one pop, plays the cached system trash sound once on success, surfaces the first failure as a sheet, and records the batch for undo (Cmd+Z) and redo (Cmd+Shift+Z). Undo moves files back and reinserts those still browsed; destination conflicts stay on the undo stack for retry, and permanently missing trashed files are dropped.
 
 ## Concurrency
 
