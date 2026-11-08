@@ -819,10 +819,37 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       let index = catalog.items.firstIndex(where: { $0.url == selectedURL })
     else { return }
     let path = IndexPath(item: index, section: 0)
-    guard !collectionView.indexPathsForVisibleItems().contains(path) else { return }
-    let position: NSCollectionView.ScrollPosition =
-      viewMode == .carousel ? [.centeredHorizontally] : [.centeredVertically]
-    collectionView.scrollToItems(at: [path], scrollPosition: position)
+    collectionView.layoutSubtreeIfNeeded()
+    guard let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { return }
+    let visible = collectionView.visibleRect
+    let current = scrollView.contentView.bounds.origin
+    let epsilon: CGFloat = 0.5
+    switch viewMode {
+    case .carousel:
+      let targetX: CGFloat
+      if frame.minX < visible.minX + epsilon {
+        targetX = frame.minX
+      } else if frame.maxX > visible.maxX - epsilon {
+        targetX = frame.maxX - visible.width
+      } else {
+        return
+      }
+      guard abs(targetX - current.x) > epsilon else { return }
+      scrollView.contentView.scroll(to: NSPoint(x: targetX, y: current.y))
+      scrollView.reflectScrolledClipView(scrollView.contentView)
+    case .grid:
+      let targetY: CGFloat
+      if frame.minY < visible.minY + epsilon {
+        targetY = frame.minY
+      } else if frame.maxY > visible.maxY - epsilon {
+        targetY = frame.maxY - visible.height
+      } else {
+        return
+      }
+      guard abs(targetY - current.y) > epsilon else { return }
+      scrollView.contentView.scroll(to: NSPoint(x: current.x, y: targetY))
+      scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
   }
 
   private func updateVisibleSelection() {

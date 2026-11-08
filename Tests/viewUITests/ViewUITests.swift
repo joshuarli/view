@@ -321,6 +321,40 @@ struct ViewUITests {
   }
 
   @Test
+  func carouselSelectionStaysFullyVisibleWhileStepping() async throws {
+    let files = (1...20).map { (String(format: "img%02d.png", $0), true) }
+    let h = try TestHarness.make(files: files, viewMode: .carousel)
+    #expect(await h.waitForScan(itemCount: 20))
+    let first = try #require(h.grid.catalog.items.first?.url)
+    h.grid.selectFromPreview(first)
+    _ = await UITestSupport.pump(until: { h.grid.catalog.selectedURL == first }, timeout: 2)
+    for _ in 0..<15 {
+      h.window.sendEvent(UITestSupport.keyEvent(keyCode: 124, characters: "", modifiers: []))
+      try? await Task.sleep(nanoseconds: 10_000_000)
+      let idx = try #require(h.grid.catalog.items.firstIndex(where: { $0.url == h.grid.catalog.selectedURL }))
+      let path = IndexPath(item: idx, section: 0)
+      h.grid.collectionView.layoutSubtreeIfNeeded()
+      let frame = try #require(h.grid.collectionView.layoutAttributesForItem(at: path)?.frame)
+      let visibleRect = h.grid.collectionView.visibleRect
+      #expect(frame.minX + 0.5 >= visibleRect.minX)
+      #expect(frame.maxX - 0.5 <= visibleRect.maxX)
+    }
+    // step back left across the same boundary: selection must follow leftwards too
+    for _ in 0..<8 {
+      h.window.sendEvent(UITestSupport.keyEvent(keyCode: 123, characters: "", modifiers: []))
+      try? await Task.sleep(nanoseconds: 10_000_000)
+      let idx = try #require(h.grid.catalog.items.firstIndex(where: { $0.url == h.grid.catalog.selectedURL }))
+      let path = IndexPath(item: idx, section: 0)
+      h.grid.collectionView.layoutSubtreeIfNeeded()
+      let frame = try #require(h.grid.collectionView.layoutAttributesForItem(at: path)?.frame)
+      let visibleRect = h.grid.collectionView.visibleRect
+      #expect(frame.minX + 0.5 >= visibleRect.minX)
+      #expect(frame.maxX - 0.5 <= visibleRect.maxX)
+    }
+    await h.tearDown()
+  }
+
+  @Test
   func modeSwitchKeepsWindowUnconstrained() async throws {
     let h = try TestHarness.make(files: [("a.png", true)], viewMode: .carousel)
     h.show()
