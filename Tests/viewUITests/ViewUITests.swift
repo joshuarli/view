@@ -431,6 +431,46 @@ struct ViewUITests {
   }
 
   @Test
+  func dragWritesSelectedFileURLs() async throws {
+    let h = try TestHarness.make(files: [("a.png", true), ("b.png", true)], viewMode: .grid)
+    #expect(await h.waitForScan(itemCount: 2))
+    let first = try #require(h.grid.catalog.items.first?.url)
+    h.grid.selectFromPreview(first)
+    _ = await UITestSupport.pump(until: { h.grid.catalog.selectedURL == first }, timeout: 2)
+
+    let colView = h.grid.collectionView!
+    let items = colView.collectionView(colView, draggingItemsForItems: [IndexPath(item: 0, section: 0)], at: IndexPath(item: 0, section: 0))
+    #expect(items.count == 1)
+    let dragged = items.first as? NSPasteboardItem
+    #expect(dragged?.string(forType: .fileURL) == first.absoluteString)
+    await h.tearDown()
+  }
+
+  @Test
+  func contextMenuOffersPreviewTrashAndReveal() async throws {
+    let h = try TestHarness.make(files: [("a.png", true)], viewMode: .grid)
+    #expect(await h.waitForScan(itemCount: 1))
+    let menu = h.grid.contextMenu()
+    let titles = menu.items.map(\.title)
+    #expect(titles.contains("Preview"))
+    #expect(titles.contains("Reveal in Finder"))
+    #expect(titles.contains("Move to Trash"))
+    #expect(titles.contains("Undo Move to Trash"))
+    await h.tearDown()
+  }
+
+  @Test
+  func windowTitleShowsFullPath() async throws {
+    let h = try TestHarness.make(files: [], subdirectories: ["sub"])
+    #expect(await h.waitForScan(itemCount: 1))
+    let subIndex = try #require(h.grid.catalog.items.firstIndex(where: { $0.kind == .directory }))
+    h.grid.activateItem(at: subIndex)
+    #expect(await UITestSupport.pump(until: { h.grid.root.url.lastPathComponent == "sub" }, timeout: 8))
+    #expect(h.grid.root.url.path == h.window.title)
+    await h.tearDown()
+  }
+
+  @Test
   func modeSwitchKeepsWindowUnconstrained() async throws {
     let h = try TestHarness.make(files: [("a.png", true)], viewMode: .carousel)
     h.show()

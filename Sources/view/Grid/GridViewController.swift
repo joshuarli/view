@@ -43,6 +43,8 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private var scrollView: NSScrollView!
   private(set) var collectionView: GridCollectionView!
   private var emptyStateLabel: NSTextField!
+  private var loadingIndicator: NSProgressIndicator!
+  private var isLoading = false
 
   init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics, viewMode: ViewMode = .carousel) {
     self.root = root
@@ -88,6 +90,12 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     scrollView.drawsBackground = false
     scrollView.contentView.postsBoundsChangedNotifications = true
     scrollView.documentView = collectionView
+
+    loadingIndicator = NSProgressIndicator()
+    loadingIndicator.style = .spinning
+    loadingIndicator.controlSize = .large
+    loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+    loadingIndicator.isHidden = true
 
     emptyStateLabel = NSTextField(labelWithString: emptyStateText)
     emptyStateLabel.textColor = .secondaryLabelColor
@@ -137,11 +145,14 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     self.carouselContainer = carouselContainer
 
     rootView.addSubview(emptyStateLabel)
+    rootView.addSubview(loadingIndicator)
     NSLayoutConstraint.activate([
       emptyStateLabel.centerXAnchor.constraint(equalTo: rootView.centerXAnchor),
       emptyStateLabel.centerYAnchor.constraint(equalTo: rootView.centerYAnchor),
       emptyStateLabel.leadingAnchor.constraint(greaterThanOrEqualTo: rootView.leadingAnchor, constant: 24),
       emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: rootView.trailingAnchor, constant: -24),
+      loadingIndicator.centerXAnchor.constraint(equalTo: rootView.centerXAnchor),
+      loadingIndicator.centerYAnchor.constraint(equalTo: emptyStateLabel.topAnchor, constant: -24),
     ])
 
     self.view = rootView
@@ -495,17 +506,22 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   private var emptyStateText: String {
+    if isLoading {
+      return "Loading…"
+    }
     switch mode {
     case .browser:
-      "\(root.url.path)\nNo images or videos here. Press ⌫ to go up."
+      return "\(root.url.path)\nNo images or videos here. Press ⌫ to go up."
     case .recursive:
-      root.url.path
+      return root.url.path
     }
   }
 
   private func startScan(selecting selection: URL? = nil, after previous: Task<Void, Never>? = nil) {
     let generation = scanGeneration
     let root = self.root
+    isLoading = true
+    updateEmptyState()
     scanTask = Task { [weak self] in
       await previous?.value
       guard let self, generation == self.scanGeneration else { return }
@@ -536,12 +552,22 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
             await self?.append(batch, generation: generation)
           }
           guard generation == self.scanGeneration else { return }
+          self.isLoading = false
+          self.updateEmptyState()
           self.metrics.scanCompleted(summary)
         }
       } catch is CancellationError {
         self.metrics.scanFailed()
+        if generation == self.scanGeneration {
+          self.isLoading = false
+          self.updateEmptyState()
+        }
       } catch {
         self.metrics.scanFailed()
+        if generation == self.scanGeneration {
+          self.isLoading = false
+          self.updateEmptyState()
+        }
         self.presentScanError(error)
       }
     }
@@ -560,6 +586,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   private func applyListing(_ entries: [MediaItem], selecting selection: URL?) {
+    isLoading = false
     guard !entries.isEmpty else {
       updateEmptyState()
       updateThumbnailDemand()
@@ -828,13 +855,20 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   private func updateLocationPresentation() {
-    view.window?.title = root.url.lastPathComponent
+    view.window?.title = root.url.path
     view.window?.representedURL = root.url
   }
 
   private func updateEmptyState() {
     let isEmpty = catalog.isEmpty
     emptyStateLabel?.stringValue = emptyStateText
+    let showsLoading = isLoading && isEmpty
+    loadingIndicator?.isHidden = !showsLoading
+    if showsLoading {
+      loadingIndicator?.startAnimation(nil)
+    } else {
+      loadingIndicator?.stopAnimation(nil)
+    }
     gridContainer?.isHidden = isEmpty
     carouselContainer?.isHidden = isEmpty
     scrollView?.isHidden = isEmpty
@@ -1136,6 +1170,42 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     return columns >= catalog.count ? 1 : columns
   }
 
+  func selectAtIndex(_ index: Int) {
+    guard let item = catalog.item(at: index) else { return }
+    selectCatalogItem(item.url)
+  }
+
+  @objc func revealInFinder(_ sender: Any?) {
+    let urls = catalog.selectedURLs
+    guard !urls.isEmpty else { return }
+    NSWorkspace.shared.activateFileViewerSelecting(urls)
+  }
+
+  func contextMenu() -> NSMenu {
+    let menu = NSMenu()
+    let previewItem = NSMenuItem(title: "Preview", action: #selector(PreviewPanelController.togglePreview(_:)), keyEquivalent: " ")
+    previewItem.target = previewHost
+    menu.addItem(previewItem)
+    menu.addItem(.separator())
+    let revealItem = NSMenuItem(title: "Reveal in Finder", action: #selector(GridViewController.revealInFinder(_:)), keyEquivalent: "")
+    revealItem.target = self
+    menu.addItem(revealItem)
+    menu.addItem(.separator())
+    let undoItem = NSMenuItem(title: "Undo Move to Trash", action: #selector(PreviewPanelController.undo(_:)), keyEquivalent: "z")
+    undoItem.target = previewHost
+    undoItem.keyEquivalentModifierMask = [.command]
+    menu.addItem(undoItem)
+    let redoItem = NSMenuItem(title: "Redo Move to Trash", action: #selector(PreviewPanelController.redo(_:)), keyEquivalent: "Z")
+    redoItem.target = previewHost
+    redoItem.keyEquivalentModifierMask = [.command, .shift]
+    menu.addItem(redoItem)
+    let trashItem = NSMenuItem(title: "Move to Trash", action: #selector(PreviewPanelController.trashSelectedItem(_:)), keyEquivalent: "\u{8}")
+    trashItem.target = previewHost
+    trashItem.keyEquivalentModifierMask = [.control]
+    menu.addItem(trashItem)
+    return menu
+  }
+
   private enum ScrollDirection {
     case down
     case up
@@ -1170,5 +1240,37 @@ final class GridCollectionView: NSCollectionView {
       return
     }
     super.keyDown(with: event)
+  }
+
+  override func menu(for event: NSEvent) -> NSMenu? {
+    guard let handler = keyHandler else { return nil }
+    let location = convert(event.locationInWindow, from: nil)
+    if let clicked = indexPathForItem(at: location)?.item {
+      handler.selectAtIndex(clicked)
+    }
+    return handler.contextMenu()
+  }
+
+  func draggingSession(_ session: NSDraggingSession, sourceOperationMaskForDraggingContext context: NSDraggingContext) -> NSDragOperation {
+    .copy
+  }
+
+  func collectionView(
+    _ collectionView: NSCollectionView,
+    draggingItemsForItems items: [IndexPath],
+    at indexPath: IndexPath
+  ) -> [NSPasteboardWriting] {
+    guard let handler = keyHandler else { return [] }
+    guard let clicked = handler.catalog.item(at: indexPath.item) else { return [] }
+    let urls: [URL] = handler.catalog.selectedURLs.contains(clicked.url)
+      ? handler.catalog.selectedURLs
+      : [clicked.url]
+    var pasteboardItems: [NSPasteboardItem] = []
+    for url in urls {
+      let pasteboardItem = NSPasteboardItem()
+      pasteboardItem.setString(url.absoluteString, forType: .fileURL)
+      pasteboardItems.append(pasteboardItem)
+    }
+    return pasteboardItems
   }
 }

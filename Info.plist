@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>view</string>
+	<string>View</string>
 	<key>CFBundleDisplayName</key>
-	<string>view</string>
+	<string>View</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.view</string>
 	<key>CFBundleExecutable</key>

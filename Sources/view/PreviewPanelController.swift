@@ -15,7 +15,9 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   private var displayStates: [URL: Any] = [:]
 
   init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
-    let grid = GridViewController(root: root, mode: mode, metrics: metrics, viewMode: .carousel)
+    let savedViewMode = UserDefaults.standard.string(forKey: "View.ViewMode").flatMap { ViewMode(rawValue: $0) } ?? .carousel
+    let grid = GridViewController(root: root, mode: mode, metrics: metrics, viewMode: savedViewMode)
+    self.viewMode = savedViewMode
     self.grid = grid
     self.mode = mode
     trashController = TrashController(grid: grid)
@@ -124,6 +126,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
       return
     }
     viewMode = mode
+    UserDefaults.standard.set(mode.rawValue, forKey: "View.ViewMode")
     grid.setViewMode(mode)
   }
 

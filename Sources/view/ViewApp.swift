@@ -68,16 +68,41 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
       defer: false
     )
     window.isRestorable = false
-    window.title = root.url.lastPathComponent
+    window.title = root.url.path
     let previewController = PreviewPanelController(root: root, mode: mode, metrics: metrics)
     window.contentViewController = previewController
     installMainMenu(previewController: previewController)
     window.setContentSize(NSSize(width: 1100, height: 760))
-    window.center()
+    if let savedFrame = savedFrame {
+      window.setFrame(savedFrame, display: true)
+    } else {
+      window.center()
+    }
     window.makeKeyAndOrderFront(nil)
+    observeWindowFrame(window)
     metrics.windowShown()
     self.window = window
     NSApp.activate()
+  }
+
+  private var savedFrame: NSRect? {
+    guard let data = UserDefaults.standard.data(forKey: "View.WindowFrame") else { return nil }
+    return (try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSValue.self, from: data))?.rectValue
+  }
+
+  private var frameObservers: [NSObjectProtocol] = []
+
+  private func observeWindowFrame(_ window: NSWindow) {
+    let center = NotificationCenter.default
+    for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didEndLiveResizeNotification, NSWindow.didMiniaturizeNotification] {
+      let observer = center.addObserver(forName: name, object: window, queue: nil) { [weak window] _ in
+        guard let window else { return }
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: NSValue(rect: window.frame), requiringSecureCoding: true) {
+          UserDefaults.standard.set(data, forKey: "View.WindowFrame")
+        }
+      }
+      frameObservers.append(observer)
+    }
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
