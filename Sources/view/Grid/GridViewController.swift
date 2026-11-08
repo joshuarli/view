@@ -751,6 +751,11 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       carouselPreviewGeneration &+= 1
       carouselPreviewImageView?.image = nil
     }
+    restoreKeyResponder()
+  }
+
+  private func restoreKeyResponder() {
+    _ = view.window?.makeFirstResponder(collectionView)
   }
 
   private func syncAnchor() {

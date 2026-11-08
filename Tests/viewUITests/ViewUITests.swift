@@ -231,6 +231,25 @@ struct ViewUITests {
   }
 
   @Test
+  func shiftNavigationKeepsKeyboardFocus() async throws {
+    let h = try TestHarness.make(files: [], subdirectories: ["sub"])
+    _ = try UITestSupport.writePNG(named: "a.png", in: h.directory.url.appending(path: "sub"))
+
+    #expect(await h.waitForScan(itemCount: 1))
+    let subIndex = try #require(h.grid.catalog.items.firstIndex(where: { $0.kind == .directory }))
+    h.grid.activateItem(at: subIndex)
+    #expect(await UITestSupport.pump(until: { h.grid.root.url.lastPathComponent == "sub" && h.grid.catalog.selectedURL?.lastPathComponent == "a.png" }, timeout: 8))
+    #expect(h.window.firstResponder === h.grid.collectionView)
+
+    h.window.sendEvent(UITestSupport.keyEvent(keyCode: 123, characters: "", modifiers: [.shift]))
+    #expect(await UITestSupport.pump(until: { h.grid.root.url == h.directory.url }, timeout: 8))
+
+    h.window.sendEvent(UITestSupport.keyEvent(keyCode: 124, characters: "", modifiers: [.shift]))
+    #expect(await UITestSupport.pump(until: { h.grid.root.url.lastPathComponent == "sub" }, timeout: 8))
+    await h.tearDown()
+  }
+
+  @Test
   func arrowWraparound() async throws {
     let h = try TestHarness.make(files: [("a.png", true), ("b.png", true)], viewMode: .grid)
 
