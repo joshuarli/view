@@ -11,7 +11,8 @@ let package = Package(
   name: "view",
   platforms: [.macOS("27.0")],
   products: [
-    .executable(name: "view", targets: ["view"])
+    .executable(name: "view", targets: ["view"]),
+    .executable(name: "ViewBenchmarks", targets: ["ViewBenchmarks"])
   ],
   targets: [
     .target(
@@ -29,6 +30,12 @@ let package = Package(
         .defaultIsolation(MainActor.self),
         .unsafeFlags(["-warnings-as-errors"]),
       ]
+    ),
+    .executableTarget(
+      name: "ViewBenchmarks",
+      dependencies: ["viewCore"],
+      path: "Sources/ViewBenchmarks",
+      swiftSettings: swift6Settings
     ),
     .executableTarget(
       name: "view",

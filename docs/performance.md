@@ -61,3 +61,26 @@ The time ranges overlap. The scanner change shows no measurable performance diff
 The run did not measure window launch, thumbnail generation, forward or reverse scrolling, cache reuse, Quick Look during discovery, or memory growth during scrolling. Those UI measurements remain open.
 
 The release `view` executable grew from 621,200 bytes at `f544159` to 652,600 bytes after these changes. The repository has no executable-size limit.
+
+## Workflow benchmarks
+
+`ViewBenchmarks` (Sources/ViewBenchmarks) measures user-facing waits against realistic corpora instead of micro-loops. It runs in release mode and emits JSON lines (median, p95, min/max, RSS before/after/delta per workflow):
+
+```sh
+swift run -c release ViewBenchmarks -- \
+  --browser-corpus .work/corpus-2k --recursive-corpus .work/corpus-20k --samples 5
+```
+
+Workflows: `browser-list` (list one directory + materialise the catalog), `catalog-interact` (5000-item select/range/remove/insert), `recursive-scan` (full discovery with batch sink), `scroll-prefetch` (sliding 24-visible + 48-prefetch viewport over the corpus scheduler), and `thumb-decode` (CGImageSource decode of 100 varied PNGs). Do not ship a benchmarking UI; fixture generation stays outside the timed regions.
+
+Measured 2026-11-08 on arm64, macOS 27, release build, five samples per workflow. Browser listing used the first 100-item group folder of a 2,000-item corpus; recursive/scroll/decode used a fresh 20,000-item PNG corpus generated offline (mixed 400×300 / 300×400 / 500×500 / 1200×120 fills).
+
+| Workflow | Scale | Median | p95 | RSS delta |
+| --- | ---: | ---: | ---: | ---: |
+| Browser list | 100-item directory | 5.5 ms | 10.9 ms | +6.2 MiB |
+| Catalog interact | 5,000 items | 13.8 ms | 15.2 ms | +2.4 MiB |
+| Recursive scan | 20,000 items | 1,372 ms | 1,385 ms | +32.3 MiB |
+| Scroll/prefetch | 2,000-key sliding window | 206 ms | 208 ms | +4.5 MiB |
+| Thumbnail decode | 100 PNGs | 9.3 ms | 12.4 ms | +0.2 MiB |
+
+These are recorded workflow baselines, not comparison claims. The recursive scan is the outlier worth watching: it sits above the 1,000 ms launch budget for 2,000 items and grows with corpus size, so fast-scroll and per-batch collection-view updates need their own measurements before claiming a speedup. Steady-state RSS stayed near 50 MiB in this run; peak footprint and idle CPU still need the launches above for a full picture.
