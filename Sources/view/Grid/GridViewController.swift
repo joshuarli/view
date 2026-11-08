@@ -356,23 +356,31 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     startScan(selecting: selection, after: previous)
   }
 
-  func navigateToParent() {
-    guard mode == .browser else { return }
+  @discardableResult
+  func navigateToParent() -> Bool {
+    guard mode == .browser else { return false }
     let parent = root.url.deletingLastPathComponent().standardizedFileURL
-    guard parent.path != root.url.path else { return }
+    guard parent.path != root.url.path else { return false }
     navigate(to: parent, selecting: root.url)
+    return true
   }
 
-  func navigateBack() {
-    guard mode == .browser, let target = backStack.popLast() else { return }
+  @discardableResult
+  func navigateBack() -> Bool {
+    guard mode == .browser, let target = backStack.last, target.url.path != root.url.path else { return false }
+    backStack.removeLast()
     forwardStack.append(HistoryEntry(url: root.url, selectedURL: catalog.selectedURL))
     navigate(to: target.url, selecting: target.selectedURL, pushingHistory: false)
+    return true
   }
 
-  func navigateForward() {
-    guard mode == .browser, let target = forwardStack.popLast() else { return }
+  @discardableResult
+  func navigateForward() -> Bool {
+    guard mode == .browser, let target = forwardStack.last, target.url.path != root.url.path else { return false }
+    forwardStack.removeLast()
     backStack.append(HistoryEntry(url: root.url, selectedURL: catalog.selectedURL))
     navigate(to: target.url, selecting: target.selectedURL, pushingHistory: false)
+    return true
   }
 
   func removeCatalogItems(_ urls: [URL]) {
@@ -960,7 +968,11 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   func handleCollectionKeyDown(_ event: NSEvent) -> Bool {
     let flags = event.modifierFlags.intersection([.command, .control, .option])
     if event.keyCode == 53 {
-      return true
+      if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
+        QLPreviewPanel.shared().orderOut(nil)
+        return true
+      }
+      return false
     }
     if event.charactersIgnoringModifiers == " ", flags.isEmpty {
       guard catalog.selectedURL != nil else { return false }
@@ -973,36 +985,28 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     }
     if mode == .browser {
       if event.keyCode == 123, flags == .control {
-        navigateBack()
-        return true
+        return navigateBack()
       }
       if event.keyCode == 124, flags == .control {
-        navigateForward()
-        return true
+        return navigateForward()
       }
       if event.keyCode == 123, flags.isEmpty, event.modifierFlags.contains(.shift) {
-        navigateBack()
-        return true
+        return navigateBack()
       }
       if event.keyCode == 124, flags.isEmpty, event.modifierFlags.contains(.shift) {
-        navigateForward()
-        return true
+        return navigateForward()
       }
       if event.keyCode == 33, flags == .command {
-        navigateBack()
-        return true
+        return navigateBack()
       }
       if event.keyCode == 30, flags == .command {
-        navigateForward()
-        return true
+        return navigateForward()
       }
       if event.keyCode == 51, flags.isEmpty {
-        navigateToParent()
-        return true
+        return navigateToParent()
       }
       if event.keyCode == 126, flags == .command {
-        navigateToParent()
-        return true
+        return navigateToParent()
       }
       if event.keyCode == 51, flags == .command {
         guard catalog.selectedURL != nil else { return false }

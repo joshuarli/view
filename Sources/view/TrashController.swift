@@ -19,6 +19,7 @@ final class TrashController {
     task = Task {
       defer { task = nil }
       var firstError: (any Error)?
+      var failed: [URL] = []
       var trashed: [URL] = []
       trashed.reserveCapacity(urls.count)
       var cancelled = false
@@ -37,6 +38,7 @@ final class TrashController {
           if firstError == nil {
             firstError = error
           }
+          failed.append(url)
         }
       }
       if !trashed.isEmpty {
@@ -46,8 +48,8 @@ final class TrashController {
       if cancelled {
         return
       }
-      if let firstError {
-        presentError(firstError)
+      if let firstError, !failed.isEmpty {
+        presentError(firstError, trashed: trashed.count, total: trashed.count + failed.count, failed: failed)
       }
     }
   }
@@ -56,13 +58,24 @@ final class TrashController {
     await task?.value
   }
 
-  private func presentError(_ error: any Error) {
-    let alert = NSAlert(error: error)
+  private func presentError(_ error: any Error, trashed: Int, total: Int, failed: [URL]) {
+    let alert = NSAlert()
+    alert.messageText = total > 1 ? "Couldn’t move some items to Trash" : "Couldn’t move item to Trash"
+    alert.informativeText =
+      "\(Self.summary(trashed: trashed, total: total, failed: failed)) \(error.localizedDescription)"
     guard let window = grid.view.window else {
       NSApp.presentError(error)
       return
     }
     alert.beginSheetModal(for: window) { _ in }
+  }
+
+  static func summary(trashed: Int, total: Int, failed: [URL]) -> String {
+    var text = "\(trashed) of \(total) item\(total == 1 ? "" : "s") moved to Trash."
+    if let first = failed.first {
+      text += " First item that could not be moved: \(first.lastPathComponent)."
+    }
+    return text
   }
 }
 
