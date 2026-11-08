@@ -15,7 +15,7 @@ private final class ThumbnailCellView: NSView {
     super.updateTrackingAreas()
     let area = NSTrackingArea(
       rect: bounds,
-      options: [.mouseEnteredAndExited, .inVisibleRect],
+      options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
       owner: self,
       userInfo: nil
     )
