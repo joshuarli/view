@@ -269,6 +269,82 @@ struct ViewUITests {
   }
 
   @Test
+  func undoRedoRoundTripsTrashedFile() async throws {
+    let h = try TestHarness.make(files: [("a.png", true), ("b.png", true)], viewMode: .grid)
+    #expect(await h.waitForScan(itemCount: 2))
+    let aURL = try #require(h.grid.catalog.items.first(where: { $0.url.lastPathComponent == "a.png" })?.url)
+    h.grid.selectFromPreview(aURL)
+    _ = await UITestSupport.pump(until: { h.grid.catalog.selectedURL == aURL }, timeout: 2)
+
+    let trashBin = h.directory.url.deletingLastPathComponent()
+      .appending(path: "trash-bin-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: trashBin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: trashBin) }
+    let controller = TrashController(grid: h.grid) { source in
+      let dest = trashBin.appending(path: source.lastPathComponent)
+      try FileManager.default.moveItem(at: source, to: dest)
+      return [source: dest]
+    }
+
+    controller.trashSelectedItem()
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.count == 1 }, timeout: 3))
+    await controller.waitForPendingOperation()
+    #expect(FileManager.default.fileExists(atPath: trashBin.appending(path: "a.png").path))
+    #expect(FileManager.default.fileExists(atPath: aURL.path) == false)
+    #expect(controller.canUndo)
+    #expect(controller.canRedo == false)
+
+    controller.undo()
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.count == 2 && FileManager.default.fileExists(atPath: aURL.path) }, timeout: 3))
+    await controller.waitForPendingOperation()
+    #expect(h.grid.catalog.items.map(\.url.lastPathComponent) == ["a.png", "b.png"])
+    #expect(h.grid.catalog.selectedURL == aURL)
+    #expect(controller.canRedo)
+    #expect(controller.canUndo == false)
+
+    controller.redo()
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.count == 1 && !FileManager.default.fileExists(atPath: aURL.path) }, timeout: 3))
+    await controller.waitForPendingOperation()
+    #expect(controller.canUndo)
+    #expect(controller.canRedo == false)
+    await h.tearDown()
+  }
+
+  @Test
+  func undoFailsWhenDestinationAppears() async throws {
+    let h = try TestHarness.make(files: [("a.png", true)], viewMode: .grid)
+    #expect(await h.waitForScan(itemCount: 1))
+    let aURL = try #require(h.grid.catalog.items.first?.url)
+    h.grid.selectFromPreview(aURL)
+    _ = await UITestSupport.pump(until: { h.grid.catalog.selectedURL == aURL }, timeout: 2)
+    let trashBin = h.directory.url.deletingLastPathComponent()
+      .appending(path: "trash-bin-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: trashBin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: trashBin) }
+    let controller = TrashController(grid: h.grid) { source in
+      let dest = trashBin.appending(path: source.lastPathComponent)
+      try FileManager.default.moveItem(at: source, to: dest)
+      return [source: dest]
+    }
+    controller.trashSelectedItem()
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.isEmpty }, timeout: 3))
+    await controller.waitForPendingOperation()
+    // Claim the original path again so restore must fail and stay undoable.
+    try Data("blocker".utf8).write(to: aURL)
+    controller.undo()
+    await controller.waitForPendingOperation()
+    // Still trashed copy present, undo entry retained, catalog still empty.
+    #expect(FileManager.default.fileExists(atPath: trashBin.appending(path: "a.png").path))
+    #expect(controller.canUndo)
+    #expect(controller.canRedo == false)
+    try? FileManager.default.removeItem(at: aURL)
+    controller.undo()
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.count == 1 && FileManager.default.fileExists(atPath: aURL.path) }, timeout: 3))
+    await controller.waitForPendingOperation()
+    await h.tearDown()
+  }
+
+  @Test
   func arrowWraparound() async throws {
     let h = try TestHarness.make(files: [("a.png", true), ("b.png", true)], viewMode: .grid)
 

@@ -422,7 +422,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     let applicable = files.filter {
       switch mode {
       case .browser:
-        return $0.item.url.deletingLastPathComponent().standardizedFileURL == root.url.standardizedFileURL
+        return ($0.item.url.path as NSString).deletingLastPathComponent == root.url.path
       case .recursive:
         let rootPath = root.url.path.hasSuffix("/") ? root.url.path : root.url.path + "/"
         return $0.item.url.path.hasPrefix(rootPath) || $0.item.url.path == root.url.path
