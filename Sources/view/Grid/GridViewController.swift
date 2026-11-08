@@ -418,6 +418,67 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     updateThumbnailDemand()
   }
 
+  func restoreCatalogItems(_ files: [TrashedFile]) {
+    let applicable = files.filter {
+      switch mode {
+      case .browser:
+        return $0.item.url.deletingLastPathComponent().standardizedFileURL == root.url.standardizedFileURL
+      case .recursive:
+        let rootPath = root.url.path.hasSuffix("/") ? root.url.path : root.url.path + "/"
+        return $0.item.url.path.hasPrefix(rootPath) || $0.item.url.path == root.url.path
+      }
+    }
+    guard !applicable.isEmpty else { return }
+    let ordered = applicable.sorted { $0.index > $1.index }
+    var insertedURLs: [URL] = []
+    isApplyingCatalogMutation = true
+    for file in ordered {
+      guard !catalog.items.contains(where: { $0.url == file.item.url }) else { continue }
+      catalog.insert(file.item, at: file.index)
+      insertedURLs.append(file.item.url)
+    }
+    let inserted = Set(catalog.items.indices
+      .filter { insertedURLs.contains(catalog.items[$0].url) }
+      .map { IndexPath(item: $0, section: 0) })
+    if !inserted.isEmpty {
+      collectionView.insertItems(at: inserted)
+    }
+    isApplyingCatalogMutation = false
+    syncAnchor()
+    updateEmptyState()
+    updateVisibleSelection()
+    updateCarouselPreview()
+    scrollSelectionIntoView()
+    catalogDidChange?(catalog)
+    selectionDidChange?()
+    updateThumbnailDemand()
+  }
+
+  func restoreSelection(_ urls: [URL]) {
+    let present = urls.filter { url in catalog.items.contains(where: { $0.url == url }) }
+    guard !present.isEmpty else { return }
+    do {
+      try catalog.select(present[0])
+      for url in present.dropFirst() {
+        try catalog.selectAdditional(url)
+      }
+    } catch {
+      preconditionFailure(error.localizedDescription)
+    }
+    let indexPaths = Set(present.compactMap { url in
+      catalog.items.firstIndex(where: { $0.url == url }).map { IndexPath(item: $0, section: 0) }
+    })
+    isApplyingCatalogMutation = true
+    collectionView.deselectAll(nil)
+    collectionView.selectItems(at: indexPaths, scrollPosition: [])
+    isApplyingCatalogMutation = false
+    syncAnchor()
+    updateVisibleSelection()
+    updateCarouselPreview()
+    scrollSelectionIntoView()
+    selectionDidChange?()
+  }
+
   func cancelWork() async {
     scanGeneration += 1
     scanTask?.cancel()
