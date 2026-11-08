@@ -311,6 +311,16 @@ struct ViewUITests {
   }
 
   @Test
+  func corruptThumbnailShowsFailurePlaceholder() async throws {
+    let h = try TestHarness.make(files: [("fake.png", false)], viewMode: .grid)
+    #expect(await h.waitForScan(itemCount: 1))
+    let url = try #require(h.grid.catalog.items.first?.url)
+    let failed = await UITestSupport.pump(until: { h.grid.isShowingThumbnailFailureForTesting(url: url) }, timeout: 8)
+    #expect(failed)
+    await h.tearDown()
+  }
+
+  @Test
   func modeSwitchKeepsWindowUnconstrained() async throws {
     let h = try TestHarness.make(files: [("a.png", true)], viewMode: .carousel)
     h.show()

@@ -97,6 +97,7 @@ final class ThumbnailCell: NSCollectionViewItem {
     nameLabel.font = .systemFont(ofSize: 12)
     detailLabel.stringValue = ""
     catalogSelection = false
+    isShowingThumbnailFailure = false
     updateSelectionAppearance()
   }
 
@@ -115,9 +116,17 @@ final class ThumbnailCell: NSCollectionViewItem {
     }
   }
 
-  func represent(_ item: MediaItem, isSelected: Bool, image: CGImage?) {
+  func represent(_ item: MediaItem, isSelected: Bool, image: CGImage?, isThumbnailFailed: Bool = false) {
     representedURL = item.url
-    thumbnailView.image = image.map { NSImage(cgImage: $0, size: .zero) } ?? Self.placeholderImage(for: item.kind)
+    if let image {
+      thumbnailView.image = NSImage(cgImage: image, size: .zero)
+      isShowingThumbnailFailure = false
+    } else if isThumbnailFailed, image == nil {
+      showThumbnailFailure()
+    } else {
+      thumbnailView.image = Self.placeholderImage(for: item.kind)
+      isShowingThumbnailFailure = false
+    }
     videoBadgeView.isHidden = item.kind != .movie
     nameLabel.stringValue = item.url.lastPathComponent
     nameLabel.font = item.kind == .directory ? .systemFont(ofSize: 12, weight: .medium) : .systemFont(ofSize: 12)
@@ -133,7 +142,16 @@ final class ThumbnailCell: NSCollectionViewItem {
 
   func display(_ image: CGImage) {
     thumbnailView.image = NSImage(cgImage: image, size: .zero)
+    isShowingThumbnailFailure = false
   }
+
+  func showThumbnailFailure() {
+    guard !isShowingThumbnailFailure else { return }
+    thumbnailView.image = Self.failureImage()
+    isShowingThumbnailFailure = true
+  }
+
+  private(set) var isShowingThumbnailFailure = false
 
   private func updateSelectionAppearance() {
     view.wantsLayer = true
@@ -161,6 +179,11 @@ final class ThumbnailCell: NSCollectionViewItem {
   private static func placeholderImage(for kind: MediaKind) -> NSImage? {
     let symbolName = kind == .directory ? "folder" : "photo"
     return NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+      .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 40, weight: .regular))
+  }
+
+  private static func failureImage() -> NSImage? {
+    NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)?
       .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 40, weight: .regular))
   }
 }

@@ -17,6 +17,7 @@ final class ThumbnailCoordinator {
   private var initialViewport: Set<ThumbnailKey>?
   private var settledInitialViewport: Set<ThumbnailKey> = []
   private var hasRecordedInitialViewport = false
+  private var failedURLs: Set<URL> = []
 
   init(grid: GridViewController, metrics: ViewMetrics) {
     self.grid = grid
@@ -26,6 +27,7 @@ final class ThumbnailCoordinator {
   func setVolume(_ volume: ThumbnailVolume) async {
     guard self.volume != volume || scheduler == nil else { return }
     await scheduler?.cancelAll()
+    failedURLs.removeAll()
     self.volume = volume
     scheduler = ThumbnailScheduler(
       volume: volume,
@@ -73,7 +75,12 @@ final class ThumbnailCoordinator {
   private var backingScale: CGFloat { grid?.view.window?.backingScaleFactor ?? 1 }
 
   func removeItem(at url: URL) {
+    failedURLs.remove(url)
     scheduler?.removeItem(at: url)
+  }
+
+  func isThumbnailFailed(for item: MediaItem) -> Bool {
+    failedURLs.contains(item.url)
   }
 
   func cancelAll() async {
@@ -104,10 +111,16 @@ final class ThumbnailCoordinator {
   private func receive(key: ThumbnailKey, generation _: UInt64, result: ThumbnailResult) {
     switch result {
     case .image(let image):
+      failedURLs.remove(key.url)
       if key.scale == backingScale, grid?.displayThumbnail(image, for: key.url) == true {
         metrics.firstThumbnailDisplayed()
       }
-    case .failure, .cancelled:
+    case .failure:
+      failedURLs.insert(key.url)
+      if key.scale == backingScale {
+        grid?.displayThumbnailFailure(for: key.url)
+      }
+    case .cancelled:
       break
     }
 
