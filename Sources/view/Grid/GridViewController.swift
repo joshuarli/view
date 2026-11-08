@@ -797,27 +797,12 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private static func loadPreviewImage(for item: MediaItem, scale: CGFloat) async -> NSImage? {
     switch item.kind {
     case .image, .movie:
-      let pointSize: CGFloat = 1200
-      let request = QLThumbnailGenerator.Request(
-        fileAt: item.url,
-        size: NSSize(width: pointSize, height: pointSize),
-        scale: scale,
-        representationTypes: .thumbnail
-      )
-      return await withCheckedContinuation { continuation in
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
-          if let cg = representation?.cgImage {
-            continuation.resume(
-              returning: NSImage(
-                cgImage: cg,
-                size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale)
-              )
-            )
-          } else {
-            continuation.resume(returning: nil)
-          }
+      for pointSize: CGFloat in [1200, 800, 480, 320] {
+        if let image = await loadThumbnailImage(for: item.url, pointSize: pointSize, scale: scale) {
+          return image
         }
       }
+      return nil
     case .directory:
       let pointSize: CGFloat = 256
       let request = QLThumbnailGenerator.Request(
@@ -834,6 +819,29 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
           } else {
             continuation.resume(returning: nil)
           }
+        }
+      }
+    }
+  }
+
+  private static func loadThumbnailImage(for url: URL, pointSize: CGFloat, scale: CGFloat) async -> NSImage? {
+    let request = QLThumbnailGenerator.Request(
+      fileAt: url,
+      size: NSSize(width: pointSize, height: pointSize),
+      scale: scale,
+      representationTypes: .thumbnail
+    )
+    return await withCheckedContinuation { continuation in
+      QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+        if let cg = representation?.cgImage {
+          continuation.resume(
+            returning: NSImage(
+              cgImage: cg,
+              size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale)
+            )
+          )
+        } else {
+          continuation.resume(returning: nil)
         }
       }
     }
