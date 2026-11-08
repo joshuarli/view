@@ -8,11 +8,35 @@ enum ThumbnailCaptionStyle {
 }
 
 @MainActor
+private final class ThumbnailCellView: NSView {
+  var hoverHandler: ((Bool) -> Void)?
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    let area = NSTrackingArea(
+      rect: bounds,
+      options: [.mouseEnteredAndExited, .inVisibleRect],
+      owner: self,
+      userInfo: nil
+    )
+    addTrackingArea(area)
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    hoverHandler?(true)
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    hoverHandler?(false)
+  }
+}
+
+@MainActor
 final class ThumbnailCell: NSCollectionViewItem {
   static let reuseIdentifier = NSUserInterfaceItemIdentifier("ThumbnailCell")
 
   private let thumbnailView = NSImageView()
-  private let videoBadgeView = NSImageView()
+  private let loadingIndicator = NSProgressIndicator()
   private let nameLabel = NSTextField(labelWithString: "")
   private let detailLabel = NSTextField(labelWithString: "")
   private var thumbnailToCaptions: NSLayoutConstraint!
@@ -22,7 +46,11 @@ final class ThumbnailCell: NSCollectionViewItem {
   private var catalogSelection = false
 
   override func loadView() {
-    let cellView = NSView()
+    let cellView = ThumbnailCellView()
+    cellView.hoverHandler = { [weak self] hovered in
+      self?.isHovered = hovered
+      self?.updateSelectionAppearance()
+    }
     cellView.wantsLayer = true
     cellView.layer?.cornerRadius = 10
     cellView.layer?.masksToBounds = true
@@ -36,12 +64,10 @@ final class ThumbnailCell: NSCollectionViewItem {
     thumbnailView.setContentHuggingPriority(.defaultLow, for: .horizontal)
     thumbnailView.setContentHuggingPriority(.defaultLow, for: .vertical)
 
-    videoBadgeView.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?
-      .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .regular))
-    videoBadgeView.contentTintColor = .secondaryLabelColor
-    videoBadgeView.imageScaling = .scaleProportionallyUpOrDown
-    videoBadgeView.translatesAutoresizingMaskIntoConstraints = false
-    videoBadgeView.isHidden = true
+    loadingIndicator.style = .spinning
+    loadingIndicator.controlSize = .small
+    loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+    loadingIndicator.isHidden = true
 
     nameLabel.font = .systemFont(ofSize: 12)
     nameLabel.textColor = .labelColor
@@ -61,7 +87,7 @@ final class ThumbnailCell: NSCollectionViewItem {
     detailLabel.isHidden = true
 
     cellView.addSubview(thumbnailView)
-    cellView.addSubview(videoBadgeView)
+    cellView.addSubview(loadingIndicator)
     cellView.addSubview(nameLabel)
     cellView.addSubview(detailLabel)
 
@@ -77,10 +103,8 @@ final class ThumbnailCell: NSCollectionViewItem {
       detailLabel.leadingAnchor.constraint(equalTo: cellView.leadingAnchor, constant: 6),
       detailLabel.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -6),
       detailLabel.bottomAnchor.constraint(equalTo: cellView.bottomAnchor, constant: -4),
-      videoBadgeView.trailingAnchor.constraint(equalTo: cellView.trailingAnchor, constant: -10),
-      videoBadgeView.bottomAnchor.constraint(equalTo: cellView.bottomAnchor, constant: -10),
-      videoBadgeView.widthAnchor.constraint(equalToConstant: 11),
-      videoBadgeView.heightAnchor.constraint(equalToConstant: 11),
+      loadingIndicator.centerXAnchor.constraint(equalTo: thumbnailView.centerXAnchor),
+      loadingIndicator.centerYAnchor.constraint(equalTo: thumbnailView.centerYAnchor),
     ])
     thumbnailToBottom.isActive = true
 
@@ -92,7 +116,7 @@ final class ThumbnailCell: NSCollectionViewItem {
     super.prepareForReuse()
     representedURL = nil
     thumbnailView.image = Self.placeholderImage(for: .image)
-    videoBadgeView.isHidden = true
+    setLoading(false)
     nameLabel.stringValue = ""
     nameLabel.font = .systemFont(ofSize: 12)
     detailLabel.stringValue = ""
@@ -121,13 +145,14 @@ final class ThumbnailCell: NSCollectionViewItem {
     if let image {
       thumbnailView.image = NSImage(cgImage: image, size: .zero)
       isShowingThumbnailFailure = false
+      setLoading(false)
     } else if isThumbnailFailed, image == nil {
       showThumbnailFailure()
     } else {
       thumbnailView.image = Self.placeholderImage(for: item.kind)
       isShowingThumbnailFailure = false
+      setLoading(true)
     }
-    videoBadgeView.isHidden = item.kind != .movie
     nameLabel.stringValue = item.url.lastPathComponent
     nameLabel.font = item.kind == .directory ? .systemFont(ofSize: 12, weight: .medium) : .systemFont(ofSize: 12)
     detailLabel.stringValue = Self.detailText(for: item)
@@ -143,12 +168,23 @@ final class ThumbnailCell: NSCollectionViewItem {
   func display(_ image: CGImage) {
     thumbnailView.image = NSImage(cgImage: image, size: .zero)
     isShowingThumbnailFailure = false
+    setLoading(false)
   }
 
   func showThumbnailFailure() {
     guard !isShowingThumbnailFailure else { return }
     thumbnailView.image = Self.failureImage()
     isShowingThumbnailFailure = true
+    setLoading(false)
+  }
+
+  private func setLoading(_ loading: Bool) {
+    loadingIndicator.isHidden = !loading
+    if loading {
+      loadingIndicator.startAnimation(nil)
+    } else {
+      loadingIndicator.stopAnimation(nil)
+    }
   }
 
   private(set) var isShowingThumbnailFailure = false
@@ -156,9 +192,17 @@ final class ThumbnailCell: NSCollectionViewItem {
   private func updateSelectionAppearance() {
     view.wantsLayer = true
     view.layer?.backgroundColor = catalogSelection
-      ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.35).cgColor
-      : NSColor.clear.cgColor
+      ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.6).cgColor
+      : halfSelectedColor.cgColor
+    view.layer?.borderColor = NSColor.selectedContentBackgroundColor.cgColor
+    view.layer?.borderWidth = catalogSelection ? 2 : 0
   }
+
+  private var halfSelectedColor: NSColor {
+    isHovered ? NSColor.labelColor.withAlphaComponent(0.12) : NSColor.clear
+  }
+
+  private var isHovered = false
 
   private static func detailText(for item: MediaItem) -> String {
     switch item.kind {

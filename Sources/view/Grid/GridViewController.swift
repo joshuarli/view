@@ -36,7 +36,6 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private var rootContainer: NSView?
   private var carouselPreviewRegion: NSView?
   private var carouselPreviewImageView: NSImageView?
-  private var carouselPreviewBadgeView: NSImageView?
   private var carouselPreviewAspectConstraint: NSLayoutConstraint?
   private var carouselPreviewGeneration: UInt64 = 0
   private var carouselContainer: NSView?
@@ -128,22 +127,6 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     ])
     carouselPreviewAspectConstraint = aspect
     carouselPreviewImageView = previewImage
-
-    let previewBadge = NSImageView()
-    previewBadge.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?
-      .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular))
-    previewBadge.contentTintColor = .secondaryLabelColor
-    previewBadge.imageScaling = .scaleProportionallyUpOrDown
-    previewBadge.translatesAutoresizingMaskIntoConstraints = false
-    previewBadge.isHidden = true
-    previewRegion.addSubview(previewBadge)
-    NSLayoutConstraint.activate([
-      previewBadge.trailingAnchor.constraint(equalTo: previewRegion.trailingAnchor, constant: -12),
-      previewBadge.bottomAnchor.constraint(equalTo: previewRegion.bottomAnchor, constant: -12),
-      previewBadge.widthAnchor.constraint(equalToConstant: 16),
-      previewBadge.heightAnchor.constraint(equalToConstant: 16),
-    ])
-    carouselPreviewBadgeView = previewBadge
 
     let gridContainer = NSView()
     gridContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -487,7 +470,6 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   var carouselPreviewImageForTesting: NSImage? { carouselPreviewImageView?.image }
-  var carouselPreviewBadgeHiddenForTesting: Bool? { carouselPreviewBadgeView?.isHidden }
   var canNavigateBackForTesting: Bool { !backStack.isEmpty }
   var canNavigateForwardForTesting: Bool { !forwardStack.isEmpty }
   var columnCountForTesting: Int { columnCount() }
@@ -758,11 +740,9 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       let item = catalog.items.first(where: { $0.url == selectedURL })
     else {
       carouselPreviewImageView?.image = nil
-      carouselPreviewBadgeView?.isHidden = true
       setPreviewAspectRatio(1)
       return
     }
-    carouselPreviewBadgeView?.isHidden = item.kind != .movie
     carouselPreviewImageView?.imageScaling =
       item.kind == .directory ? .scaleProportionallyDown : .scaleProportionallyUpOrDown
     let scale = view.window?.backingScaleFactor ?? 2
