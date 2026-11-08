@@ -386,6 +386,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   var carouselPreviewImageForTesting: NSImage? { carouselPreviewImageView?.image }
   var canNavigateBackForTesting: Bool { !backStack.isEmpty }
   var canNavigateForwardForTesting: Bool { !forwardStack.isEmpty }
+  var columnCountForTesting: Int { columnCount() }
 
   private var captionStyle: ThumbnailCaptionStyle {
     mode == .browser ? .nameAndSize : .none
@@ -962,12 +963,17 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       return true
     }
     if flags.isEmpty, catalog.count > 0 {
+      let columns = columnCount()
       let delta: Int?
       switch event.keyCode {
-      case 123, 126:
+      case 123:
         delta = -1
-      case 124, 125:
+      case 124:
         delta = 1
+      case 126:
+        delta = -columns
+      case 125:
+        delta = columns
       default:
         delta = nil
       }
@@ -975,7 +981,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
         let current = catalog.selectedURL.flatMap { url in catalog.items.firstIndex(where: { $0.url == url }) }
         let next: Int
         if let current {
-          next = (current + delta + catalog.count) % catalog.count
+          next = ((current + delta) % catalog.count + catalog.count) % catalog.count
         } else {
           next = delta > 0 ? 0 : catalog.count - 1
         }
@@ -984,6 +990,17 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       }
     }
     return false
+  }
+
+  private func columnCount() -> Int {
+    guard viewMode == .grid else { return 1 }
+    guard let layout = collectionView.collectionViewLayout as? NSCollectionViewFlowLayout else { return 1 }
+    let spacing = layout.minimumInteritemSpacing
+    let itemStride = layout.itemSize.width + spacing
+    guard itemStride > 0 else { return 1 }
+    let available = collectionView.bounds.width - layout.sectionInset.left - layout.sectionInset.right + spacing
+    let columns = max(1, Int(available / itemStride))
+    return columns >= catalog.count ? 1 : columns
   }
 
   private enum ScrollDirection {

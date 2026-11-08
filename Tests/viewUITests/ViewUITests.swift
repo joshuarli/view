@@ -289,6 +289,28 @@ struct ViewUITests {
   }
 
   @Test
+  func gridUpDownStepByRow() async throws {
+    let files = (0..<12).map { ("f\($0).png", true) }
+    let h = try TestHarness.make(files: files, viewMode: .grid)
+    #expect(await h.waitForScan(itemCount: 12))
+    let first = try #require(h.grid.catalog.items.first?.url)
+    h.grid.selectFromPreview(first)
+    _ = await UITestSupport.pump(until: { h.grid.catalog.selectedURL == first }, timeout: 2)
+    h.grid.collectionView.layoutSubtreeIfNeeded()
+    let columns = h.grid.columnCountForTesting
+    #expect(columns > 1)
+
+    let down = UITestSupport.keyEvent(keyCode: 125, characters: "", modifiers: [])
+    #expect(h.grid.handleCollectionKeyDown(down))
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.selectedURL == h.grid.catalog.items[columns].url }, timeout: 2))
+
+    let up = UITestSupport.keyEvent(keyCode: 126, characters: "", modifiers: [])
+    #expect(h.grid.handleCollectionKeyDown(up))
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.selectedURL == h.grid.catalog.items[0].url }, timeout: 2))
+    await h.tearDown()
+  }
+
+  @Test
   func modeSwitchKeepsWindowUnconstrained() async throws {
     let h = try TestHarness.make(files: [("a.png", true)], viewMode: .carousel)
     h.show()
