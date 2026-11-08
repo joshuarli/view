@@ -186,6 +186,10 @@ func warm(_ count: Int, operation: (Int) async throws -> Void) async {
   }
 }
 
+#if DEBUG
+FileHandle.standardError.write(Data("warning: benchmarks should run in release mode: swift run -c release ViewBenchmarks\n".utf8))
+#endif
+
 let benchStart = ContinuousClock.now
 
 if let browser = resolve(browserCorpus) {

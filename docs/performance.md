@@ -64,12 +64,14 @@ The release `view` executable grew from 621,200 bytes at `f544159` to 652,600 by
 
 ## Workflow benchmarks
 
-`ViewBenchmarks` (Sources/ViewBenchmarks) measures user-facing waits against realistic corpora instead of micro-loops. It runs in release mode and emits JSON lines (median, p95, min/max, RSS before/after/delta per workflow):
+`ViewBenchmarks` (Sources/ViewBenchmarks) measures user-facing waits against realistic corpora instead of micro-loops. The release build is required — optimized code only, as `swift test` builds debug code and measures differently. Run it through `make bench` (always release) or explicitly:
 
 ```sh
 swift run -c release ViewBenchmarks -- \
   --browser-corpus .work/corpus-2k --recursive-corpus .work/corpus-20k --samples 5
 ```
+
+It prints JSON lines (median, p95, min/max, RSS before/after/delta per workflow) to stdout; building in debug prints a warning to stderr but still runs.
 
 Workflows: `browser-list` (list one directory + materialise the catalog), `catalog-interact` (5000-item select/range/remove/insert), `recursive-scan` (full discovery with batch sink), `scroll-prefetch` (sliding 24-visible + 48-prefetch viewport over the corpus scheduler), and `thumb-decode` (CGImageSource decode of 100 varied PNGs). Do not ship a benchmarking UI; fixture generation stays outside the timed regions.
 
