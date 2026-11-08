@@ -250,6 +250,25 @@ struct ViewUITests {
   }
 
   @Test
+  func plainArrowsAfterEnteringDirectory() async throws {
+    let h = try TestHarness.make(files: [], subdirectories: ["sub"])
+    _ = try UITestSupport.writePNG(named: "a.png", in: h.directory.url.appending(path: "sub"))
+    _ = try UITestSupport.writePNG(named: "b.png", in: h.directory.url.appending(path: "sub"))
+
+    #expect(await h.waitForScan(itemCount: 1))
+    let subIndex = try #require(h.grid.catalog.items.firstIndex(where: { $0.kind == .directory }))
+    h.grid.activateItem(at: subIndex)
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.count == 2 && h.grid.catalog.selectedURL?.lastPathComponent == "a.png" }, timeout: 8))
+    #expect(h.window.firstResponder === h.grid.collectionView)
+
+    let before = h.grid.catalog.selectedURL
+    h.window.sendEvent(UITestSupport.keyEvent(keyCode: 124, characters: "", modifiers: []))
+    #expect(await UITestSupport.pump(until: { h.grid.catalog.selectedURL != before }, timeout: 3))
+    #expect(h.grid.catalog.selectedURL?.lastPathComponent == "b.png")
+    await h.tearDown()
+  }
+
+  @Test
   func arrowWraparound() async throws {
     let h = try TestHarness.make(files: [("a.png", true), ("b.png", true)], viewMode: .grid)
 
