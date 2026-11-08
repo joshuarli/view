@@ -475,12 +475,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     if let selection, catalog.items.contains(where: { $0.url == selection }) {
       selectCatalogItem(selection)
     } else if viewMode == .carousel, let first = catalog.items.first {
-      DispatchQueue.main.async { [weak self] in
-        guard let self, self.viewMode == .carousel, self.catalog.items.first?.url == first.url else {
-          return
-        }
-        self.selectCatalogItem(first.url)
-      }
+      selectCatalogItem(first.url)
     }
     updateThumbnailDemand()
   }
@@ -650,8 +645,6 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       setPreviewAspectRatio(1)
       return
     }
-    carouselPreviewImageView?.image = nil
-    setPreviewAspectRatio(1)
     carouselPreviewImageView?.imageScaling =
       item.kind == .directory ? .scaleProportionallyDown : .scaleProportionallyUpOrDown
     let scale = view.window?.backingScaleFactor ?? 2
@@ -685,14 +678,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
 
   private static func loadPreviewImage(for item: MediaItem, scale: CGFloat) async -> NSImage? {
     switch item.kind {
-    case .image:
-      return await withCheckedContinuation { continuation in
-        DispatchQueue.global(qos: .userInitiated).async {
-          let image = NSImage(contentsOf: item.url)
-          continuation.resume(returning: image)
-        }
-      }
-    case .movie:
+    case .image, .movie:
       let pointSize: CGFloat = 1200
       let request = QLThumbnailGenerator.Request(
         fileAt: item.url,
