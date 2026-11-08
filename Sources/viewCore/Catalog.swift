@@ -63,6 +63,13 @@ public struct Catalog: Sendable, Equatable {
   }
 
   @discardableResult
+  public mutating func insert(_ item: MediaItem, at index: Int) -> Int {
+    let clamped = min(max(index, 0), storage.count)
+    storage.insert(item, at: clamped)
+    return clamped
+  }
+
+  @discardableResult
   public mutating func remove(_ url: URL) -> Int? {
     guard let index = storage.firstIndex(where: { $0.url == url }) else { return nil }
     storage.remove(at: index)

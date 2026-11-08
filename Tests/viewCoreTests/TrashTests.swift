@@ -25,7 +25,7 @@ struct TrashTests {
     await recycle.complete(source, with: [source: url("one-trashed.png")])
     let result = try await attempt.value
 
-    #expect(result == .removed)
+    #expect(result == .removed(trashedURL: url("one-trashed.png")))
     #expect(catalog.count == 1)
     #expect(catalog.selectedURL == url("two.png"))
   }
@@ -91,7 +91,7 @@ struct TrashTests {
     let result = try await attempt.value
 
     #expect(duplicate == .alreadyInProgress)
-    #expect(result == .removed)
+    #expect(result == .removed(trashedURL: url("one-trashed.png")))
     #expect(catalog.isEmpty)
   }
 
@@ -111,8 +111,8 @@ struct TrashTests {
       removeFromCatalog: { _ = catalog.remove($0) }
     )
 
-    #expect(first == .removed)
-    #expect(second == .removed)
+    #expect(first == .removed(trashedURL: url("trashed-two.png")))
+    #expect(second == .removed(trashedURL: url("trashed-three.png")))
     #expect(catalog.count == 1)
     #expect(catalog.selectedURL == url("one.png"))
   }
@@ -127,7 +127,7 @@ struct TrashTests {
       removeFromCatalog: { _ = catalog.remove($0) }
     )
 
-    #expect(result == .removed)
+    #expect(result == .removed(trashedURL: url("one-trashed.png")))
     #expect(catalog.isEmpty)
     #expect(catalog.selectedURL == nil)
   }
@@ -153,8 +153,61 @@ struct TrashTests {
       removeFromCatalog: { moved in _ = catalog.remove(moved) }
     )
 
-    #expect(result == .removed)
+    #expect(result == .removed(trashedURL: url("trashed-\(filename)")))
     #expect(catalog.isEmpty)
+  }
+
+  @Test func restoreMovesTrashedFileBack() async throws {
+    let service = TrashService()
+    var restored: (URL, URL)?
+    try await service.restore(
+      trashed: url("one-trashed.png"),
+      to: url("one.png"),
+      move: { trashed, original in restored = (trashed, original) }
+    )
+    #expect(restored?.0 == url("one-trashed.png"))
+    #expect(restored?.1 == url("one.png"))
+  }
+
+  @Test func restorePropagatesDestinationConflict() async throws {
+    let service = TrashService()
+    do {
+      try await service.restore(
+        trashed: url("one-trashed.png"),
+        to: url("one.png"),
+        move: { _, original in throw TrashError.destinationExists(original) }
+      )
+      Issue.record("Expected destination-exists failure")
+    } catch {
+      #expect(error as? TrashError == .destinationExists(url("one.png")))
+    }
+  }
+
+  @Test func duplicateRestoreIsRefusedWhileInFlight() async throws {
+    let service = TrashService()
+    let source = url("one.png")
+    let trashed = url("one-trashed.png")
+    let harness = RestoreHarness()
+    let attempt = Task {
+      try await service.restore(
+        trashed: trashed,
+        to: source,
+        move: { t, o in try await harness.move(t, to: o) }
+      )
+    }
+    await harness.waitUntilStarted()
+    do {
+      try await service.restore(
+        trashed: trashed,
+        to: source,
+        move: { _, _ in Issue.record("Duplicate restore must not run") }
+      )
+      Issue.record("Expected duplicate-restore refusal")
+    } catch {
+      #expect(error as? TrashError == .alreadyInProgress(source))
+    }
+    await harness.complete()
+    try await attempt.value
   }
 
   private func catalog(_ names: [String], selectedIndex: Int) throws -> Catalog {
@@ -201,5 +254,31 @@ private actor RecycleHarness {
 
   func complete(_ url: URL, with mapping: [URL: URL]) {
     continuations.removeValue(forKey: url)?.resume(returning: mapping)
+  }
+}
+
+private actor RestoreHarness {
+  private var continuation: CheckedContinuation<Void, any Error>?
+  private var started = false
+  private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+  func move(_ trashed: URL, to original: URL) async throws {
+    try await withCheckedThrowingContinuation { cont in
+      continuation = cont
+      started = true
+      let waiters = startWaiters
+      startWaiters.removeAll()
+      waiters.forEach { $0.resume() }
+    }
+  }
+
+  func waitUntilStarted() async {
+    guard !started else { return }
+    await withCheckedContinuation { startWaiters.append($0) }
+  }
+
+  func complete() {
+    continuation?.resume(returning: ())
+    continuation = nil
   }
 }

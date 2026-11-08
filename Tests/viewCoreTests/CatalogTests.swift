@@ -20,6 +20,29 @@ struct CatalogTests {
     #expect(catalog.selectedURL == second.url)
   }
 
+  @Test func insertingRestoresOrderAndKeepsSelection() throws {
+    var catalog = Catalog()
+    let first = item("first.png")
+    let third = item("third.png")
+    catalog.append([first, third])
+    try catalog.select(third.url)
+
+    let second = item("second.png")
+    #expect(catalog.insert(second, at: 1) == 1)
+    #expect(catalog.items == [first, second, third])
+    #expect(catalog.selectedURL == third.url)
+  }
+
+  @Test func insertingClampsToBounds() {
+    var catalog = Catalog()
+    let first = item("first.png")
+    catalog.append([first])
+
+    #expect(catalog.insert(item("before.png"), at: -10) == 0)
+    #expect(catalog.insert(item("after.png"), at: 100) == 2)
+    #expect(catalog.items.map(\.url.lastPathComponent) == ["before.png", "first.png", "after.png"])
+  }
+
   @Test func removingSelectedItemChoosesTheNextThenPreviousItem() throws {
     var catalog = Catalog()
     let items = [item("first.png"), item("second.png"), item("third.png")]
