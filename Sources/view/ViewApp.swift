@@ -1,11 +1,10 @@
 import AppKit
 import viewCore
 
-@main
-struct ViewApp {
+public enum ViewApp {
   private static var delegate: ViewAppDelegate?
 
-  static func main() {
+  public static func main() {
     let arguments = Array(CommandLine.arguments.dropFirst())
     if arguments.contains("--help") || arguments.contains("-h") {
       printUsage()
@@ -46,6 +45,7 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
   private let metrics: ViewMetrics
   private var window: NSWindow?
   private var shutdownTask: Task<Void, Never>?
+  private var signalSources: [DispatchSourceSignal] = []
 
   init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
     self.root = root
@@ -53,13 +53,21 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
     self.metrics = metrics
   }
 
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
+    ProcessInfo.processInfo.disableAutomaticTermination("view")
+    ProcessInfo.processInfo.disableSuddenTermination()
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
+    installSignalHandlers()
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
       styleMask: [.titled, .closable, .miniaturizable, .resizable],
       backing: .buffered,
       defer: false
     )
+    window.isRestorable = false
     window.title = root.url.lastPathComponent
     let previewController = PreviewPanelController(root: root, mode: mode, metrics: metrics)
     window.contentViewController = previewController
@@ -70,6 +78,30 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
     metrics.windowShown()
     self.window = window
     NSApp.activate()
+  }
+
+  func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+    true
+  }
+
+  func application(_ application: NSApplication, shouldRestoreSecureApplicationState coder: NSCoder) -> Bool {
+    false
+  }
+
+  func application(_ application: NSApplication, shouldSaveSecureApplicationState coder: NSCoder) -> Bool {
+    false
+  }
+
+  private func installSignalHandlers() {
+    for code in [SIGINT, SIGTERM] {
+      signal(code, SIG_IGN)
+      let source = DispatchSource.makeSignalSource(signal: code, queue: .main)
+      source.setEventHandler {
+        NSApp.terminate(nil)
+      }
+      source.resume()
+      signalSources.append(source)
+    }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -106,6 +138,18 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
       action: #selector(PreviewPanelController.togglePreview(_:)),
       target: previewController
     ))
+    viewMenu.addItem(.separator())
+    for mode in ViewMode.allCases {
+      let item = NSMenuItem(
+        title: mode.title,
+        action: #selector(PreviewPanelController.setViewMode(_:)),
+        keyEquivalent: ""
+      )
+      item.target = previewController
+      item.representedObject = mode.rawValue
+      viewMenu.addItem(item)
+    }
+    viewMenu.addItem(.separator())
     viewMenu.addItem(menuItem(
       command: .trashSelectedItem,
       title: "Move to Trash",

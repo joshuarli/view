@@ -4,9 +4,10 @@ import viewCore
 
 @MainActor
 final class PreviewPanelController: NSViewController, NSMenuItemValidation {
-  private let grid: GridViewController
+  let grid: GridViewController
   private let trashController: TrashController
   private let mode: BrowserMode
+  private var viewMode: ViewMode = .carousel
   private var session = PreviewSession()
   private var isControllingPanel = false
   private var isUpdatingPanel = false
@@ -14,7 +15,7 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
   private var displayStates: [URL: Any] = [:]
 
   init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
-    let grid = GridViewController(root: root, mode: mode, metrics: metrics)
+    let grid = GridViewController(root: root, mode: mode, metrics: metrics, viewMode: .carousel)
     self.grid = grid
     self.mode = mode
     trashController = TrashController(grid: grid)
@@ -110,12 +111,39 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     trashController.trashSelectedItem()
   }
 
+  @objc func setViewMode(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let mode = ViewMode(rawValue: raw) else {
+      return
+    }
+    viewMode = mode
+    grid.setViewMode(mode)
+  }
+
   func cancelWork() async {
     await grid.cancelWork()
     await trashController.waitForPendingOperation()
   }
 
+  override func keyDown(with event: NSEvent) {
+    if grid.handleCollectionKeyDown(event) {
+      return
+    }
+    super.keyDown(with: event)
+  }
+
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    if event.type == .keyDown, grid.handleCollectionKeyDown(event) {
+      return true
+    }
+    return super.performKeyEquivalent(with: event)
+  }
+
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    if menuItem.action == #selector(setViewMode(_:)) {
+      let raw = menuItem.representedObject as? String
+      menuItem.state = raw == viewMode.rawValue ? .on : .off
+      return true
+    }
     guard
       menuItem.action == #selector(togglePreview(_:)) || menuItem.action == #selector(trashSelectedItem(_:))
     else { return true }

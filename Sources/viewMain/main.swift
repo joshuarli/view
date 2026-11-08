@@ -1,0 +1,3 @@
+import viewUI
+
+ViewApp.main()

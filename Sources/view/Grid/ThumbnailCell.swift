@@ -145,7 +145,7 @@ final class ThumbnailCell: NSCollectionViewItem {
   private static func detailText(for item: MediaItem) -> String {
     switch item.kind {
     case .directory:
-      return "Folder"
+      return ""
     case .image, .movie:
       guard let fileSize = item.fileSize else { return "" }
       return byteFormatter.string(fromByteCount: fileSize)

@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import QuickLookThumbnailing
 import QuickLookUI
 import viewCore
 
@@ -11,6 +12,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private let metrics: ViewMetrics
   private(set) var root: RootDirectory
   private(set) var catalog = Catalog()
+  private(set) var viewMode: ViewMode
   var catalogDidChange: ((Catalog) -> Void)?
   var selectionDidChange: (() -> Void)?
   weak var previewHost: PreviewPanelController?
@@ -23,14 +25,30 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private var scrollDirection: ScrollDirection = .down
   private var isObservingScrollBounds = false
   private var isApplyingCatalogMutation = false
+  private var isApplyingViewMode = false
+  private var backStack: [HistoryEntry] = []
+  private var forwardStack: [HistoryEntry] = []
+
+  private struct HistoryEntry {
+    let url: URL
+    let selectedURL: URL?
+  }
+  private var rootContainer: NSView?
+  private var carouselPreviewRegion: NSView?
+  private var carouselPreviewImageView: NSImageView?
+  private var carouselPreviewAspectConstraint: NSLayoutConstraint?
+  private var carouselPreviewGeneration: UInt64 = 0
+  private var carouselContainer: NSView?
+  private var gridContainer: NSView?
   private var scrollView: NSScrollView!
   private(set) var collectionView: GridCollectionView!
   private var emptyStateLabel: NSTextField!
 
-  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
+  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics, viewMode: ViewMode = .carousel) {
     self.root = root
     self.mode = mode
     self.metrics = metrics
+    self.viewMode = viewMode
     super.init(nibName: nil, bundle: nil)
   }
 
@@ -43,18 +61,16 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     let rootView = NSView()
     rootView.wantsLayer = true
     rootView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-
-    let layout = NSCollectionViewFlowLayout()
-    layout.itemSize =
-      mode == .browser
-      ? NSSize(width: 160, height: 180)
-      : NSSize(width: 160, height: 160)
-    layout.minimumInteritemSpacing = 10
-    layout.minimumLineSpacing = 10
-    layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+    rootContainer = rootView
 
     collectionView = GridCollectionView(frame: .zero)
     collectionView.keyHandler = self
+    let layout = NSCollectionViewFlowLayout()
+    layout.scrollDirection = .vertical
+    layout.itemSize = mode == .browser ? NSSize(width: 160, height: 180) : NSSize(width: 160, height: 160)
+    layout.minimumInteritemSpacing = 10
+    layout.minimumLineSpacing = 10
+    layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
     collectionView.collectionViewLayout = layout
     collectionView.dataSource = self
     collectionView.delegate = self
@@ -70,8 +86,6 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     scrollView = NSScrollView()
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.drawsBackground = false
-    scrollView.hasVerticalScroller = true
-    scrollView.hasHorizontalScroller = false
     scrollView.contentView.postsBoundsChangedNotifications = true
     scrollView.documentView = collectionView
 
@@ -82,19 +96,56 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     emptyStateLabel.lineBreakMode = mode == .browser ? .byTruncatingTail : .byTruncatingMiddle
     emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
 
-    rootView.addSubview(scrollView)
+    let previewRegion = NSView()
+    previewRegion.translatesAutoresizingMaskIntoConstraints = false
+    carouselPreviewRegion = previewRegion
+
+    let previewImage = NSImageView()
+    previewImage.imageScaling = .scaleProportionallyUpOrDown
+    previewImage.imageAlignment = .alignCenter
+    previewImage.translatesAutoresizingMaskIntoConstraints = false
+    previewImage.setContentHuggingPriority(.init(1), for: .horizontal)
+    previewImage.setContentHuggingPriority(.init(1), for: .vertical)
+    previewImage.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+    previewImage.setContentCompressionResistancePriority(.init(1), for: .vertical)
+    previewRegion.addSubview(previewImage)
+    let aspect = previewImage.widthAnchor.constraint(equalTo: previewImage.heightAnchor, multiplier: 1)
+    let fillWidth = previewImage.widthAnchor.constraint(equalTo: previewRegion.widthAnchor)
+    fillWidth.priority = .defaultLow
+    let fillHeight = previewImage.heightAnchor.constraint(equalTo: previewRegion.heightAnchor)
+    fillHeight.priority = .defaultLow
+    NSLayoutConstraint.activate([
+      previewImage.centerXAnchor.constraint(equalTo: previewRegion.centerXAnchor),
+      previewImage.centerYAnchor.constraint(equalTo: previewRegion.centerYAnchor),
+      previewImage.leadingAnchor.constraint(greaterThanOrEqualTo: previewRegion.leadingAnchor),
+      previewImage.trailingAnchor.constraint(lessThanOrEqualTo: previewRegion.trailingAnchor),
+      previewImage.topAnchor.constraint(greaterThanOrEqualTo: previewRegion.topAnchor),
+      previewImage.bottomAnchor.constraint(lessThanOrEqualTo: previewRegion.bottomAnchor),
+      aspect,
+      fillWidth,
+      fillHeight,
+    ])
+    carouselPreviewAspectConstraint = aspect
+    carouselPreviewImageView = previewImage
+
+    let gridContainer = NSView()
+    gridContainer.translatesAutoresizingMaskIntoConstraints = false
+    self.gridContainer = gridContainer
+
+    let carouselContainer = NSView()
+    carouselContainer.translatesAutoresizingMaskIntoConstraints = false
+    self.carouselContainer = carouselContainer
+
     rootView.addSubview(emptyStateLabel)
     NSLayoutConstraint.activate([
-      scrollView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-      scrollView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-      scrollView.topAnchor.constraint(equalTo: rootView.topAnchor),
-      scrollView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
       emptyStateLabel.centerXAnchor.constraint(equalTo: rootView.centerXAnchor),
       emptyStateLabel.centerYAnchor.constraint(equalTo: rootView.centerYAnchor),
       emptyStateLabel.leadingAnchor.constraint(greaterThanOrEqualTo: rootView.leadingAnchor, constant: 24),
       emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: rootView.trailingAnchor, constant: -24),
     ])
+
     self.view = rootView
+    applyViewMode()
     updateEmptyState()
   }
 
@@ -153,6 +204,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     }
     syncAnchor()
     updateVisibleSelection()
+    updateCarouselPreview()
     selectionDidChange?()
   }
 
@@ -169,6 +221,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     }
     syncAnchor()
     updateVisibleSelection()
+    updateCarouselPreview()
     selectionDidChange?()
   }
 
@@ -215,6 +268,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     )
     isApplyingCatalogMutation = false
     updateVisibleSelection()
+    updateCarouselPreview()
     selectionDidChange?()
   }
 
@@ -232,9 +286,18 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   }
 
   func navigate(to directory: URL, selecting selection: URL? = nil) {
+    navigate(to: directory, selecting: selection, pushingHistory: true)
+  }
+
+  private func navigate(to directory: URL, selecting selection: URL?, pushingHistory: Bool) {
     guard mode == .browser else { return }
     let target = directory.standardizedFileURL
     guard target.path != root.url.path else { return }
+
+    if pushingHistory {
+      backStack.append(HistoryEntry(url: root.url, selectedURL: catalog.selectedURL))
+      forwardStack.removeAll()
+    }
 
     scanGeneration += 1
     let previous = scanTask
@@ -251,9 +314,11 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     collectionView.reloadData()
     scrollToTop()
     updateEmptyState()
+    updateCarouselPreview()
     updateLocationPresentation()
     updateThumbnailDemand()
     catalogDidChange?(catalog)
+    selectionDidChange?()
     startScan(selecting: selection, after: previous)
   }
 
@@ -262,6 +327,18 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     let parent = root.url.deletingLastPathComponent().standardizedFileURL
     guard parent.path != root.url.path else { return }
     navigate(to: parent, selecting: root.url)
+  }
+
+  func navigateBack() {
+    guard mode == .browser, let target = backStack.popLast() else { return }
+    forwardStack.append(HistoryEntry(url: root.url, selectedURL: catalog.selectedURL))
+    navigate(to: target.url, selecting: target.selectedURL, pushingHistory: false)
+  }
+
+  func navigateForward() {
+    guard mode == .browser, let target = forwardStack.popLast() else { return }
+    backStack.append(HistoryEntry(url: root.url, selectedURL: catalog.selectedURL))
+    navigate(to: target.url, selecting: target.selectedURL, pushingHistory: false)
   }
 
   func removeCatalogItems(_ urls: [URL]) {
@@ -292,6 +369,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     syncAnchor()
     updateEmptyState()
     updateVisibleSelection()
+    updateCarouselPreview()
     scrollSelectionIntoView()
     catalogDidChange?(catalog)
     selectionDidChange?()
@@ -304,6 +382,10 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     await scanTask?.value
     await thumbnailCoordinator?.cancelAll()
   }
+
+  var carouselPreviewImageForTesting: NSImage? { carouselPreviewImageView?.image }
+  var canNavigateBackForTesting: Bool { !backStack.isEmpty }
+  var canNavigateForwardForTesting: Bool { !forwardStack.isEmpty }
 
   private var captionStyle: ThumbnailCaptionStyle {
     mode == .browser ? .nameAndSize : .none
@@ -392,6 +474,13 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     collectionView.layoutSubtreeIfNeeded()
     if let selection, catalog.items.contains(where: { $0.url == selection }) {
       selectCatalogItem(selection)
+    } else if viewMode == .carousel, let first = catalog.items.first {
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.viewMode == .carousel, self.catalog.items.first?.url == first.url else {
+          return
+        }
+        self.selectCatalogItem(first.url)
+      }
     }
     updateThumbnailDemand()
   }
@@ -409,8 +498,241 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     collectionView.selectItems(at: [IndexPath(item: index, section: 0)], scrollPosition: [])
     isApplyingCatalogMutation = false
     updateVisibleSelection()
+    updateCarouselPreview()
     scrollSelectionIntoView()
     selectionDidChange?()
+  }
+
+  func setViewMode(_ mode: ViewMode) {
+    guard mode != viewMode else { return }
+    let window = view.window
+    let windowFrame = window?.frame
+    let contentSize = window.map { $0.contentRect(forFrameRect: $0.frame).size }
+    viewMode = mode
+    applyViewMode()
+    if isViewLoaded {
+      collectionView.reloadData()
+      updateThumbnailDemand()
+      updateCarouselPreview()
+      view.layoutSubtreeIfNeeded()
+      if let window, let contentSize {
+        window.setContentSize(contentSize)
+        DispatchQueue.main.async {
+          window.setContentSize(contentSize)
+        }
+      } else if let window, let windowFrame {
+        window.setFrame(windowFrame, display: false)
+        DispatchQueue.main.async {
+          window.setFrame(windowFrame, display: false)
+        }
+      }
+      _ = window?.makeFirstResponder(collectionView)
+    }
+  }
+
+  private func applyViewMode() {
+    guard let rootContainer else { return }
+    isApplyingViewMode = true
+    defer { isApplyingViewMode = false }
+    gridContainer?.subviews.forEach { $0.removeFromSuperview() }
+    carouselContainer?.subviews.forEach { $0.removeFromSuperview() }
+    gridContainer?.removeFromSuperview()
+    carouselContainer?.removeFromSuperview()
+    scrollView.removeFromSuperview()
+
+    configureCollectionLayout(for: viewMode)
+
+    switch viewMode {
+    case .grid:
+      guard let gridContainer else { return }
+      scrollView.hasVerticalScroller = true
+      scrollView.hasHorizontalScroller = false
+      collectionView.translatesAutoresizingMaskIntoConstraints = true
+      collectionView.autoresizingMask = [.width]
+      gridContainer.addSubview(scrollView)
+      scrollView.translatesAutoresizingMaskIntoConstraints = false
+      NSLayoutConstraint.activate([
+        scrollView.leadingAnchor.constraint(equalTo: gridContainer.leadingAnchor),
+        scrollView.trailingAnchor.constraint(equalTo: gridContainer.trailingAnchor),
+        scrollView.topAnchor.constraint(equalTo: gridContainer.topAnchor),
+        scrollView.bottomAnchor.constraint(equalTo: gridContainer.bottomAnchor),
+      ])
+      rootContainer.addSubview(gridContainer, positioned: .below, relativeTo: emptyStateLabel)
+      NSLayoutConstraint.activate([
+        gridContainer.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
+        gridContainer.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
+        gridContainer.topAnchor.constraint(equalTo: rootContainer.topAnchor),
+        gridContainer.bottomAnchor.constraint(equalTo: rootContainer.bottomAnchor),
+      ])
+      carouselPreviewImageView?.image = nil
+    case .carousel:
+      guard let carouselContainer, let previewRegion = carouselPreviewRegion else { return }
+      scrollView.hasVerticalScroller = false
+      scrollView.hasHorizontalScroller = true
+      collectionView.translatesAutoresizingMaskIntoConstraints = true
+      collectionView.autoresizingMask = [.height]
+
+      let divider = NSBox()
+      divider.boxType = .separator
+      divider.translatesAutoresizingMaskIntoConstraints = false
+
+      carouselContainer.addSubview(previewRegion)
+      carouselContainer.addSubview(divider)
+      carouselContainer.addSubview(scrollView)
+      scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+      let stripHeight: CGFloat = captionStyle == .nameAndSize ? 184 : 148
+      NSLayoutConstraint.activate([
+        previewRegion.leadingAnchor.constraint(equalTo: carouselContainer.leadingAnchor),
+        previewRegion.trailingAnchor.constraint(equalTo: carouselContainer.trailingAnchor),
+        previewRegion.topAnchor.constraint(equalTo: carouselContainer.topAnchor),
+        previewRegion.bottomAnchor.constraint(equalTo: divider.topAnchor),
+        divider.leadingAnchor.constraint(equalTo: carouselContainer.leadingAnchor),
+        divider.trailingAnchor.constraint(equalTo: carouselContainer.trailingAnchor),
+        divider.bottomAnchor.constraint(equalTo: scrollView.topAnchor),
+        scrollView.leadingAnchor.constraint(equalTo: carouselContainer.leadingAnchor),
+        scrollView.trailingAnchor.constraint(equalTo: carouselContainer.trailingAnchor),
+        scrollView.bottomAnchor.constraint(equalTo: carouselContainer.bottomAnchor),
+        scrollView.heightAnchor.constraint(equalToConstant: stripHeight),
+      ])
+
+      rootContainer.addSubview(carouselContainer, positioned: .below, relativeTo: emptyStateLabel)
+      NSLayoutConstraint.activate([
+        carouselContainer.leadingAnchor.constraint(equalTo: rootContainer.leadingAnchor),
+        carouselContainer.trailingAnchor.constraint(equalTo: rootContainer.trailingAnchor),
+        carouselContainer.topAnchor.constraint(equalTo: rootContainer.topAnchor),
+        carouselContainer.bottomAnchor.constraint(equalTo: rootContainer.bottomAnchor),
+      ])
+      updateCarouselPreview()
+    }
+    if isViewLoaded {
+      _ = view.window?.makeFirstResponder(collectionView)
+    }
+    view.needsLayout = true
+  }
+
+  private func configureCollectionLayout(for mode: ViewMode) {
+    let layout = (collectionView.collectionViewLayout as? NSCollectionViewFlowLayout) ?? NSCollectionViewFlowLayout()
+    switch mode {
+    case .grid:
+      layout.scrollDirection = .vertical
+      layout.itemSize =
+        self.mode == .browser
+        ? NSSize(width: 160, height: 180)
+        : NSSize(width: 160, height: 160)
+      layout.minimumInteritemSpacing = 10
+      layout.minimumLineSpacing = 10
+      layout.sectionInset = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+    case .carousel:
+      layout.scrollDirection = .horizontal
+      layout.itemSize =
+        self.mode == .browser
+        ? NSSize(width: 120, height: 156)
+        : NSSize(width: 120, height: 120)
+      layout.minimumInteritemSpacing = 8
+      layout.minimumLineSpacing = 8
+      layout.sectionInset = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+    }
+    if collectionView.collectionViewLayout !== layout {
+      collectionView.collectionViewLayout = layout
+      collectionView.register(ThumbnailCell.self, forItemWithIdentifier: ThumbnailCell.reuseIdentifier)
+    }
+  }
+
+  private func updateCarouselPreview() {
+    guard viewMode == .carousel else { return }
+    carouselPreviewGeneration &+= 1
+    let generation = carouselPreviewGeneration
+    guard let selectedURL = catalog.selectedURL,
+      let item = catalog.items.first(where: { $0.url == selectedURL })
+    else {
+      carouselPreviewImageView?.image = nil
+      setPreviewAspectRatio(1)
+      return
+    }
+    carouselPreviewImageView?.image = nil
+    setPreviewAspectRatio(1)
+    carouselPreviewImageView?.imageScaling =
+      item.kind == .directory ? .scaleProportionallyDown : .scaleProportionallyUpOrDown
+    let scale = view.window?.backingScaleFactor ?? 2
+    Task { @MainActor [weak self] in
+      let image = await Self.loadPreviewImage(for: item, scale: scale)
+      guard let self, generation == self.carouselPreviewGeneration else { return }
+      if let image {
+        let size = image.size
+        if size.width > 0, size.height > 0 {
+          self.setPreviewAspectRatio(size.width / size.height)
+        }
+      }
+      self.carouselPreviewImageView?.image = image
+    }
+  }
+
+  private func setPreviewAspectRatio(_ ratio: CGFloat) {
+    guard let imageView = carouselPreviewImageView else { return }
+    let safe = ratio.isFinite && ratio > 0 ? ratio : 1
+    guard let old = carouselPreviewAspectConstraint else {
+      let aspect = imageView.widthAnchor.constraint(equalTo: imageView.heightAnchor, multiplier: safe)
+      aspect.isActive = true
+      carouselPreviewAspectConstraint = aspect
+      return
+    }
+    old.isActive = false
+    let aspect = imageView.widthAnchor.constraint(equalTo: imageView.heightAnchor, multiplier: safe)
+    aspect.isActive = true
+    carouselPreviewAspectConstraint = aspect
+  }
+
+  private static func loadPreviewImage(for item: MediaItem, scale: CGFloat) async -> NSImage? {
+    switch item.kind {
+    case .image:
+      return await withCheckedContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+          let image = NSImage(contentsOf: item.url)
+          continuation.resume(returning: image)
+        }
+      }
+    case .movie:
+      let pointSize: CGFloat = 1200
+      let request = QLThumbnailGenerator.Request(
+        fileAt: item.url,
+        size: NSSize(width: pointSize, height: pointSize),
+        scale: scale,
+        representationTypes: .thumbnail
+      )
+      return await withCheckedContinuation { continuation in
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+          if let cg = representation?.cgImage {
+            continuation.resume(
+              returning: NSImage(
+                cgImage: cg,
+                size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale)
+              )
+            )
+          } else {
+            continuation.resume(returning: nil)
+          }
+        }
+      }
+    case .directory:
+      let pointSize: CGFloat = 256
+      let request = QLThumbnailGenerator.Request(
+        fileAt: item.url,
+        size: NSSize(width: pointSize, height: pointSize),
+        scale: scale,
+        representationTypes: [.thumbnail, .icon]
+      )
+      request.iconMode = true
+      return await withCheckedContinuation { continuation in
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+          if let cg = representation?.cgImage {
+            continuation.resume(returning: NSImage(cgImage: cg, size: NSSize(width: pointSize, height: pointSize)))
+          } else {
+            continuation.resume(returning: nil)
+          }
+        }
+      }
+    }
   }
 
   private func updateLocationPresentation() {
@@ -421,8 +743,14 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private func updateEmptyState() {
     let isEmpty = catalog.isEmpty
     emptyStateLabel?.stringValue = emptyStateText
+    gridContainer?.isHidden = isEmpty
+    carouselContainer?.isHidden = isEmpty
     scrollView?.isHidden = isEmpty
     emptyStateLabel?.isHidden = !isEmpty
+    if isEmpty {
+      carouselPreviewGeneration &+= 1
+      carouselPreviewImageView?.image = nil
+    }
   }
 
   private func syncAnchor() {
@@ -444,7 +772,9 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     else { return }
     let path = IndexPath(item: index, section: 0)
     guard !collectionView.indexPathsForVisibleItems().contains(path) else { return }
-    collectionView.scrollToItems(at: [path], scrollPosition: [.centeredVertically])
+    let position: NSCollectionView.ScrollPosition =
+      viewMode == .carousel ? [.centeredHorizontally] : [.centeredVertically]
+    collectionView.scrollToItems(at: [path], scrollPosition: position)
   }
 
   private func updateVisibleSelection() {
@@ -597,6 +927,30 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       return true
     }
     if mode == .browser {
+      if event.keyCode == 123, flags == .control {
+        navigateBack()
+        return true
+      }
+      if event.keyCode == 124, flags == .control {
+        navigateForward()
+        return true
+      }
+      if event.keyCode == 123, flags.isEmpty, event.modifierFlags.contains(.shift) {
+        navigateBack()
+        return true
+      }
+      if event.keyCode == 124, flags.isEmpty, event.modifierFlags.contains(.shift) {
+        navigateForward()
+        return true
+      }
+      if event.keyCode == 33, flags == .command {
+        navigateBack()
+        return true
+      }
+      if event.keyCode == 30, flags == .command {
+        navigateForward()
+        return true
+      }
       if event.keyCode == 51, flags.isEmpty {
         navigateToParent()
         return true
@@ -615,6 +969,28 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
       guard catalog.selectedURL != nil else { return false }
       previewHost?.trashSelectedItem(event)
       return true
+    }
+    if flags.isEmpty, catalog.count > 0 {
+      let delta: Int?
+      switch event.keyCode {
+      case 123, 126:
+        delta = -1
+      case 124, 125:
+        delta = 1
+      default:
+        delta = nil
+      }
+      if let delta {
+        let current = catalog.selectedURL.flatMap { url in catalog.items.firstIndex(where: { $0.url == url }) }
+        let next: Int
+        if let current {
+          next = (current + delta + catalog.count) % catalog.count
+        } else {
+          next = delta > 0 ? 0 : catalog.count - 1
+        }
+        selectCatalogItem(catalog.items[next].url)
+        return true
+      }
     }
     return false
   }

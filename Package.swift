@@ -19,10 +19,21 @@ let package = Package(
       path: "Sources/viewCore",
       swiftSettings: swift6Settings
     ),
-    .executableTarget(
-      name: "view",
+    .target(
+      name: "viewUI",
       dependencies: ["viewCore"],
       path: "Sources/view",
+      swiftSettings: [
+        .swiftLanguageMode(.v6),
+        .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+        .defaultIsolation(MainActor.self),
+        .unsafeFlags(["-warnings-as-errors"]),
+      ]
+    ),
+    .executableTarget(
+      name: "view",
+      dependencies: ["viewUI"],
+      path: "Sources/viewMain",
       swiftSettings: [
         .swiftLanguageMode(.v6),
         .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
@@ -35,6 +46,17 @@ let package = Package(
       dependencies: ["viewCore"],
       path: "Tests/viewCoreTests",
       swiftSettings: swift6Settings
+    ),
+    .testTarget(
+      name: "viewUITests",
+      dependencies: ["viewUI", "viewCore"],
+      path: "Tests/viewUITests",
+      swiftSettings: [
+        .swiftLanguageMode(.v6),
+        .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+        .defaultIsolation(MainActor.self),
+        .unsafeFlags(["-warnings-as-errors"]),
+      ]
     ),
   ]
 )
