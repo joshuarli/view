@@ -18,6 +18,8 @@ public struct GridShortcut: Sendable, Equatable {
 public enum GridCommand: CaseIterable, Sendable, Equatable {
   case togglePreview
   case trashSelectedItem
+  case undo
+  case redo
 
   public var shortcut: GridShortcut {
     switch self {
@@ -25,6 +27,10 @@ public enum GridCommand: CaseIterable, Sendable, Equatable {
       GridShortcut(keyEquivalent: " ", modifiers: [])
     case .trashSelectedItem:
       GridShortcut(keyEquivalent: "\u{8}", modifiers: [.control])
+    case .undo:
+      GridShortcut(keyEquivalent: "z", modifiers: [.command])
+    case .redo:
+      GridShortcut(keyEquivalent: "Z", modifiers: [.command, .shift])
     }
   }
 

@@ -111,6 +111,14 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
     trashController.trashSelectedItem()
   }
 
+  @objc func undo(_ sender: Any?) {
+    trashController.undo()
+  }
+
+  @objc func redo(_ sender: Any?) {
+    trashController.redo()
+  }
+
   @objc func setViewMode(_ sender: NSMenuItem) {
     guard let raw = sender.representedObject as? String, let mode = ViewMode(rawValue: raw) else {
       return
@@ -143,6 +151,12 @@ final class PreviewPanelController: NSViewController, NSMenuItemValidation {
       let raw = menuItem.representedObject as? String
       menuItem.state = raw == viewMode.rawValue ? .on : .off
       return true
+    }
+    if menuItem.action == #selector(undo(_:)) {
+      return trashController.canUndo
+    }
+    if menuItem.action == #selector(redo(_:)) {
+      return trashController.canRedo
     }
     guard
       menuItem.action == #selector(togglePreview(_:)) || menuItem.action == #selector(trashSelectedItem(_:))

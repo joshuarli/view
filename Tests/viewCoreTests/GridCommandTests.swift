@@ -22,4 +22,9 @@ struct GridCommandTests {
     #expect(GridCommand.resolve(keyEquivalent: "\u{8}", modifiers: [.command]) == nil)
     #expect(GridCommand.resolve(keyEquivalent: "\u{8}", modifiers: []) == nil)
   }
+
+  @Test func commandZIsUndoAndCommandShiftZIsRedo() {
+    #expect(GridCommand.resolve(keyEquivalent: "z", modifiers: [.command]) == .undo)
+    #expect(GridCommand.resolve(keyEquivalent: "Z", modifiers: [.command, .shift]) == .redo)
+  }
 }

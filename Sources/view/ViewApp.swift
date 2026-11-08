@@ -135,6 +135,23 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
     let mainMenu = NSMenu()
     mainMenu.addItem(appMenuItem)
 
+    let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(menuItem(
+      command: .undo,
+      title: "Undo Move to Trash",
+      action: #selector(PreviewPanelController.undo(_:)),
+      target: previewController
+    ))
+    editMenu.addItem(menuItem(
+      command: .redo,
+      title: "Redo Move to Trash",
+      action: #selector(PreviewPanelController.redo(_:)),
+      target: previewController
+    ))
+    let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+    editMenuItem.submenu = editMenu
+    mainMenu.addItem(editMenuItem)
+
     let viewMenu = NSMenu(title: "View")
     viewMenu.addItem(menuItem(
       command: .togglePreview,
