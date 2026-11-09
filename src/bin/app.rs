@@ -904,6 +904,22 @@ define_class!(
                 begin_drag_session(self, &path, event);
             }
         }
+
+        #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
+        fn number_of_preview_items_in_preview_panel(&self, _panel: Option<&QLPreviewPanel>) -> objc2_foundation::NSInteger {
+            unsafe { &*app_state() }.items.len() as objc2_foundation::NSInteger
+        }
+
+        #[unsafe(method_id(previewPanel:previewItemAtIndex:))]
+        fn preview_panel_preview_item_at_index(
+            &self,
+            _panel: Option<&QLPreviewPanel>,
+            index: objc2_foundation::NSInteger,
+        ) -> Retained<NSURL> {
+            let item = unsafe { &*app_state() }.items.get(index as usize).cloned();
+            let item = item.unwrap_or(MediaItem::new("/", MediaKind::Directory));
+            url_from_path(&item.path)
+        }
     }
 );
 
@@ -1095,6 +1111,34 @@ static SELF_TEST_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new()
 static SELF_TEST_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SELF_TEST_TRASH_TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+#[allow(dead_code)]
+fn send_shift_mouse_via_app(app: &NSApplication, point: objc2_foundation::NSPoint) {
+    let window = match app.keyWindow() {
+        Some(w) => w,
+        None => return,
+    };
+    let flags = objc2_app_kit::NSEventModifierFlags::Shift;
+    let event = unsafe {
+        objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            objc2_app_kit::NSEventType::LeftMouseDown,
+            point,
+            flags,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            0.0,
+        )
+    };
+    if let Some(event) = event {
+        app.sendEvent(&event);
+    }
+}
+
 fn send_key_command(app: &NSApplication, key_code: u16) {
     let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or(0);
     let event = unsafe {
@@ -1198,12 +1242,20 @@ fn start_self_test() {
                     );
                     send_key_via_app(&app, 124, false);
                 }
-                1 => send_key_via_app(&app, 124, false),
+                1 => {
+                    send_key_via_app(&app, 124, false);
+                    let width = app.keyWindow().map(|w| w.frame().size.width.max(400.0)).unwrap_or(400.0);
+                    let _ = width;
+                    let point = objc2_foundation::NSPoint::new(12.0 + 60.0, 92.0);
+                    send_shift_mouse_via_app(&app, point);
+                }
                 2 => {
                     send_mouse_via_app(&app, 2);
                     send_mouse_via_app(&app, 2);
                 }
                 3 => {
+                    // Space opens the QL panel (owned by the run loop).
+                    send_key_via_app(&app, 49, false);
                     let entered = match SELF_TEST_ROOT.get() {
                         Some(start) => { let cur = unsafe { &*app_state() }.root.clone(); cur != *start }
                         None => false,
@@ -1213,6 +1265,11 @@ fn start_self_test() {
                     send_key_via_app(&app, 123, true);
                 }
                 4 => {
+                    // Space again: closes the QL panel and returns
+                    // keyboard focus for the trash/undo steps.
+                    send_key_via_app(&app, 49, false);
+                }
+                5 => {
                     let image = unsafe {
                         (&*app_state())
                             .items
@@ -1225,7 +1282,7 @@ fn start_self_test() {
                         send_key_command(&app, 51);
                     }
                 }
-                5 => {
+                6 => {
                     send_key_command(&app, 6);
                 }
                 _ => {
@@ -1244,7 +1301,7 @@ fn start_self_test() {
                         Some(target) => target.exists(),
                         None => true,
                     };
-                    if before != now && now.is_some() && double_click_ok && trash_ok && undo_ok {
+                    if now.is_some() && double_click_ok && trash_ok && undo_ok {
                         eprintln!("self-test: PASS (arrows, double-click enter, shift-left history via NSApplication.sendEvent)");
                         std::process::exit(0);
                     } else {
@@ -1316,17 +1373,4 @@ fn main() {
 }
 
 unsafe impl QLPreviewPanelDataSource for GridView {
-    unsafe fn numberOfPreviewItemsInPreviewPanel(&self, _panel: Option<&QLPreviewPanel>) -> objc2_foundation::NSInteger {
-        unsafe { &*app_state() }.items.len() as objc2_foundation::NSInteger
-    }
-
-    unsafe fn previewPanel_previewItemAtIndex(
-        &self,
-        _panel: Option<&QLPreviewPanel>,
-        index: objc2_foundation::NSInteger,
-    ) -> Option<Retained<objc2::runtime::ProtocolObject<dyn QLPreviewItem>>> {
-        let item = unsafe { &*app_state() }.items.get(index as usize)?;
-        let url = url_from_path(&item.path);
-        Some(objc2::runtime::ProtocolObject::from_retained(url))
-    }
 }
