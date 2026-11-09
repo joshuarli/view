@@ -1402,6 +1402,11 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     open_selected();
     assert_eq!(unsafe { (*app_state()).selected }, Some(0));
     assert!(preview.image().is_some(), "first image is visible after entering a folder");
+    let bounds = preview.bounds();
+    let bitmap = preview.bitmapImageRepForCachingDisplayInRect(bounds).expect("preview bitmap");
+    preview.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+    let color = bitmap.colorAtX_y((bitmap.pixelsWide() / 2) as isize, (bitmap.pixelsHigh() / 2) as isize).expect("preview pixel");
+    assert!(color.redComponent() > 0.7 && color.redComponent() > color.greenComponent() * 2.0 && color.redComponent() > color.blueComponent() * 2.0, "first image is painted: color {:?}, bounds {:?}, bitmap {}x{}", color, bounds, bitmap.pixelsWide(), bitmap.pixelsHigh());
     assert!(unsafe { (*app_state()).items.len() } >= 3);
 
     window.makeKeyAndOrderFront(None);
