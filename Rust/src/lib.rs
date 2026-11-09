@@ -21,7 +21,7 @@ pub enum MediaKind {
     Directory,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaItem {
     pub path: PathBuf,
     pub kind: MediaKind,
@@ -100,12 +100,24 @@ pub fn browser_order(a: &MediaItem, b: &MediaItem) -> Ordering {
     natural_cmp(&an, &bn)
 }
 
-fn kind_for_extension(path: &Path) -> Option<MediaKind> {
+pub fn kind_for_extension(path: &Path) -> Option<MediaKind> {
+    // Mirrors the Swift UTType conformance surface: image and movie types
+    // across the common extensions emitted in the benchmark corpus.
     match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
-        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("tif") | Some("tiff") | Some("heic") | Some("heif") => Some(MediaKind::Image),
-        Some("mp4") | Some("mov") | Some("m4v") | Some("webm") | Some("avi") | Some("mkv") => Some(MediaKind::Movie),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("tif") | Some("tiff")
+        | Some("heic") | Some("heif") | Some("avif") | Some("bmp") | Some("jp2") | Some("j2k") | Some("jp2c")
+        | Some("ico") | Some("icns") | Some("svg") | Some("svgz") | Some("pbm") | Some("pgm") | Some("ppm") => Some(MediaKind::Image),
+        Some("mp4") | Some("mov") | Some("m4v") | Some("webm") | Some("avi") | Some("mkv") | Some("mpg")
+        | Some("mpeg") | Some("3gp") | Some("m2v") | Some("wmv") => Some(MediaKind::Movie),
         _ => None,
     }
+}
+
+pub fn is_package(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        Some("app") | Some("bundle") | Some("framework") | Some("scptd") | Some("svc")
+    )
 }
 
 fn is_hidden(path: &Path) -> bool {
@@ -124,19 +136,21 @@ pub fn list_browser(dir: &Path) -> std::io::Result<Vec<MediaItem>> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if is_symlink(&path) || is_hidden(&path) {
+        if is_symlink(&path) || is_hidden(&path) || is_package(&path) {
             continue;
         }
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            // Packages are traversed as files by the Swift reader; the
-            // benchmark corpus contains no packages, so treat any dir as
-            // a navigable directory entry here.
             items.push(MediaItem::new(path, MediaKind::Directory));
         } else if metadata.is_file() {
             if let Some(kind) = kind_for_extension(&path) {
                 let mut item = MediaItem::new(path, kind);
                 item.file_size = Some(metadata.len() as i64);
+                item.modification = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
                 items.push(item);
             }
         }
@@ -159,22 +173,24 @@ pub fn scan_recursive(root: &Path) -> std::io::Result<Vec<MediaItem>> {
         });
         // Depth-first like the Swift scanner (stable batch order).
         for path in entries.iter().rev() {
-            if is_symlink(path) || is_hidden(path) {
+            if is_symlink(path) || is_hidden(path) || is_package(path) {
                 continue;
             }
             let metadata = fs::metadata(path).ok();
             let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             if is_dir {
-                if path.extension().and_then(|e| e.to_str()) == Some("app") {
-                    continue;
-                }
                 stack.push(path.clone());
                 continue;
             }
             if metadata.as_ref().map(|m| m.is_file()).unwrap_or(false) {
                 if let Some(kind) = kind_for_extension(path) {
                     let mut item = MediaItem::new(path.clone(), kind);
-                    item.file_size = metadata.map(|m| m.len() as i64);
+                    item.file_size = metadata.as_ref().map(|m| m.len() as i64);
+                    item.modification = metadata
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
                     out.push(item);
                 }
             }
@@ -229,6 +245,14 @@ impl Catalog {
             self.selection.push(url.to_path_buf());
         }
         Ok(())
+    }
+
+    pub fn deselect(&mut self, url: &Path) {
+        self.selection.retain(|p| p.as_path() != url);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
     }
 
     pub fn select_range(&mut self, anchor: &Path, clicked: &Path) -> Result<(), CatalogError> {
@@ -523,4 +547,495 @@ fn unfilter_row(filter: u8, bytes: &[u8], prev: &[u8], channels: usize) -> Vec<u
         };
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Launch / root / commands / preview / trash history / thumbnail cache
+// (parity with Sources/viewCore)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserMode { Browser, Recursive }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchError {
+    NotFound(String),
+    NotDirectory(String),
+    UnknownOption(String),
+    UnexpectedArgument(String),
+}
+
+impl fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LaunchError::NotFound(p) => write!(f, "no such directory: {p}"),
+            LaunchError::NotDirectory(p) => write!(f, "not a directory: {p}"),
+            LaunchError::UnknownOption(o) => write!(f, "unknown option: {o}"),
+            LaunchError::UnexpectedArgument(a) => write!(f, "unexpected argument: {a}"),
+        }
+    }
+}
+
+fn normalize_path(path: &Path, current: &Path) -> PathBuf {
+    let joined: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current.join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => { out.pop(); }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out = current.to_path_buf();
+    }
+    out
+}
+
+pub fn resolve_root(argument: Option<&str>, current_directory: &str) -> Result<PathBuf, LaunchError> {
+    let current = normalize_path(Path::new(current_directory), Path::new("/"));
+    let requested = match argument {
+        Some("~") => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            PathBuf::from(home)
+        }
+        Some(arg) if arg.starts_with("~/") => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            normalize_path(Path::new(&arg[2..]), Path::new(&home))
+        }
+        Some(arg) => PathBuf::from(arg),
+        None => current.clone(),
+    };
+    let url = normalize_path(&requested, &current);
+    let metadata = std::fs::metadata(&url).map_err(|_| LaunchError::NotFound(url.display().to_string()))?;
+    if !metadata.is_dir() {
+        return Err(LaunchError::NotDirectory(url.display().to_string()));
+    }
+    Ok(url)
+}
+
+pub fn resolve_launch(arguments: &[String], current_directory: &str) -> Result<(PathBuf, BrowserMode), LaunchError> {
+    let mut mode = BrowserMode::Browser;
+    let mut dir_arg: Option<String> = None;
+    let mut parses_options = true;
+    for arg in arguments {
+        if parses_options {
+            match arg.as_str() {
+                "-r" | "--recursive" => { mode = BrowserMode::Recursive; continue; }
+                "--" => { parses_options = false; continue; }
+                _ => {
+                    if arg.starts_with('-') && arg != "-" {
+                        return Err(LaunchError::UnknownOption(arg.clone()));
+                    }
+                }
+            }
+        }
+        if dir_arg.is_some() {
+            return Err(LaunchError::UnexpectedArgument(arg.clone()));
+        }
+        dir_arg = Some(arg.clone());
+    }
+    let root = resolve_root(dir_arg.as_deref(), current_directory)?;
+    Ok((root, mode))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GridKeyModifier { Command, Control, Option, Shift }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GridShortcut {
+    pub key_equivalent: &'static str,
+    pub modifiers: &'static [GridKeyModifier],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GridCommand { TogglePreview, TrashSelectedItem, Undo, Redo }
+
+pub fn grid_shortcut(command: GridCommand) -> GridShortcut {
+    match command {
+        GridCommand::TogglePreview => GridShortcut { key_equivalent: " ", modifiers: &[] },
+        GridCommand::TrashSelectedItem => GridShortcut { key_equivalent: "\u{8}", modifiers: &[GridKeyModifier::Control] },
+        GridCommand::Undo => GridShortcut { key_equivalent: "z", modifiers: &[GridKeyModifier::Command] },
+        GridCommand::Redo => GridShortcut { key_equivalent: "Z", modifiers: &[GridKeyModifier::Command, GridKeyModifier::Shift] },
+    }
+}
+
+pub fn resolve_command(key_equivalent: &str, modifiers: &[GridKeyModifier]) -> Option<GridCommand> {
+    [GridCommand::TogglePreview, GridCommand::TrashSelectedItem, GridCommand::Undo, GridCommand::Redo]
+        .into_iter()
+        .find(|c| {
+            let s = grid_shortcut(*c);
+            s.key_equivalent == key_equivalent && s.modifiers == modifiers
+        })
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PreviewSession {
+    urls: Vec<PathBuf>,
+    selected: Option<usize>,
+}
+
+impl PreviewSession {
+    pub fn new() -> Self { Self::default() }
+    pub fn count(&self) -> usize { self.urls.len() }
+    pub fn current_index(&self) -> Option<usize> { self.selected }
+
+    pub fn begin(&mut self, catalog: &Catalog) -> bool {
+        let next: Vec<PathBuf> = catalog.items().iter().map(|i| i.path.clone()).collect();
+        let Some(selected) = catalog.selected().map(Path::to_path_buf) else {
+            self.end();
+            return false;
+        };
+        let Some(index) = next.iter().position(|u| *u == selected) else {
+            self.end();
+            return false;
+        };
+        self.urls = next;
+        self.selected = Some(index);
+        true
+    }
+
+    pub fn item_at(&self, index: usize) -> Option<&Path> {
+        self.urls.get(index).map(PathBuf::as_path)
+    }
+
+    pub fn index_of(&self, url: &Path) -> Option<usize> {
+        self.urls.iter().position(|u| u.as_path() == url)
+    }
+
+    pub fn select_at(&mut self, index: usize) -> Option<PathBuf> {
+        let url = self.item_at(index)?.to_path_buf();
+        self.selected = Some(index);
+        Some(url)
+    }
+
+    pub fn update(&mut self, catalog: &Catalog) {
+        let Some(previous_index) = self.selected else { return };
+        let Some(previous_url) = self.urls.get(previous_index).cloned() else { return };
+        let catalog_urls: HashSet<PathBuf> = catalog.items().iter().map(|i| i.path.clone()).collect();
+        let next_urls: Vec<PathBuf> = self.urls.iter().filter(|u| catalog_urls.contains(*u)).cloned().collect();
+        if next_urls == self.urls {
+            return;
+        }
+        if next_urls.is_empty() {
+            self.end();
+            return;
+        }
+        if let Some(index) = next_urls.iter().position(|u| *u == previous_url) {
+            self.urls = next_urls;
+            self.selected = Some(index);
+            return;
+        }
+        if let Some(selected_url) = catalog.selected() {
+            if let Some(index) = next_urls.iter().position(|u| u.as_path() == selected_url) {
+                self.urls = next_urls;
+                self.selected = Some(index);
+                return;
+            }
+        }
+        self.selected = Some(previous_index.min(next_urls.len() - 1));
+        self.urls = next_urls;
+    }
+
+    pub fn end(&mut self) {
+        self.urls.clear();
+        self.selected = None;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashedFile {
+    pub item: MediaItem,
+    pub trashed_path: PathBuf,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashTransaction {
+    pub files: Vec<TrashedFile>,
+    pub selection_before_op: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrashHistory {
+    undo_stack: Vec<TrashTransaction>,
+    redo_stack: Vec<TrashTransaction>,
+}
+
+impl TrashHistory {
+    pub fn new() -> Self { Self::default() }
+    pub fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
+    pub fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
+    pub fn record_trash(&mut self, transaction: TrashTransaction) {
+        if transaction.files.is_empty() { return; }
+        self.undo_stack.push(transaction);
+        self.redo_stack.clear();
+    }
+    pub fn push_undo(&mut self, transaction: TrashTransaction) {
+        if !transaction.files.is_empty() { self.undo_stack.push(transaction); }
+    }
+    pub fn push_redo(&mut self, transaction: TrashTransaction) {
+        if !transaction.files.is_empty() { self.redo_stack.push(transaction); }
+    }
+    pub fn pop_undo(&mut self) -> Option<TrashTransaction> { self.undo_stack.pop() }
+    pub fn pop_redo(&mut self) -> Option<TrashTransaction> { self.redo_stack.pop() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrashOutcome {
+    Removed { trashed_path: PathBuf },
+    AlreadyInProgress,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrashError {
+    MissingRecycleMapping(PathBuf),
+    AlreadyInProgress(PathBuf),
+    DestinationExists(PathBuf),
+    MissingTrashedFile(PathBuf),
+    RecycleFailed(String),
+    MoveFailed(String),
+}
+
+impl fmt::Display for TrashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrashError::MissingRecycleMapping(u) => write!(f, "Trash did not return a recycled location for {}", u.display()),
+            TrashError::AlreadyInProgress(u) => write!(f, "A trash operation for {} is already in progress", u.display()),
+            TrashError::DestinationExists(u) => write!(f, "A file already exists at {}", u.display()),
+            TrashError::MissingTrashedFile(u) => write!(f, "The trashed file {} could not be found", u.display()),
+            TrashError::RecycleFailed(e) => write!(f, "{e}"),
+            TrashError::MoveFailed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TrashService {
+    in_flight: HashSet<PathBuf>,
+}
+
+impl TrashService {
+    pub fn new() -> Self { Self { in_flight: HashSet::new() } }
+
+    pub fn move_to_trash<F>(
+        &mut self,
+        url: &Path,
+        recycle: F,
+    ) -> Result<TrashOutcome, TrashError>
+    where
+        F: FnOnce(&Path) -> Result<std::collections::HashMap<PathBuf, PathBuf>, String>,
+    {
+        if !self.in_flight.insert(url.to_path_buf()) {
+            return Ok(TrashOutcome::AlreadyInProgress);
+        }
+        let result = (|| -> Result<TrashOutcome, TrashError> {
+            let mapping = recycle(url).map_err(TrashError::RecycleFailed)?;
+            let trashed = mapping.get(url).cloned()
+                .ok_or_else(|| TrashError::MissingRecycleMapping(url.to_path_buf()))?;
+            Ok(TrashOutcome::Removed { trashed_path: trashed })
+        })();
+        self.in_flight.remove(url);
+        result
+    }
+
+    pub fn restore<F>(
+        &mut self,
+        trashed: &Path,
+        original: &Path,
+        move_file: F,
+    ) -> Result<(), TrashError>
+    where
+        F: FnOnce(&Path, &Path) -> Result<(), TrashError>,
+    {
+        if !self.in_flight.insert(original.to_path_buf()) {
+            return Err(TrashError::AlreadyInProgress(original.to_path_buf()));
+        }
+        let result = move_file(trashed, original);
+        self.in_flight.remove(original);
+        result
+    }
+}
+
+impl Default for TrashService {
+    fn default() -> Self { Self::new() }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded FIFO-evicting thumbnail cache. Image buffers are owned by the
+// caller for decoding; the cache stores byte-costed buckets to cap memory.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ThumbCacheKey {
+    pub path: PathBuf,
+    pub pixel_size: u32,
+    pub scale: u32,
+    pub modification: Option<u64>,
+    pub file_size: Option<i64>,
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    cost: usize,
+    order: u64,
+}
+
+#[derive(Clone)]
+pub struct ThumbnailCache {
+    entries: HashMap<ThumbCacheKey, CacheEntry>,
+    order: Vec<(ThumbCacheKey, u64)>,
+    next_index: usize,
+    next_sequence: u64,
+    tracked_cost: usize,
+    limit: usize,
+}
+
+impl ThumbnailCache {
+    pub fn new(limit: usize) -> Self {
+        Self { entries: HashMap::new(), order: Vec::new(), next_index: 0, next_sequence: 0, tracked_cost: 0, limit }
+    }
+
+    pub fn with_default_limit() -> Self { Self::new(96 * 1024 * 1024) }
+    pub fn cost_bytes(&self) -> usize { self.tracked_cost }
+
+    pub fn insert(&mut self, key: ThumbCacheKey, cost: usize) {
+        self.remove_entry(&key);
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.entries.insert(key.clone(), CacheEntry { cost, order: sequence });
+        self.order.push((key, sequence));
+        self.tracked_cost = self.tracked_cost.saturating_add(cost);
+        self.evict();
+    }
+
+    pub fn contains(&self, key: &ThumbCacheKey) -> bool { self.entries.contains_key(key) }
+
+    pub fn remove_at(&mut self, url: &Path) {
+        let keys: Vec<_> = self.entries.keys().filter(|k| k.path == url).cloned().collect();
+        for key in keys {
+            self.remove_entry(&key);
+        }
+    }
+
+    pub fn remove_all(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.next_index = 0;
+        self.tracked_cost = 0;
+    }
+
+    fn remove_entry(&mut self, key: &ThumbCacheKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.tracked_cost = self.tracked_cost.saturating_sub(entry.cost);
+        }
+    }
+
+    fn evict(&mut self) {
+        while self.tracked_cost > self.limit && self.next_index < self.order.len() {
+            let (key, sequence) = self.order[self.next_index].clone();
+            self.next_index += 1;
+            if self.entries.get(&key).map(|e| e.order) != Some(sequence) {
+                continue;
+            }
+            self.remove_entry(&key);
+        }
+        if self.next_index > 128 && self.next_index * 2 > self.order.len() {
+            self.order.drain(..self.next_index);
+            self.next_index = 0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn natural_order_numeric_case_insensitive() {
+        assert_eq!(natural_cmp("img2.png", "img10.png"), Ordering::Less);
+        assert_eq!(natural_cmp("IMG10.png", "img2.png"), Ordering::Greater);
+    }
+
+    #[test]
+    fn browser_sort_directories_first_then_size_desc() {
+        let dir = MediaItem::new("/x/folder", MediaKind::Directory);
+        let big = MediaItem { path: PathBuf::from("/x/big.png"), kind: MediaKind::Image, file_size: Some(900), modification: None };
+        let small = MediaItem { path: PathBuf::from("/x/small.png"), kind: MediaKind::Image, file_size: Some(10), modification: None };
+        let mut items = vec![small.clone(), dir.clone(), big.clone()];
+        items.sort_by(browser_order);
+        assert_eq!(items, vec![dir, big, small]);
+    }
+
+    #[test]
+    fn catalog_preserves_selection_by_identity() {
+        let mut catalog = Catalog::new();
+        let a = MediaItem::new("/x/a.png", MediaKind::Image);
+        let b = MediaItem::new("/x/b.png", MediaKind::Image);
+        catalog.append(vec![a.clone(), b.clone()]);
+        catalog.select(Path::new("/x/a.png")).unwrap();
+        catalog.insert(MediaItem::new("/x/c.png", MediaKind::Image), 1);
+        assert_eq!(catalog.selected(), Some(Path::new("/x/a.png")));
+        catalog.remove(Path::new("/x/a.png"));
+        assert_eq!(catalog.selected(), Some(Path::new("/x/c.png")));
+    }
+
+    #[test]
+    fn launch_rejects_unknown_options() {
+        assert!(resolve_launch(&["--nope".to_string()], "/tmp").is_err());
+    }
+
+    #[test]
+    fn history_new_trash_clears_redo() {
+        let mut history = TrashHistory::default();
+        let file = TrashedFile { item: MediaItem::new("/x/a.png", MediaKind::Image), trashed_path: PathBuf::from("/t/a.png"), index: 0 };
+        history.record_trash(TrashTransaction { files: vec![file.clone()], selection_before_op: vec![PathBuf::from("/x/a.png")] });
+        history.push_redo(TrashTransaction { files: vec![file.clone()], selection_before_op: vec![] });
+        assert!(history.can_redo());
+        history.record_trash(TrashTransaction { files: vec![file], selection_before_op: vec![] });
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn cache_evicts_oldest_by_cost() {
+        let mut cache = ThumbnailCache::new(100);
+        let key = |name: &str| ThumbCacheKey { path: PathBuf::from(name), pixel_size: 320, scale: 2, modification: None, file_size: None };
+        cache.insert(key("/a.png"), 60);
+        cache.insert(key("/b.png"), 60);
+        assert!(!cache.contains(&key("/a.png")));
+        assert!(cache.contains(&key("/b.png")));
+        assert_eq!(cache.cost_bytes(), 60);
+    }
+
+    #[test]
+    fn preview_session_tracks_identity_across_catalog_change() {
+        let mut catalog = Catalog::new();
+        let a = MediaItem::new("/x/a.png", MediaKind::Image);
+        let b = MediaItem::new("/x/b.png", MediaKind::Image);
+        catalog.append(vec![a.clone(), b.clone()]);
+        catalog.select(&a.path).unwrap();
+        let mut session = PreviewSession::new();
+        assert!(session.begin(&catalog));
+        catalog.remove(&a.path);
+        session.update(&catalog);
+        assert_eq!(session.item_at(0), Some(Path::new("/x/b.png")));
+    }
+
+    #[test]
+    fn grid_commands_resolve() {
+        assert_eq!(resolve_command(" ", &[]), Some(GridCommand::TogglePreview));
+        assert_eq!(resolve_command("z", &[GridKeyModifier::Command]), Some(GridCommand::Undo));
+        assert_eq!(resolve_command("Z", &[GridKeyModifier::Command, GridKeyModifier::Shift]), Some(GridCommand::Redo));
+    }
+
+    #[test]
+    fn extension_detection_matches_swift_media_surface() {
+        assert_eq!(kind_for_extension(Path::new("/x/photo.avif")), Some(MediaKind::Image));
+        assert_eq!(kind_for_extension(Path::new("/x/clip.mkv")), Some(MediaKind::Movie));
+        assert_eq!(kind_for_extension(Path::new("/x/notes.txt")), None);
+    }
 }
