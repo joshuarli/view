@@ -52,3 +52,13 @@ The AppKit option wins on behavior fidelity and long-term parity; the
 custom host wins on dependency weight only. Next phase builds a second
 binary (`src/bin/app.rs`) on the AppKit path, wired to the core above,
 behind the same `dist` profile as the benchmark.
+
+## Milestones to close the gap
+
+1. Window + `NSCollectionView` grid/carousel on `objc2-app-kit`,
+   backing-scale aware, backed by `Catalog`/scheduler state.
+2. Keyboard + scroll-follow + focus/loading/empty states + title.
+3. History, menus (Edit/View), context menu, drag-out.
+4. TrashController wiring (recycle/restore + undo/redo) and
+   `QLPreviewPanel` Quick Look.
+5. View-mode/window-frame persistence + release `View.app` bundle.
