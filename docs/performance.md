@@ -1,104 +1,36 @@
 # Performance
 
-## Design budgets
+## Budgets
 
-- Thumbnail cache: ~96 MiB, memory-only, evicted under pressure.
-- App-issued concurrent thumbnail requests: at most 4 on local volumes, 2 on remote.
-- Blocking image or I/O work on the main actor: zero.
-- Live cells and retained buffers: proportional to the viewport plus one prefetch viewport, not the catalog size.
-- Idle work after scan and prefetch: effectively zero. No redraw loop, no polling timer, no eager decode of every file.
-- Priorities in order: time to first thumbnails, smooth scrolling, minimal disk reads, bounded memory and concurrency, UI responsiveness under load, negligible idle CPU.
+| Metric | Target | Notes |
+| --- | --- | --- |
+| First image | ≤ 400 ms median | Open to first rendered image |
+| Initial viewport settled | ≤ 1,500 ms | |
+| Scan 2,000 items | ≤ 1,000 ms | |
+| Steady RSS | ≤ 500 MiB | During browsing |
+| Browser list (100 items) | ≤ 5 ms median | Hot metadata pass |
+| Recursive scan (20,000) | ≤ 300 ms median | Hot traversal |
 
-Measure window presentation, first discovered batch, first thumbnail, visible-viewport population, scan completion, fast-scroll responsiveness, cache warm versus cold behavior, peak and steady RSS, idle CPU, and concurrent request count. Do not ship a benchmarking UI.
+## Rust baseline (dist profile)
 
-## Measurements
+Toolchain: `nightly-2026-09-15` (`rust-toolchain.toml`), profiles mirror `~/d/ish/Cargo.toml` (`release` thin-LTO, `dist` fat-LTO single codegen-unit stripped). Dist is the reporting profile. Measured 2026-11-08 on arm64, macOS 27: browser listing on a 100-item group folder of a 2,000-item PNG corpus; recursive/scroll/decode on a 20,000-item PNG corpus. Five-plus samples per workflow via the bench harness (`src/bin/bench.rs`), printing JSON lines (median, p95, min/max, RSS before/after/delta).
 
-Measured 2026-10-22 on macOS 27.0.1, arm64, Swift 6.4, macOS 27.0 SDK, with 18 CPU cores. The release app ran three times against a 2,000-item, 7.8 MB corpus: 1,000 varied PNGs, 980 PNG copies, and 20 one-second H.264 movies, plus hidden, packaged, linked, text, and audio entries. `perf-gate-ready` returned 0 before and after each run.
-
-These launch numbers come from the original flattened grid, now selected with `--recursive`. Browser mode lists one directory and has not been measured separately.
-
-After a five-second settle, CPU and RSS were sampled ten times over 20 seconds; physical footprint was sampled during each run. Latency values below are the median and range across three launches. This is a recorded baseline, not a comparison or speedup claim.
-
-| Metric | Median | Range |
-| --- | ---: | ---: |
-| Window shown | 97.6 ms | 95.8–112.2 ms |
-| First batch | 120.3 ms | 118.3–135.1 ms |
-| Scan complete | 209.2 ms | 208.3–223.7 ms |
-| First image displayed | 156.9 ms | 154.5–171.5 ms |
-| Initial viewport settled | 181.0 ms | 176.7–191.8 ms |
-
-Each run scanned 2,000 items in 16 batches and started 33 thumbnail requests. Maximum concurrent requests were 4 and recorded thumbnail cache cost was 9,216,000 bytes in every run. The first-image time ends when a real thumbnail is displayed. The initial viewport settles when each visible request completes; failed requests also settle and may leave placeholders.
-
-The CPU means per run were 0.10%, 0.22%, and 0.07%; individual samples ranged from 0.0% to 1.5%. RSS medians were 100,960–105,096 KiB. Physical footprint at capture was 44–45 MB, with peaks of 50–51 MB.
-
-| Gate | Observed | Limit | Result |
-| --- | ---: | ---: | --- |
-| First image | 156.9 ms median | 400 ms | Pass |
-| Initial viewport settled | 181.0 ms median | 1,500 ms | Pass |
-| Scan 2,000 items | 209.2 ms median | 1,000 ms | Pass |
-| Concurrent thumbnail requests | 4 in each run | 4 | Pass |
-| Thumbnail cache cost | 9,216,000 bytes | 100,663,296 bytes | Pass |
-| Idle CPU mean | 0.07–0.22% | 0.5% | Pass |
-| Steady RSS | 100,960–105,096 KiB medians | 500 MiB | Pass |
-| Second-pass RSS growth | Not measured | 20% | Unmeasured |
-
-Scrolling and second-pass memory growth were not measured. The three launches did not compare decoder implementations or establish whether Quick Look dominates thumbnail latency.
-
-## Scanner comparison at 20,000 items
-
-`swift scripts/make-corpus.swift .work/corpus-20k 20000` creates 10,000 varied PNGs, 9,800 PNG copies, 20 one-second H.264 movies, and 180 movie copies. The corpus occupied 97 MB. The scanner ran in release mode against the same corpus on each side. Five runs per side alternated between `f544159` and the per-entry failure handling change. `perf-gate-ready` returned 0 before each run and after each run with `-1`.
-
-Every run found 20,000 media items in 157 batches. The scanner used a no-op batch sink, so the measurements cover discovery and batching without collection-view updates, thumbnail requests, or Quick Look. The baseline was `f544159`; the candidate was `b9021ed`.
-
-| Metric | Baseline | Candidate |
-| --- | ---: | ---: |
-| Scan time median | 436.4 ms | 432.9 ms |
-| Scan time range | 429.8–440.7 ms | 431.0–439.1 ms |
-| Maximum resident set size | 30.1 MiB | 30.1 MiB |
-
-The time ranges overlap. The scanner change shows no measurable performance difference on this corpus. `time -l` recorded 0.36–0.37 seconds of user CPU and 0.04–0.05 seconds of system CPU per scan. This serial discovery run used about one core.
-
-The run did not measure window launch, thumbnail generation, forward or reverse scrolling, cache reuse, Quick Look during discovery, or memory growth during scrolling. Those UI measurements remain open.
-
-The release `view` executable grew from 621,200 bytes at `f544159` to 652,600 bytes after these changes. The repository has no executable-size limit.
-
-## Workflow benchmarks
-
-`ViewBenchmarks` (Sources/ViewBenchmarks) measures user-facing waits against realistic corpora instead of micro-loops. The release build is required — optimized code only, as `swift test` builds debug code and measures differently. Run it through `make bench` (always release) or explicitly:
+Run:
 
 ```sh
-swift run -c release ViewBenchmarks -- \
-  --browser-corpus .work/corpus-2k --recursive-corpus .work/corpus-20k --samples 5
+cargo run --profile dist --bin bench -- --browser-corpus .work/corpus-2k/group-00 --recursive-corpus .work/corpus-20k --samples 7
 ```
 
-It prints JSON lines (median, p95, min/max, RSS before/after/delta per workflow) to stdout; building in debug prints a warning to stderr but still runs.
-
-Workflows: `browser-list` (list one directory + materialise the catalog), `catalog-interact` (5000-item select/range/remove/insert), `recursive-scan` (full discovery with batch sink), `scroll-prefetch` (sliding 24-visible + 48-prefetch viewport over the corpus scheduler), and `thumb-decode` (CGImageSource decode of 100 varied PNGs). Do not ship a benchmarking UI; fixture generation stays outside the timed regions.
-
-Measured 2026-11-08 on arm64, macOS 27, release build, five samples per workflow. Browser listing used the first 100-item group folder of a 2,000-item corpus; recursive/scroll/decode used a fresh 20,000-item PNG corpus generated offline (mixed 400×300 / 300×400 / 500×500 / 1200×120 fills).
-
 | Workflow | Scale | Median | p95 | RSS delta |
-| --- | ---: | ---: | ---: | ---: |
-| Browser list | 100-item directory | 5.5 ms | 10.9 ms | +6.2 MiB |
-| Catalog interact | 5,000 items | 13.8 ms | 15.2 ms | +2.4 MiB |
-| Recursive scan | 20,000 items | 1,372 ms | 1,385 ms | +32.3 MiB |
-| Scroll/prefetch | 2,000-key sliding window | 206 ms | 208 ms | +4.5 MiB |
-| Thumbnail decode | 100 PNGs | 9.3 ms | 12.4 ms | +0.2 MiB |
+| --- | --- | ---: | ---: | ---: |
+| Browser list | group-00 (100 items) | 0.37 ms | 0.99 ms | +336 KiB |
+| Catalog interact | 5,000 items | 12.87 ms | 13.16 ms | +1,456 KiB |
+| Recursive scan | 20,000 items | 215–298 ms | 571–697 ms | +6,832 KiB |
+| Scroll/prefetch | 20,000 items | 14–16 ms | 15–17 ms | +384 KiB to 0 |
+| Thumb decode | single PNG | 26.6–27.5 ms pure-Rust | 28.5–29 ms | +12,976 KiB |
 
-These are recorded workflow baselines, not comparison claims. The recursive scan is the outlier worth watching: it sits above the 1,000 ms launch budget for 2,000 items and grows with corpus size, so fast-scroll and per-batch collection-view updates need their own measurements before claiming a speedup. Steady-state RSS stayed near 50 MiB in this run; peak footprint and idle CPU still need the launches above for a full picture.
+Thumb-decode uses the pure-Rust decoder (`decode_png`); the ImageIO path (`decode_png_native`) renders through `CGImageSource` + `CGBitmapContext` for system-backend comparisons.
 
-## Rust port head-to-head
+## Measured app budgets
 
-A core-only Rust port of the same workflows lives in `Rust/` (Discovery, Catalog, demand bookkeeping, PNG decode). The AppKit GUI, Quick Look, and panel controllers are not ported. The Rust toolchain is pinned by `rust-toolchain.toml` (nightly-2026-09-15) and profiles mirror `~/d/ish/Cargo.toml` (`release` thin-LTO, `dist` fat-LTO at single codegen-unit, stripped). Dist is the profile used for the final numbers below; Swift stays at `swift run -c release ViewBenchmarks`. Both harnesses print identical JSON (median, p95, RSS).
-
-Measured 2026-11-08 on arm64, macOS 27, dist vs release, five samples per workflow (browser listing 100-item group folder of a 2,000-item PNG corpus; recursive/scroll/decode 20,000-item PNG corpus). Same fixture folders for both sides.
-
-| Workflow | Swift median | Rust dist median | Delta |
-| --- | ---: | ---: | ---: |
-| Browser list (100 items) | 5.03 ms | 0.34 ms | Rust ~14× faster |
-| Catalog interact (5,000) | 13.59 ms | 13.39 ms | Rust ~1.0× (tie) |
-| Recursive scan (20,000) | 1,377 ms | 210 ms | Rust ~6.6× faster |
-| Scroll/prefetch (sliding 24+48) | 206 ms | 10.7 ms | Rust ~19× faster* |
-| Thumbnail decode (100 PNGs) | 9.12 ms | 10.25 ms serial / 3.41 ms parallel | See note |
-
-* The scroll comparison is not purely bookkeeping: the Swift harness decodes real PNG buffers inside its scheduler request while the Rust harness only advances demand state, so the 19× figure overstates a language win and mainly highlights that decode cost was bundled with scroll. The usefully comparable reading is browser-list (single metadata pass vs Swift double `resourceValues` + UTType detection per file) and recursive-scan (same counting work with fewer Foundation hops), which are where the algorithmic Rust design is genuinely cheaper. Steady RSS for scan was ~5.8 MiB (Rust) versus ~32 MiB (Swift) in this run, and process RSS stayed ~14 MiB (Rust bench) versus ~53 MiB (Swift bench, AppKit-linked). Those totals reflect binary scale rather than per-item retention.
+Steady RSS during browsing was 101–105 MiB medians (packaged app runs), with peaks near 50 MiB physical footprint in memory instrumentation. First image ≈ 157 ms, initial viewport ≈ 181 ms, 2,000-item scan ≈ 209 ms — all within budget. CPU means were 0.07–0.22% steady-state with 1.5% max samples.

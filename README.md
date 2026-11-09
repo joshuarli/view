@@ -3,9 +3,9 @@
 A native macOS browser for images and videos. By default it opens one folder at a time: subfolders and supported images and videos in a thumbnail grid, with folders first and files ordered by descending size. Double-click or press Return on a folder to enter it, and Backspace or Cmd+Up to go back up. `--recursive` instead flattens an entire tree into a single grid.
 
 ```sh
-make release
-./bin/view ~/Pictures
-./bin/view --recursive ~/Pictures
+cargo build --profile dist --bin app --features app
+./target/dist/app ~/Pictures
+./target/dist/app --recursive ~/Pictures
 ```
 
 ## Interaction model
@@ -39,11 +39,11 @@ Search, tagging, libraries, editing, custom video playback, slideshows, AI index
 
 ## Layout
 
-- `Sources/viewCore`: directory listing and recursive scanner, catalog, thumbnails, trash, preview session, launch options. See [docs/architecture.md](docs/architecture.md).
-- `Sources/view`: AppKit window, grid, Quick Look panel, coordinators.
-- `Tests/viewCoreTests`: Swift Testing suites for discovery, catalog, launch options, scheduling, trash.
-- `scripts/build-app.sh`: packages `View.app` from a release build. `make release` runs it.
-- `bin/view`: terminal entry point. Resolves the root to an absolute URL and opens the app.
-- `docs/performance.md`: design budgets and measured baselines.
+- `src/lib.rs`: discovery, catalog, thumbnails, trash, preview session, launch options. See [docs/architecture.md](docs/architecture.md).
+- `src/bin/app.rs`: AppKit window, grid, Quick Look panel.
+- `src/bin/bench.rs`: benchmark harness (release-profile baselines). See [docs/performance.md](docs/performance.md).
+- `tests/`: integration + UI-parity suites. See `PARITY.md`.
+- `scripts/package-app.sh`: packages `View.app` from a dist build.
+- `Info.plist`: bundle metadata.
 
-Build with `swift build -c release`, test with `./scripts/test.sh`, package with `make release`.
+Build with `cargo build --profile dist --bin app --features app`, test with `cargo test --profile dist`, package with `sh scripts/package-app.sh`.

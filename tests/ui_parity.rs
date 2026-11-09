@@ -228,7 +228,7 @@ fn quicklook_thumbnail_generator_produces_video_frame() {
     let dir = temp_subdir("ql");
     let movie_path = {
         let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../.work/tmp/previewtest/preview12.mp4");
+            .join(".work/tmp/previewtest/preview12.mp4");
         if corpus.exists() {
             corpus
         } else {
