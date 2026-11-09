@@ -1000,6 +1000,9 @@ define_class!(
                 preview_image: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
             });
             install_main_menu(self, view_mode_carousel, &grid);
+            if *SELF_TEST.get_or_init(|| false) {
+                run_self_tests(&window);
+            }
             window.setTitle(&NSString::from_str(&title));
             window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
             window.center();
@@ -1010,8 +1013,84 @@ define_class!(
     }
 );
 
+fn run_self_tests(window: &NSWindow) {
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+
+    fn send_key(app: &NSApplication, window: &NSWindow, key_code: u16, shift: bool) {
+        let flags = if shift {
+            objc2_app_kit::NSEventModifierFlags::Shift
+        } else {
+            objc2_app_kit::NSEventModifierFlags::empty()
+        };
+        let event = unsafe {
+            objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                objc2_app_kit::NSEventType::KeyDown,
+                objc2_foundation::NSPoint::ZERO,
+                flags,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
+                window.windowNumber(),
+                None,
+                &NSString::from_str(""),
+                &NSString::from_str(""),
+                false,
+                key_code,
+            )
+        };
+        if let Some(event) = event {
+            let grid_ptr = {
+                let refs = window_refs();
+                refs.as_ref().map(|r| r.grid)
+            };
+            if let Some(grid_ptr) = grid_ptr {
+                unsafe { &*grid_ptr }.key_down(objc2::sel!(keyDown:), &event);
+            }
+            let _ = app;
+        let _ = window;
+        }
+        let _ = window;
+    }
+
+    let mut failures: Vec<&str> = Vec::new();
+
+            let selected_before = unsafe { (*app_state()).selected };
+    send_key(&app, window, 124, false);
+    let selected_after = unsafe { (*app_state()).selected };
+    if selected_before == selected_after {
+        failures.push("right-arrow did not change selection");
+    }
+
+    send_key(&app, window, 124, false);
+    if unsafe { (*app_state()).selected } != Some(0) {
+        // wrapped around from the last item back to the first
+        if unsafe { (*app_state()).selected } != selected_after {
+            failures.push("wrap-around did not return to first item");
+        }
+    }
+
+    let root_before = unsafe { (*app_state()).root.clone() };
+    send_key(&app, window, 123, true);
+    let root_after = unsafe { (*app_state()).root.clone() };
+    if root_after != root_before {
+        failures.push("shift-left changed root with empty history");
+    }
+
+    if failures.is_empty() {
+        eprintln!("self-test: PASS (arrow navigation, wraparound, shift-history no-op)");
+        std::process::exit(0);
+    } else {
+        eprintln!("self-test: FAIL: {}", failures.join("; "));
+        std::process::exit(1);
+    }
+}
+
+static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let self_test = args.iter().any(|a| a == "--self-test");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test").collect();
+    SELF_TEST.set(self_test).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,

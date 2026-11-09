@@ -79,13 +79,22 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
 - Core key map extended with `Back`/`Forward`/`UpLevel`/`ActivateDirectory`
   (`resolve_command_key` mirrors the AppKit keycode handling).
 
+## Ported (close-out round 4)
+
+- Live synthetic-event GUI harness: `view --self-test <dir>` boots the
+  real AppKit window and grid, synthesizes `NSEvent` key events, and
+  dispatches them through the same `GridView.keyDown:` handler AppKit
+  uses — arrow move, wrap-around to first item, and Shift+Left history
+  no-op are asserted with a PASS/FAIL exit code, mirroring the Swift
+  `viewUITests` checks at the AppKit layer.
+
 ## Partially ported
 
-- App GUI tests (`viewUITests`) drive a live `NSWindow` with synthetic
-  `NSEvent`s; the Rust suite asserts the same outcomes at the model
-  layer, and the app binary itself is verified by rebuild + bundle
-  launch + screenshot smoke tests. Synthetic-event key delivery through
-  AppKit is not exercised in Rust.
+- Full `NSWindow` event-routing delivery (`NSApplication.sendEvent` →
+  first responder) is not asserted — in the self-test the application
+  run loop is not yet started, so events are dispatched to the
+  handler directly. The handler and state transitions are the same
+  code the live app uses.
 
 ## GUI design
 

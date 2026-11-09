@@ -23,7 +23,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 libc = "0.2"
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSGridView", "NSStackView", "NSCell"] }
-objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification", "NSUserDefaults", "NSValue"] }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification", "NSUserDefaults", "NSValue", "NSProcessInfo"] }
 objc2-core-graphics = { version = "0.3", optional = true }
 block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "0.3", optional = true }
