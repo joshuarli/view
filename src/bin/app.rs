@@ -1266,6 +1266,11 @@ static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        eprintln!("view: panic: {info}\n{backtrace}");
+        std::process::abort();
+    }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let self_test = args.iter().any(|a| a == "--self-test");
     let debug_enter = args.iter().any(|a| a == "--debug-enter");
