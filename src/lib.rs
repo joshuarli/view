@@ -550,6 +550,14 @@ unsafe extern "C" {
     fn cg_context_draw_image(context: *mut CGContext, rect: (f64, f64, f64, f64), image: *mut CGImage);
     #[link_name = "CGContextRelease"]
     fn cg_context_release(context: *mut CGContext);
+    #[link_name = "CGContextSynchronize"]
+    fn cg_context_synchronize(context: *mut CGContext);
+    #[link_name = "CGContextSetFillColor"]
+    fn cg_context_set_fill_color(context: *mut CGContext, components: *const f64);
+    #[link_name = "CGContextSetRGBFillColor"]
+    fn cg_context_set_rgb_fill_color(context: *mut CGContext, red: f64, green: f64, blue: f64, alpha: f64);
+    #[link_name = "CGContextFillRect"]
+    fn cg_context_fill_rect(context: *mut CGContext, rect: (f64, f64, f64, f64));
 }
 
 #[link(name = "ImageIO", kind = "framework")]
@@ -1238,6 +1246,26 @@ mod tests {
         scheduler.cancel_all();
         assert!(scheduler.pending().is_empty());
         assert!(scheduler.generation_of(&a).is_none());
+    }
+
+
+    #[test]
+    fn decode_png_native_fills_solid_context() {
+        use std::os::raw::c_void;
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        unsafe {
+            let cs = cg_color_space_create_device_rgb();
+            let ctx = cg_context_create(pixels.as_mut_ptr() as *mut c_void, 4, 4, 8, 16, cs, 1);
+            assert!(!ctx.is_null());
+            let red = [1.0f64, 0.0, 0.0, 1.0];
+            cg_context_set_rgb_fill_color(ctx, 0.0, 1.0, 0.0, 1.0);
+            let rect = (0.0, 0.0, 4.0, 4.0);
+            cg_context_fill_rect(ctx, rect);
+            cg_context_synchronize(ctx);
+            cg_context_release(ctx);
+            cg_color_space_release(cs);
+        }
+        assert!(pixels.iter().any(|b| *b != 0), "fill must write to the buffer: {pixels:?}");
     }
 
     #[test]
