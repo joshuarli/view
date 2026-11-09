@@ -2,29 +2,32 @@ use super::*;
 use rustybench::{black_box, Bencher};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "bench_corpus.rs"]
+mod bench_corpus;
+
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
-fn corpus(variable: &str) -> PathBuf {
-    let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} must name a benchmark corpus directory"));
-    let path = PathBuf::from(path);
-    assert!(path.is_dir(), "{variable} must name an existing directory");
-    path
+pub fn write_corpus_for_cli() {
+    let corpus = bench_corpus::ensure();
+    println!("{}", corpus.small.display());
+    println!("{}", corpus.typical.display());
+    println!("{}", corpus.large.display());
 }
 
-fn browser_corpus(variable: &str, min: usize) -> PathBuf {
-    let path = corpus(variable);
-    let listing = list_browser(&path).expect("list browser corpus");
-    assert!(listing.len() >= min, "{variable} must contain at least {min} visible items");
-    assert!(listing.iter().any(|item| item.kind == MediaKind::Image), "{variable} must contain images");
-    path
+fn browser_corpus(path: &std::path::Path, min: usize, label: &str) -> PathBuf {
+    assert!(path.is_dir(), "{label} corpus is missing");
+    let listing = list_browser(path).expect("list browser corpus");
+    assert!(listing.len() >= min, "{label} corpus needs at least {min} visible items");
+    assert!(listing.iter().any(|item| item.kind == MediaKind::Image), "{label} corpus needs an image");
+    path.to_path_buf()
 }
 
-fn browser_listing(bencher: Bencher, variable: &str, min: usize) {
-    let path = browser_corpus(variable, min);
+fn browser_listing(bencher: Bencher, path: &std::path::Path, min: usize, label: &str) {
+    let path = browser_corpus(path, min, label);
     let expected = list_browser(&path).expect("list browser corpus").len();
     bencher.bench_local(|| {
         let items = list_browser(black_box(&path)).expect("list browser corpus");
@@ -35,19 +38,21 @@ fn browser_listing(bencher: Bencher, variable: &str, min: usize) {
 
 #[rustybench::bench(sample_size = 1)]
 fn open_small_directory(bencher: Bencher) {
-    browser_listing(bencher, "VIEW_BENCH_SMALL", 20);
+    let corpus = bench_corpus::ensure();
+    browser_listing(bencher, &corpus.small, 20, "small");
 }
 
 #[rustybench::bench(sample_size = 1)]
 fn open_typical_directory(bencher: Bencher) {
-    browser_listing(bencher, "VIEW_BENCH_TYPICAL", 100);
+    let corpus = bench_corpus::ensure();
+    browser_listing(bencher, &corpus.typical, 100, "typical");
 }
 
 #[rustybench::bench(sample_size = 1)]
 fn recursive_media_scan(bencher: Bencher) {
-    let root = corpus("VIEW_BENCH_LARGE");
+    let root = bench_corpus::ensure().large;
     let expected = scan_recursive(&root).expect("scan corpus").len();
-    assert!(expected >= 1000, "VIEW_BENCH_LARGE must contain at least 1000 media files");
+    assert!(expected >= 1000, "large corpus must contain at least 1000 media files");
     bencher.bench_local(|| {
         let items = scan_recursive(black_box(&root)).expect("scan corpus");
         assert_eq!(items.len(), expected, "recursive corpus changed during measurement");
@@ -57,9 +62,9 @@ fn recursive_media_scan(bencher: Bencher) {
 
 #[rustybench::bench(sample_count = 10, sample_size = 1)]
 fn launch_and_paint_first_image(bencher: Bencher) {
-    let root = browser_corpus("VIEW_BENCH_SMALL", 20);
+    let root = browser_corpus(&bench_corpus::ensure().small, 20, "small");
     let items = list_browser(&root).expect("list startup corpus");
-    assert_eq!(items[0].kind, MediaKind::Image, "VIEW_BENCH_SMALL must begin with an image");
+    assert_eq!(items[0].kind, MediaKind::Image, "small corpus must begin with an image");
     let app = std::env::var_os("VIEW_BENCH_APP").expect("VIEW_BENCH_APP must name the dist app binary");
     bencher.bench_local(|| {
         let output = std::process::Command::new(black_box(&app))
@@ -71,7 +76,7 @@ fn launch_and_paint_first_image(bencher: Bencher) {
 
 fn prepare_window() -> (&'static NSWindow, &'static GridView) {
     ACTIVE.store(true, Ordering::Relaxed);
-    let root = browser_corpus("VIEW_BENCH_TYPICAL", 100);
+    let root = browser_corpus(&bench_corpus::ensure().typical, 100, "typical");
     let state = unsafe { &mut *app_state() };
     state.root = root.clone();
     state.mode = BrowserMode::Browser;
@@ -208,7 +213,7 @@ fn advance_carousel_preview(bencher: Bencher) {
 fn generate_video_thumbnail(bencher: Bencher) {
     let (_, _) = prepare_window();
     let path = unsafe { (*app_state()).items().iter().find(|item| item.kind == MediaKind::Movie) }
-        .expect("VIEW_BENCH_TYPICAL must contain a video").path.clone();
+        .expect("typical corpus must contain a video").path.clone();
     let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
     bench_appkit(bencher, || {
         forget_thumbnail(&path);

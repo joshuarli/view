@@ -2401,4 +2401,4 @@ unsafe impl QLPreviewPanelDataSource for GridView {
 
 #[cfg(feature = "benchmark")]
 #[path = "app/benchmarks.rs"]
-mod benchmarks;
+pub mod benchmarks;

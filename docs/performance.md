@@ -32,30 +32,24 @@ It does not wait for asynchronous video thumbnails to settle.
 
 ## Corpus
 
-Supply three stable, local, read-only datasets. Paths are not included in the
-benchmark report. Use diverse real images and videos, not empty files or copies
-of a single image. Keep the files unchanged between comparisons.
+The harness writes its corpus under `.work/bench-corpus` and reuses that tree
+while the `READY` stamp matches the generator. Benchmarks read this tree.
+`.work/` is gitignored.
 
-- `VIEW_BENCH_SMALL`: a directory with at least 20 visible items. Its first
-  sorted item must be an image for the launch benchmark.
-- `VIEW_BENCH_TYPICAL`: a directory with at least 100 visible items, a video,
-  and two adjacent images in the app's sort order. It drives grid and carousel
-  workloads.
-- `VIEW_BENCH_LARGE`: a tree with at least 1,000 discoverable media files. It
-  drives recursive scanning.
+`small` and `typical` hold generated 1920×1080 JPEGs at quality 0.55, each
+with its own noise seed. `small` holds 42, and the largest sorts first for
+launch. `typical` holds 160 plus `tests/fixtures/carousel.mp4`, and it drives
+the grid, carousel, video, and memory workloads. `large` holds 3,300 distinct
+small JPEGs in 33 directories, and it drives recursive scanning.
 
-A corpus can contain private material. Benchmarks read its files and can show
-them in an AppKit window. Keep reports and diagnostic output private if they
-contain paths or error messages.
+Generation runs before the timed samples. The movie bytes are the fixture the
+Quick Look test already uses.
 
 ## Run
 
-Set the corpus paths, then check that every workload completes:
+Check that every workload completes:
 
 ```sh
-export VIEW_BENCH_SMALL=/path/to/small
-export VIEW_BENCH_TYPICAL=/path/to/typical
-export VIEW_BENCH_LARGE=/path/to/large
 sh scripts/bench.sh --test
 ```
 
@@ -76,9 +70,12 @@ versions. Record failures as failures, not timings.
 To measure resident memory in the production app, run:
 
 ```sh
-cargo build --profile dist --bin app --features app
-target/dist/app --benchmark-memory "$VIEW_BENCH_TYPICAL"
+sh scripts/bench.sh memory
 ```
+
+The script builds the `dist` app, writes the corpus, and runs
+`--benchmark-memory` on `typical`. `VIEW_BENCH_APP` is set by the script for
+the launch benchmark only.
 
 The JSON output reports frame count, maximum sampled RSS, and final RSS in
 bytes. Rustybench 0.4 from crates.io does not report macOS RSS; the upstream
@@ -108,7 +105,11 @@ thumbnails to finish. None of these measurements represents a cold disk cache.
 
 ## Baseline
 
-On 2026-11-09, an Apple M1 with 8 GiB RAM and macOS 27.2 ran five independent
+The table below is the private-corpus measurement from 2026-11-09. The harness
+no longer reads that disk, so do not compare a generated-corpus run with these
+numbers. A generated-corpus baseline has not been recorded yet.
+
+On that date, an Apple M1 with 8 GiB RAM and macOS 27.2 ran five independent
 guarded processes per workload, with five samples per process. The two paint
 paths alternated, and each process passed `perf-gate-ready` immediately before
 and after the timed work. The values below are the median of the five run
