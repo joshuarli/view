@@ -16,7 +16,7 @@ defaults:
 jobs:
   ci:
     name: CI
-    runs-on: macos-15
+    runs-on: macos-latest
     permissions:
       contents: read
     defaults:

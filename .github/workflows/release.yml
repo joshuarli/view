@@ -43,7 +43,7 @@ jobs:
   build:
     name: Build
     needs: preflight
-    runs-on: macos-15
+    runs-on: macos-latest
     permissions:
       actions: write
       contents: read
