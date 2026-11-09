@@ -773,11 +773,13 @@ define_class!(
                 if let Some(img) = thumb_img {
                     let fitted = aspect_fit(img.size(), thumb_rect);
                     unsafe {
-                        img.drawInRect_fromRect_operation_fraction(
+                        img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
                             fitted,
                             NSRect::ZERO,
                             objc2_app_kit::NSCompositingOperation::SourceOver,
                             1.0,
+                            true,
+                            None,
                         );
                     }
                 }
@@ -1299,6 +1301,10 @@ define_class!(
             window.center();
             window.makeKeyAndOrderFront(None);
             let _ = window.makeFirstResponder(Some(&*grid));
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            #[allow(deprecated)]
+            unsafe { app.activateIgnoringOtherApps(true); }
             let _ = window;
         }
     }
@@ -1310,11 +1316,15 @@ static SELF_TEST_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new()
 static SELF_TEST_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SELF_TEST_TRASH_TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-#[allow(dead_code)]
-fn send_shift_mouse_via_app(app: &NSApplication, point: objc2_foundation::NSPoint) {
+fn target_window() -> Option<*mut NSWindow> {
     let refs = window_refs();
-    let Some(refs) = refs.as_ref() else { return };
-    let window = unsafe { &*refs.window };
+    refs.as_ref().map(|r| r.window)
+}
+
+#[allow(dead_code)]
+fn send_shift_mouse_via_app(_app: &NSApplication, point: objc2_foundation::NSPoint) {
+    let Some(window_ptr) = target_window() else { return };
+    let window = unsafe { &*window_ptr };
     let flags = objc2_app_kit::NSEventModifierFlags::Shift;
     let event = unsafe {
         objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
@@ -1337,9 +1347,9 @@ fn send_shift_mouse_via_app(app: &NSApplication, point: objc2_foundation::NSPoin
     }
 }
 
-fn send_key_command(app: &NSApplication, key_code: u16) {
-    let refs = window_refs();
-    let window_number = refs.as_ref().map(|r| unsafe { (*r.window).windowNumber() }).unwrap_or(0);
+fn send_key_command(_app: &NSApplication, key_code: u16) {
+    let Some(window_ptr) = target_window() else { return };
+    let window = unsafe { &*window_ptr };
     let event = unsafe {
         objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             objc2_app_kit::NSEventType::KeyDown,
@@ -1349,7 +1359,7 @@ fn send_key_command(app: &NSApplication, key_code: u16) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0),
-            window_number,
+            window.windowNumber(),
             None,
             &NSString::from_str(""),
             &NSString::from_str(""),
@@ -1358,14 +1368,13 @@ fn send_key_command(app: &NSApplication, key_code: u16) {
         )
     };
     if let Some(event) = event {
-        app.sendEvent(&event);
+        window.sendEvent(&event);
     }
 }
 
-fn send_mouse_via_app(app: &NSApplication, count: objc2_foundation::NSInteger) {
-    let refs = window_refs();
-    let Some(refs) = refs.as_ref() else { return };
-    let window = unsafe { &*refs.window };
+fn send_mouse_via_app(_app: &NSApplication, count: objc2_foundation::NSInteger) {
+    let Some(window_ptr) = target_window() else { return };
+    let window = unsafe { &*window_ptr };
     let dir_index = unsafe { (*app_state()).items.iter().position(|i| i.kind == MediaKind::Directory) };
     let index = dir_index.unwrap_or(0);
     let point = objc2_foundation::NSPoint::new(12.0 + index as f64 * 128.0 + 60.0, 92.0);
@@ -1391,13 +1400,14 @@ fn send_mouse_via_app(app: &NSApplication, count: objc2_foundation::NSInteger) {
     }
 }
 
-fn send_key_via_app(app: &NSApplication, key_code: u16, shift: bool) {
+fn send_key_via_app(_app: &NSApplication, key_code: u16, shift: bool) {
+    let Some(window_ptr) = target_window() else { return };
+    let window = unsafe { &*window_ptr };
     let flags = if shift {
         objc2_app_kit::NSEventModifierFlags::Shift
     } else {
         objc2_app_kit::NSEventModifierFlags::empty()
     };
-    let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or(0);
     let event = unsafe {
         objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             objc2_app_kit::NSEventType::KeyDown,
@@ -1407,7 +1417,7 @@ fn send_key_via_app(app: &NSApplication, key_code: u16, shift: bool) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0),
-            window_number,
+            window.windowNumber(),
             None,
             &NSString::from_str(""),
             &NSString::from_str(""),
@@ -1416,7 +1426,7 @@ fn send_key_via_app(app: &NSApplication, key_code: u16, shift: bool) {
         )
     };
     if let Some(event) = event {
-        app.sendEvent(&event);
+        window.sendEvent(&event);
     }
 }
 
@@ -1680,6 +1690,7 @@ fn main() {
 
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
     let delegate: Retained<AppDelegate> = unsafe { objc2::msg_send![AppDelegate::class(), new] };
     app.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
     app.run();
