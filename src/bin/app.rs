@@ -21,11 +21,11 @@ use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
     QLThumbnailRepresentation,
 };
-use objc2_quick_look_ui::{QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource};
+use objc2_quick_look_ui::{QLPreviewPanel, QLPreviewPanelDataSource};
 
 use view_core::{
-    list_browser, scan_recursive, BrowserMode, MediaKind, MediaItem, TrashHistory, TrashService,
-    TrashTransaction,
+    list_browser, scan_recursive, BrowserMode, Catalog, MediaKind, MediaItem, PreviewSession, TrashHistory,
+    TrashService, TrashTransaction,
 };
 
 const CELL_W: f64 = 160.0;
@@ -48,14 +48,51 @@ struct AppState {
     mode: BrowserMode,
     view_mode: ViewMode,
     thumbnail_size_step: i8,
-    items: Vec<MediaItem>,
-    selected: Option<usize>,
-    selection_anchor: Option<usize>,
-    selection_range: (usize, usize),
+    catalog: Catalog,
+    preview: PreviewSession,
+    preview_bound: bool,
     back: Vec<(PathBuf, Option<PathBuf>)>,
     forward: Vec<(PathBuf, Option<PathBuf>)>,
     _trash_service: TrashService,
     trash_history: TrashHistory,
+}
+
+impl AppState {
+    fn items(&self) -> &[MediaItem] { self.catalog.items() }
+    fn selected(&self) -> Option<usize> { self.catalog.focus_index() }
+}
+
+enum ListingPick {
+    First,
+    Restored(Option<PathBuf>),
+}
+
+fn show_listing(catalog: &mut Catalog, items: Vec<MediaItem>, pick: ListingPick) {
+    *catalog = Catalog::new();
+    catalog.append(items);
+    match pick {
+        ListingPick::First => {
+            if let Some(path) = catalog.items().first().map(|item| item.path.clone()) {
+                catalog.select(&path).expect("first item is in the catalog");
+            }
+        }
+        ListingPick::Restored(Some(path)) => {
+            if catalog.select(&path).is_err() {
+                catalog.clear_selection();
+            }
+        }
+        ListingPick::Restored(None) => catalog.clear_selection(),
+    }
+}
+
+fn select_index(catalog: &mut Catalog, index: usize) {
+    let path = catalog.items()[index].path.clone();
+    catalog.select(&path).expect("selection index is in the catalog");
+}
+
+fn focused_item(state: &AppState) -> Option<MediaItem> {
+    let index = state.catalog.focus_index()?;
+    state.catalog.items().get(index).cloned()
 }
 
 struct SyncCell(std::cell::UnsafeCell<AppState>);
@@ -190,11 +227,11 @@ fn update_carousel_preview() {
     if state.view_mode != ViewMode::Carousel {
         return;
     }
-    let Some(index) = state.selected else {
+    let Some(index) = state.selected() else {
         preview_image.setImage(None);
         return;
     };
-    let Some(item) = state.items.get(index) else {
+    let Some(item) = state.items().get(index) else {
         preview_image.setImage(None);
         return;
     };
@@ -245,7 +282,7 @@ fn apply_view_mode_layout() {
         scroll.setHasVerticalScroller(!carousel);
         scroll.setHasHorizontalScroller(carousel);
         let viewport = scroll.contentView().bounds().size;
-        let doc_size = content_size(viewport.width, viewport.height, (*app_state()).items.len(), carousel);
+        let doc_size = content_size(viewport.width, viewport.height, (*app_state()).items().len(), carousel);
         grid.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), doc_size));
         grid.setNeedsDisplay(true);
     }
@@ -310,12 +347,11 @@ fn path_from_url(url: &NSURL) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
 }
 
-fn trash_selected(grid: &GridView) {
-    let (items, indexes) = {
+fn trash_selected(_grid: &GridView) {
+    let items = {
         let state = unsafe { &mut *app_state() };
-        let Some(index) = state.selected else { return };
-        let Some(item) = state.items.get(index) else { return };
-        (vec![item.clone()], vec![index])
+        let Some(item) = focused_item(state) else { return };
+        vec![item]
     };
     let workspace = NSWorkspace::sharedWorkspace();
     let urls: Vec<Retained<NSURL>> = items.iter().map(|i| url_from_path(&i.path)).collect();
@@ -339,27 +375,27 @@ fn trash_selected(grid: &GridView) {
                 if had_error {
                     return;
                 }
-                let state = unsafe { &mut *app_state() };
-                let mut files = Vec::new();
-                for (original, trashed) in trashed_map.iter() {
-                    if let Some(pos) = state.items.iter().position(|i| &i.path == original) {
-                        files.push(view_core::TrashedFile {
-                            item: state.items[pos].clone(),
-                            trashed_path: trashed.clone(),
-                            index: pos,
-                        });
+                {
+                    let state = unsafe { &mut *app_state() };
+                    let mut files = Vec::new();
+                    for (original, trashed) in trashed_map.iter() {
+                        if let Some(pos) = state.items().iter().position(|i| &i.path == original) {
+                            files.push(view_core::TrashedFile {
+                                item: state.items()[pos].clone(),
+                                trashed_path: trashed.clone(),
+                                index: pos,
+                            });
+                        }
                     }
-                }
-                for file in files.iter().rev() {
-                    if let Some(pos) = state.items.iter().position(|i| i.path == file.item.path) {
-                        state.items.remove(pos);
+                    for file in files.iter().rev() {
+                        state.catalog.remove(&file.item.path);
                     }
+                    state.trash_history.record_trash(view_core::TrashTransaction {
+                        files,
+                        selection_before_op: vec![],
+                    });
                 }
-                state.selected = state.items.first().map(|_| 0);
-                state.trash_history.record_trash(view_core::TrashTransaction {
-                    files,
-                    selection_before_op: vec![],
-                });
+                reconcile_preview();
                 if let Some(refs) = window_refs().as_ref() {
                     let grid = unsafe { &*refs.grid };
                     grid.setNeedsDisplay(true);
@@ -398,8 +434,8 @@ fn undo_trash(grid: &GridView) {
         if !succeeded.is_empty() {
             let selection_before_op = transaction.selection_before_op.clone();
             for file in succeeded.iter().rev() {
-                let at = file.index.min(state.items.len());
-                state.items.insert(at, file.item.clone());
+                let at = file.index.min(state.catalog.count());
+                state.catalog.insert(file.item.clone(), at);
             }
             state.trash_history.push_redo(TrashTransaction { files: succeeded, selection_before_op });
         }
@@ -407,6 +443,7 @@ fn undo_trash(grid: &GridView) {
             state.trash_history.push_undo(TrashTransaction { files: residual, selection_before_op: transaction.selection_before_op });
         }
     }
+    reconcile_preview();
     grid.setNeedsDisplay(true);
 }
 
@@ -428,11 +465,8 @@ fn redo_trash(grid: &GridView) {
         let state = unsafe { &mut *app_state() };
         let selection_before_op = transaction.selection_before_op.clone();
         for file in succeeded.iter().rev() {
-            if let Some(pos) = state.items.iter().position(|i| i.path == file.item.path) {
-                state.items.remove(pos);
-            }
+            state.catalog.remove(&file.item.path);
         }
-        state.selected = state.items.first().map(|_| 0);
         if !succeeded.is_empty() {
             state.trash_history.push_undo(TrashTransaction { files: succeeded, selection_before_op });
         }
@@ -440,6 +474,7 @@ fn redo_trash(grid: &GridView) {
             state.trash_history.push_redo(TrashTransaction { files: residual, selection_before_op: transaction.selection_before_op });
         }
     }
+    reconcile_preview();
     grid.setNeedsDisplay(true);
 }
 
@@ -450,7 +485,34 @@ fn quicklook_selected() {
         panel.orderOut(None);
         return;
     }
+    if unsafe { (*app_state()).catalog.selected().is_none() } {
+        return;
+    }
     panel.makeKeyAndOrderFront(None);
+}
+
+fn reconcile_preview() {
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
+    if !panel.isVisible() {
+        return;
+    }
+    let index = {
+        let state = unsafe { &mut *app_state() };
+        if state.preview.begin(&state.catalog) {
+            state.preview.current_index()
+        } else {
+            None
+        }
+    };
+    let Some(index) = index else {
+        panel.orderOut(None);
+        return;
+    };
+    unsafe {
+        panel.setCurrentPreviewItemIndex(index as objc2_foundation::NSInteger);
+        panel.reloadData();
+    }
 }
 
 fn make_context_action_item(target: &GridView, title: &str, action: objc2::runtime::Sel, key: Option<&str>, modifier_mask: objc2_app_kit::NSEventModifierFlags) -> Retained<NSMenuItem> {
@@ -488,24 +550,27 @@ fn place_context_menu(target: &GridView, event: &objc2_app_kit::NSEvent) {
 }
 
 fn enter_directory(path: PathBuf) {
-    let state = unsafe { &mut *app_state() };
-    let current = state.root.clone();
-    let previous = state.selected.and_then(|i| state.items.get(i)).map(|item| item.path.clone());
-    state.back.push((current, previous));
-    state.forward.clear();
-    state.root = path;
-    state.items = load_listing(&state.root, state.mode);
-    state.selected = state.items.first().map(|_| 0);
-    state.selection_anchor = state.selected;
-    state.selection_range = (0, 0);
+    let title = {
+        let state = unsafe { &mut *app_state() };
+        let current = state.root.clone();
+        let previous = state.catalog.selected().map(|path| path.to_path_buf());
+        state.back.push((current, previous));
+        state.forward.clear();
+        state.root = path;
+        let mode = state.mode;
+        let root = state.root.clone();
+        show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::First);
+        state.root.display().to_string()
+    };
     if let Some(refs) = window_refs().as_ref() {
-        unsafe { (&*refs.window).setTitle(&NSString::from_str(&state.root.display().to_string())); }
+        unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
     }
     apply_view_mode_layout();
+    reconcile_preview();
 }
 
 fn open_selected() {
-    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
     if item.kind == MediaKind::Directory {
         enter_directory(item.path);
     } else {
@@ -515,12 +580,12 @@ fn open_selected() {
 }
 
 fn show_selected_in_finder() {
-    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
     let _ = std::process::Command::new("open").arg("-R").arg(&item.path).spawn();
 }
 
 fn copy_selected_path() {
-    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
     let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
     pasteboard.clearContents();
     unsafe { pasteboard.setString_forType(&NSString::from_str(&item.path.display().to_string()), &objc2_app_kit::NSPasteboardTypeString) };
@@ -530,14 +595,9 @@ static DRAG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 fn dragging_items(view: &GridView) -> Vec<Retained<objc2_app_kit::NSDraggingItem>> {
     let state = unsafe { &*app_state() };
-    let Some(selected) = state.selected else { return Vec::new() };
-    let (start, end) = if state.selection_anchor.is_some() {
-        state.selection_range
-    } else {
-        (selected, selected)
-    };
+    let Some((start, end)) = state.catalog.selection_bounds() else { return Vec::new() };
     (start..=end).filter_map(|index| {
-        let item = state.items.get(index)?;
+        let item = state.items().get(index)?;
         let url = url_from_path(&item.path);
         let dragging_item: Retained<objc2_app_kit::NSDraggingItem> = unsafe {
             let alloc: *mut objc2_app_kit::NSDraggingItem = objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), alloc];
@@ -587,14 +647,15 @@ fn accept_dropped_path(view: &GridView, pasteboard: &objc2_app_kit::NSPasteboard
     if unsafe { (*app_state()).root != parent } {
         enter_directory(parent.to_path_buf());
     }
-    let state = unsafe { &mut *app_state() };
-    let Some(index) = state.items.iter().position(|item| item.path == path) else { return false };
-    state.selected = Some(index);
-    state.selection_anchor = Some(index);
-    state.selection_range = (index, index);
+    {
+        let state = unsafe { &mut *app_state() };
+        let Some(index) = state.items().iter().position(|item| item.path == path) else { return false };
+        select_index(&mut state.catalog, index);
+    }
     view.scroll_selection_into_view();
     update_carousel_preview();
     view.setNeedsDisplay(true);
+    reconcile_preview();
     true
 }
 
@@ -756,9 +817,7 @@ define_class!(
         fn draw_rect(&self, rect: NSRect) {
             let state = unsafe { &mut *app_state() };
             let scale = thumbnail_scale();
-            let selected = state.selected;
-            let range_start = state.selection_range.0;
-            let range_end = state.selection_range.1;
+            let bounds = state.catalog.selection_bounds();
 
             unsafe {
                 NSColor::windowBackgroundColor().setFill();
@@ -779,12 +838,12 @@ define_class!(
                 p
             };
 
-            for (i, item) in state.items.iter().enumerate() {
+            for (i, item) in state.items().iter().enumerate() {
                 let cell = self.cell_rect(i);
                 if !objc2_foundation::NSIntersectsRect(cell, rect) {
                     continue;
                 }
-                let is_selected = selected == Some(i) || (i >= range_start && i <= range_end && state.selection_anchor.is_some());
+                let is_selected = bounds.is_some_and(|(start, end)| i >= start && i <= end);
                 if is_selected {
                     let path = unsafe { objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(cell, 10.0, 10.0) };
                     let fill = unsafe { NSColor::selectedContentBackgroundColor().colorWithAlphaComponent(0.6) };
@@ -933,19 +992,19 @@ define_class!(
             if code == 123 && shift {
                 if let Some((url, sel)) = state.back.pop() {
                     let current = state.root.clone();
-                    state.forward.push((current, state.selected.and_then(|i| state.items.get(i)).map(|i| i.path.clone())));
+                    let leaving = state.catalog.selected().map(|path| path.to_path_buf());
+                    state.forward.push((current, leaving));
                     state.root = url;
-                    state.items = load_listing(&state.root, state.mode);
-                    state.selected = sel.and_then(|s| state.items.iter().position(|i| i.path == s));
-                    let idx = state.selected.unwrap_or(0);
-                    state.selection_anchor = state.selected;
-                    state.selection_range = (idx, idx);
+                    let mode = state.mode;
+                    let root = state.root.clone();
+                    show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::Restored(sel));
                     let title = state.root.display().to_string();
                     if let Some(refs) = window_refs().as_ref() {
                         unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
                     }
                     apply_view_mode_layout();
                     update_carousel_preview();
+                    reconcile_preview();
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -953,19 +1012,19 @@ define_class!(
             if code == 124 && shift {
                 if let Some((url, sel)) = state.forward.pop() {
                     let current = state.root.clone();
-                    state.back.push((current, state.selected.and_then(|i| state.items.get(i)).map(|i| i.path.clone())));
+                    let leaving = state.catalog.selected().map(|path| path.to_path_buf());
+                    state.back.push((current, leaving));
                     state.root = url;
-                    state.items = load_listing(&state.root, state.mode);
-                    state.selected = sel.and_then(|s| state.items.iter().position(|i| i.path == s));
-                    let idx = state.selected.unwrap_or(0);
-                    state.selection_anchor = state.selected;
-                    state.selection_range = (idx, idx);
+                    let mode = state.mode;
+                    let root = state.root.clone();
+                    show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::Restored(sel));
                     let title = state.root.display().to_string();
                     if let Some(refs) = window_refs().as_ref() {
                         unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
                     }
                     apply_view_mode_layout();
                     update_carousel_preview();
+                    reconcile_preview();
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -976,47 +1035,46 @@ define_class!(
                     if let Some(parent_url) = parent {
                         if parent_url != state.root {
                             let current = state.root.clone();
-                            state.back.push((current, state.selected.and_then(|i| state.items.get(i)).map(|x| x.path.clone())));
+                            let leaving = state.catalog.selected().map(|path| path.to_path_buf());
+                            state.back.push((current, leaving));
                             state.forward.clear();
                             state.root = parent_url;
-                            state.items = load_listing(&state.root, state.mode);
-                            state.selected = if state.items.is_empty() { None } else { Some(0) };
-                            state.selection_anchor = state.selected;
-                            state.selection_range = (0, 0);
+                            let mode = state.mode;
+                            let root = state.root.clone();
+                            show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::First);
                             let title = state.root.display().to_string();
                             if let Some(refs) = window_refs().as_ref() {
                                 unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
                             }
                             apply_view_mode_layout();
                             update_carousel_preview();
+                            reconcile_preview();
                             self.setNeedsDisplay(true);
                         }
                     }
                 }
                 return;
             }
-            if state.items.is_empty() {
+            if state.items().is_empty() {
                 return;
             }
             let visible_cols = columns_for(self.bounds().size.width).max(1);
-            let cols = if state.view_mode == ViewMode::Carousel || visible_cols >= state.items.len() { 1 } else { visible_cols };
-            let cur = state.selected.unwrap_or(0);
+            let cols = if state.view_mode == ViewMode::Carousel || visible_cols >= state.items().len() { 1 } else { visible_cols };
+            let cur = state.selected().unwrap_or(0);
             let next = match code {
                 123 | 126 => cur as isize - if code == 126 { cols as isize } else { 1 },
                 124 | 125 => cur as isize + if code == 125 { cols as isize } else { 1 },
                 36 => {
-                    if let Some(item) = state.items.get(cur).filter(|item| item.kind == MediaKind::Directory) {
+                    if let Some(item) = state.items().get(cur).filter(|item| item.kind == MediaKind::Directory) {
                         enter_directory(item.path.clone());
                     }
                     return;
                 }
                 _ => return,
             };
-            let n = state.items.len() as isize;
+            let n = state.items().len() as isize;
             let wrapped = ((next % n) + n) % n;
-            state.selected = Some(wrapped as usize);
-            state.selection_anchor = Some(wrapped as usize);
-            state.selection_range = (wrapped as usize, wrapped as usize);
+            select_index(&mut state.catalog, wrapped as usize);
             self.scroll_selection_into_view();
             update_carousel_preview();
             self.setNeedsDisplay(true);
@@ -1059,9 +1117,7 @@ define_class!(
             let view_location = self.convertPoint_fromView(location, None);
             let state = unsafe { &mut *app_state() };
             if let Some(index) = self.index_at_point(view_location) {
-                state.selected = Some(index);
-                state.selection_anchor = Some(index);
-                state.selection_range = (index, index);
+                select_index(&mut state.catalog, index);
                 update_carousel_preview();
                 self.setNeedsDisplay(true);
             }
@@ -1075,31 +1131,28 @@ define_class!(
             let location = event.locationInWindow();
             let view_location = self.convertPoint_fromView(location, None);
             let state = unsafe { &mut *app_state() };
-            if state.items.is_empty() {
+            if state.items().is_empty() {
                 return;
             }
             let Some(index) = self.index_at_point(view_location) else { return };
             self.ivars().drag_candidate.set(true);
             if event.clickCount() >= 2 {
-                if let Some(item) = state.items.get(index).filter(|item| item.kind == MediaKind::Directory) {
+                if let Some(item) = state.items().get(index).filter(|item| item.kind == MediaKind::Directory) {
                     enter_directory(item.path.clone());
                 }
-            } else if index < state.items.len() {
+            } else if index < state.items().len() {
                 let shift = event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+                let clicked = state.items()[index].path.clone();
                 if shift {
-                    if let Some(anchor) = state.selection_anchor {
-                        state.selection_range = (anchor.min(index), anchor.max(index));
+                    if let Some(anchor) = state.catalog.anchor().map(|path| path.to_path_buf()) {
+                        state.catalog.select_range(&anchor, &clicked).expect("shift selection stays in the catalog");
                     } else {
-                        state.selection_anchor = Some(index);
-                        state.selection_range = (index, index);
+                        state.catalog.select(&clicked).expect("clicked item is in the catalog");
                     }
-                    state.selected = Some(index);
-                } else if state.selection_anchor.is_some() && (state.selection_range.0..=state.selection_range.1).contains(&index) {
+                } else if state.catalog.anchor().is_some() && state.catalog.selection_bounds().is_some_and(|(start, end)| (start..=end).contains(&index)) {
                     self.ivars().deferred_click.set(Some(index));
                 } else {
-                    state.selection_anchor = Some(index);
-                    state.selection_range = (index, index);
-                    state.selected = Some(index);
+                    state.catalog.select(&clicked).expect("clicked item is in the catalog");
                 }
                 update_carousel_preview();
             }
@@ -1112,9 +1165,7 @@ define_class!(
             self.ivars().drag_candidate.set(false);
             if let Some(index) = self.ivars().deferred_click.take() {
                 let state = unsafe { &mut *app_state() };
-                state.selected = Some(index);
-                state.selection_anchor = Some(index);
-                state.selection_range = (index, index);
+                select_index(&mut state.catalog, index);
                 update_carousel_preview();
                 self.setNeedsDisplay(true);
             }
@@ -1148,40 +1199,55 @@ define_class!(
 
         #[unsafe(method(beginPreviewPanelControl:))]
         fn begin_preview_panel_control(&self, panel: &QLPreviewPanel) {
+            let index = {
+                let state = unsafe { &mut *app_state() };
+                if !state.preview.begin(&state.catalog) {
+                    return;
+                }
+                state.preview.current_index().expect("preview session has a focus")
+            };
             unsafe {
                 panel.setDataSource(Some(objc2::runtime::ProtocolObject::from_ref(self)));
-                let index = (*app_state()).selected.unwrap_or(0) as objc2_foundation::NSInteger;
-                panel.setCurrentPreviewItemIndex(index);
+                panel.setCurrentPreviewItemIndex(index as objc2_foundation::NSInteger);
                 let _: () = objc2::msg_send![panel, addObserver: self, forKeyPath: &*NSString::from_str("currentPreviewItemIndex"), options: 0usize, context: core::ptr::null_mut::<core::ffi::c_void>()];
             }
+            unsafe { (*app_state()).preview_bound = true };
         }
 
         #[unsafe(method(endPreviewPanelControl:))]
         fn end_preview_panel_control(&self, panel: &QLPreviewPanel) {
-            unsafe {
-                let _: () = objc2::msg_send![panel, removeObserver: self, forKeyPath: &*NSString::from_str("currentPreviewItemIndex")];
-                panel.setDataSource(None);
+            let bound = {
+                let state = unsafe { &mut *app_state() };
+                state.preview.end();
+                let bound = state.preview_bound;
+                state.preview_bound = false;
+                bound
+            };
+            if bound {
+                unsafe {
+                    let _: () = objc2::msg_send![panel, removeObserver: self, forKeyPath: &*NSString::from_str("currentPreviewItemIndex")];
+                }
             }
+            unsafe { panel.setDataSource(None) };
         }
 
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn observe_preview_index(&self, _key: &NSString, panel: &QLPreviewPanel, _change: &NSDictionary, _context: *mut core::ffi::c_void) {
             let index = unsafe { panel.currentPreviewItemIndex() };
+            if index < 0 { return; }
             let state = unsafe { &mut *app_state() };
-            if index >= 0 && (index as usize) < state.items.len() {
-                let index = index as usize;
-                state.selected = Some(index);
-                state.selection_anchor = Some(index);
-                state.selection_range = (index, index);
-                self.scroll_selection_into_view();
-                update_carousel_preview();
-                self.setNeedsDisplay(true);
+            let Some(path) = state.preview.select_at(index as usize) else { return };
+            if state.catalog.selected() != Some(path.as_path()) {
+                state.catalog.select(&path).expect("preview item is in the catalog");
             }
+            self.scroll_selection_into_view();
+            update_carousel_preview();
+            self.setNeedsDisplay(true);
         }
 
         #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
         fn number_of_preview_items_in_preview_panel(&self, _panel: Option<&QLPreviewPanel>) -> objc2_foundation::NSInteger {
-            unsafe { &*app_state() }.items.len() as objc2_foundation::NSInteger
+            unsafe { &*app_state() }.preview.count() as objc2_foundation::NSInteger
         }
 
         #[unsafe(method_id(previewPanel:previewItemAtIndex:))]
@@ -1190,9 +1256,11 @@ define_class!(
             _panel: Option<&QLPreviewPanel>,
             index: objc2_foundation::NSInteger,
         ) -> Retained<NSURL> {
-            let item = unsafe { &*app_state() }.items.get(index as usize).cloned();
-            let item = item.unwrap_or(MediaItem::new("/", MediaKind::Directory));
-            url_from_path(&item.path)
+            let state = unsafe { &*app_state() };
+            let path = (index >= 0).then(|| state.preview.item_at(index as usize)).flatten()
+                .or_else(|| state.preview.current_index().and_then(|current| state.preview.item_at(current)))
+                .expect("quick look index is outside the preview session");
+            url_from_path(path)
         }
     }
 
@@ -1254,11 +1322,11 @@ impl GridView {
             let row = ((point.y - 16.0) / (CELL_H * scale + SPACING)) as usize;
             row.checked_mul(columns)?.checked_add(column)?
         };
-        (index < state.items.len() && objc2_foundation::NSPointInRect(point, self.cell_rect(index))).then_some(index)
+        (index < state.items().len() && objc2_foundation::NSPointInRect(point, self.cell_rect(index))).then_some(index)
     }
 
     fn scroll_selection_into_view(&self) {
-        let index = unsafe { (*app_state()).selected };
+        let index = unsafe { (*app_state()).selected() };
         let Some(index) = index else { return };
         let cell = self.cell_rect(index);
         unsafe { self.scrollRectToVisible(cell); };
@@ -1311,7 +1379,7 @@ define_class!(
                 (
                     state.root.display().to_string(),
                     NSSize::new(1100.0, 760.0),
-                    state.items.len(),
+                    state.items().len(),
                 )
             };
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), frame_size);
@@ -1395,7 +1463,7 @@ define_class!(
                 std::process::exit(0);
             }
             if *BENCHMARK_STARTUP.get_or_init(|| false) {
-                assert_eq!(unsafe { (&(*app_state()).items)[0].kind }, MediaKind::Image, "startup corpus must begin with an image");
+                assert_eq!(unsafe { (*app_state()).items()[0].kind }, MediaKind::Image, "startup corpus must begin with an image");
                 assert!(preview_image.image().is_some(), "startup preview must contain an image");
                 let bounds = preview_nsview.bounds();
                 let bitmap = preview_nsview.bitmapImageRepForCachingDisplayInRect(bounds).expect("startup preview bitmap");
@@ -1433,15 +1501,15 @@ fn assert_orientation(bitmap: &objc2_app_kit::NSBitmapImageRep) {
 fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView) {
     unsafe { (*app_state()).view_mode = ViewMode::Carousel; }
     apply_view_mode_layout();
-    assert_eq!(unsafe { (*app_state()).items.len() }, 1);
+    assert_eq!(unsafe { (*app_state()).items().len() }, 1);
     open_selected();
-    assert_eq!(unsafe { (*app_state()).selected }, Some(0));
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(0));
     assert!(preview.image().is_some(), "first image is visible after entering a folder");
     let bounds = preview.bounds();
     let bitmap = preview.bitmapImageRepForCachingDisplayInRect(bounds).expect("preview bitmap");
     preview.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
     assert_orientation(&bitmap);
-    assert!(unsafe { (*app_state()).items.len() } >= 3);
+    assert!(unsafe { (*app_state()).items().len() } >= 3);
     let folder = unsafe { (*app_state()).root.clone() };
     let parent = folder.parent().unwrap().to_path_buf();
     assert_eq!(window.title().to_string(), folder.display().to_string(), "directory entry updates the window title");
@@ -1449,16 +1517,16 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
     send_key_via_app(&app, 123, false);
-    assert_eq!(unsafe { (*app_state()).selected }, Some(unsafe { (*app_state()).items.len() } - 1), "left from the first item wraps to the last");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(unsafe { (*app_state()).items().len() } - 1), "left from the first item wraps to the last");
     send_key_via_app(&app, 124, false);
-    assert_eq!(unsafe { (*app_state()).selected }, Some(0), "right from the last item wraps to the first");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(0), "right from the last item wraps to the first");
     send_key_via_app(&app, 123, true);
     assert_eq!(unsafe { (*app_state()).root.clone() }, parent, "back returns to the previous folder");
-    assert_eq!(unsafe { (*app_state()).selected.and_then(|i| (&(*app_state()).items).get(i)).map(|item| item.path.clone()) }, Some(folder.clone()), "back restores the directory selection");
+    assert_eq!(unsafe { (*app_state()).selected().and_then(|i| (*app_state()).items().get(i)).map(|item| item.path.clone()) }, Some(folder.clone()), "back restores the directory selection");
     assert_eq!(window.title().to_string(), parent.display().to_string(), "back updates the window title");
     send_key_via_app(&app, 124, true);
     assert_eq!(unsafe { (*app_state()).root.clone() }, folder, "forward reopens the folder");
-    assert_eq!(unsafe { (*app_state()).selected }, Some(0), "forward restores the selected item");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(0), "forward restores the selected item");
     assert_eq!(window.title().to_string(), folder.display().to_string(), "forward updates the window title");
 
     window.makeKeyAndOrderFront(None);
@@ -1472,23 +1540,23 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         &NSString::from_str("\u{f703}"), &NSString::from_str("\u{f703}"), false, 124,
     ).unwrap();
     panel.sendEvent(&event);
-    assert_eq!(unsafe { (*app_state()).selected }, Some(1), "quick look arrow advances selection");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(1), "quick look arrow advances selection");
     unsafe { panel.setCurrentPreviewItemIndex(1); }
-    assert_eq!(unsafe { (*app_state()).selected }, Some(1), "quick look advances selection");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(1), "quick look advances selection");
     let event = objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
         objc2_app_kit::NSEventType::KeyDown, NSPoint::ZERO,
         objc2_app_kit::NSEventModifierFlags::empty(), 0.0, panel.windowNumber(), None,
         &NSString::from_str("\u{f702}"), &NSString::from_str("\u{f702}"), false, 123,
     ).unwrap();
     panel.sendEvent(&event);
-    assert_eq!(unsafe { (*app_state()).selected }, Some(0), "quick look arrow moves selection backwards");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(0), "quick look arrow moves selection backwards");
     panel.orderOut(None);
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
     quicklook_selected();
     assert!(unsafe { panel.dataSource() }.is_some(), "quick look can reopen");
     unsafe { panel.setCurrentPreviewItemIndex(2); }
-    assert_eq!(unsafe { (*app_state()).selected }, Some(2), "reopened quick look updates selection");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(2), "reopened quick look updates selection");
     panel.orderOut(None);
 
     unsafe { (*app_state()).view_mode = ViewMode::Grid; }
@@ -1507,9 +1575,9 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
     send_key_via_app(&app, 125, false);
-    assert_eq!(unsafe { (*app_state()).selected }, Some(6), "down moves by the visible column count");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(6), "down moves by the visible column count");
     send_key_via_app(&app, 126, false);
-    assert_eq!(unsafe { (*app_state()).selected }, Some(2), "up returns by the visible column count");
+    assert_eq!(unsafe { (*app_state()).selected() }, Some(2), "up returns by the visible column count");
     let row_before_zoom = grid.cell_rect(3).origin.y;
     send_key_command(&app, 24);
     assert!(grid.cell_rect(0).size.width > CELL_W, "command plus increases thumbnails");
@@ -1525,9 +1593,9 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     send_key_command(&app, 27);
 
     let state = unsafe { &mut *app_state() };
-    state.selected = Some(1);
-    state.selection_anchor = Some(0);
-    state.selection_range = (0, 1);
+    let anchor = state.items()[0].path.clone();
+    let focus = state.items()[1].path.clone();
+    state.catalog.select_range(&anchor, &focus).expect("drag selection stays in the catalog");
     assert!(grid.respondsToSelector(objc2::sel!(draggingSession:sourceOperationMaskForDraggingContext:)), "drag source operation callback is registered");
     assert!(grid.respondsToSelector(objc2::sel!(draggingSession:endedAtPoint:operation:)), "drag completion callback is registered");
     DRAG_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1541,7 +1609,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     for (index, item) in items.iter().enumerate() {
         let writer = item.item();
         let url = writer.downcast_ref::<NSURL>().expect("file URL pasteboard writer");
-        assert_eq!(path_from_url(url), unsafe { (&(*app_state()).items)[index].path.clone() });
+        assert_eq!(path_from_url(url), unsafe { (*app_state()).items()[index].path.clone() });
     }
     assert!(grid.respondsToSelector(objc2::sel!(draggingEntered:)), "drop negotiation is registered");
     assert!(grid.respondsToSelector(objc2::sel!(performDragOperation:)), "drop handler is registered");
@@ -1556,7 +1624,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     enter_directory(parent.to_path_buf());
     assert!(accept_dropped_path(grid, &pasteboard));
     assert_eq!(unsafe { (*app_state()).root.clone() }, folder);
-    assert_eq!(unsafe { (&(*app_state()).items)[(*app_state()).selected.unwrap()].path.clone() }, file);
+    assert_eq!(unsafe { (*app_state()).items()[(*app_state()).selected().unwrap()].path.clone() }, file);
     let url = url_from_path(parent);
     pasteboard.clearContents();
     assert!(unsafe { pasteboard.setString_forType(&url.absoluteString().unwrap(), &objc2_app_kit::NSPasteboardTypeFileURL) });
@@ -1571,9 +1639,9 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     std::fs::rename(&original, &trashed).unwrap();
     {
         let state = unsafe { &mut *app_state() };
-        let index = state.items.iter().position(|item| item.path == original).unwrap();
-        let item = state.items.remove(index);
-        state.selected = Some(0);
+        let index = state.items().iter().position(|item| item.path == original).unwrap();
+        let item = state.items()[index].clone();
+        state.catalog.remove(&original);
         state.trash_history.record_trash(TrashTransaction {
             files: vec![view_core::TrashedFile { item, trashed_path: trashed.clone(), index }],
             selection_before_op: vec![original.clone()],
@@ -1582,16 +1650,16 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     send_key_command(&app, 6);
     assert_eq!(std::fs::read(&original).unwrap(), content, "undo restores the file contents");
     assert!(!trashed.exists(), "undo removes the trashed copy");
-    assert!(unsafe { (*app_state()).items.iter().any(|item| item.path == original) }, "undo restores the catalog item");
+    assert!(unsafe { (*app_state()).items().iter().any(|item| item.path == original) }, "undo restores the catalog item");
     unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
     assert!(!original.exists(), "redo removes the original file");
     assert_eq!(std::fs::read(&trashed).unwrap(), content, "redo preserves the file contents");
-    assert!(!unsafe { (*app_state()).items.iter().any(|item| item.path == original) }, "redo removes the catalog item");
+    assert!(!unsafe { (*app_state()).items().iter().any(|item| item.path == original) }, "redo removes the catalog item");
     std::fs::write(&original, b"replacement").unwrap();
     send_key_command(&app, 6);
     assert_eq!(std::fs::read(&original).unwrap(), b"replacement", "undo preserves a conflicting file");
     assert_eq!(std::fs::read(&trashed).unwrap(), content, "conflict leaves the trashed file intact");
-    assert!(!unsafe { (*app_state()).items.iter().any(|item| item.path == original) }, "conflict does not restore the catalog item");
+    assert!(!unsafe { (*app_state()).items().iter().any(|item| item.path == original) }, "conflict does not restore the catalog item");
     std::fs::remove_file(&original).unwrap();
     send_key_command(&app, 6);
     assert_eq!(std::fs::read(&original).unwrap(), content, "undo can be retried after resolving a conflict");
@@ -1612,7 +1680,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
     assert_eq!(std::fs::read(album.join("inside.png")).unwrap(), content, "redo preserves the source on conflict");
     assert_eq!(std::fs::read(trashed_album.join("replacement")).unwrap(), b"replacement", "redo preserves the conflicting destination");
-    assert!(unsafe { (*app_state()).items.iter().any(|item| item.path == album) }, "redo conflict leaves the folder in the catalog");
+    assert!(unsafe { (*app_state()).items().iter().any(|item| item.path == album) }, "redo conflict leaves the folder in the catalog");
     std::fs::remove_file(trashed_album.join("replacement")).unwrap();
     std::fs::remove_dir(&trashed_album).unwrap();
     unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
@@ -1624,7 +1692,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     std::fs::copy(parent.join(".video.mp4"), &video).unwrap();
     unsafe { (*app_state()).view_mode = ViewMode::Carousel; }
     enter_directory(video_dir);
-    assert_eq!(unsafe { (&(*app_state()).items)[0].kind }, MediaKind::Movie);
+    assert_eq!(unsafe { (*app_state()).items()[0].kind }, MediaKind::Movie);
     assert!(preview.image().is_none(), "video preview waits for its thumbnail");
     let started = std::time::Instant::now();
     let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
@@ -1707,7 +1775,7 @@ fn send_key_command(_app: &NSApplication, key_code: u16) {
 fn send_mouse_via_app(_app: &NSApplication, count: objc2_foundation::NSInteger) {
     let Some(window_ptr) = target_window() else { return };
     let window = unsafe { &*window_ptr };
-    let dir_index = unsafe { (*app_state()).items.iter().position(|i| i.kind == MediaKind::Directory) };
+    let dir_index = unsafe { (*app_state()).items().iter().position(|i| i.kind == MediaKind::Directory) };
     let index = dir_index.unwrap_or(0);
     let point = objc2_foundation::NSPoint::new(12.0 + index as f64 * 128.0 + 60.0, 92.0);
     let flags = objc2_app_kit::NSEventModifierFlags::empty();
@@ -1776,7 +1844,7 @@ fn start_self_test() {
                         unsafe { &*refs.window }.makeKeyWindow();
                     }
                     SELF_TEST_SELECTED_BEFORE.store(
-                        unsafe { (*app_state()).selected.unwrap_or(usize::MAX) },
+                        unsafe { (*app_state()).selected().unwrap_or(usize::MAX) },
                         std::sync::atomic::Ordering::SeqCst,
                     );
                     send_key_via_app(&app, 124, false);
@@ -1807,7 +1875,7 @@ fn start_self_test() {
                 5 => {
                     let image = unsafe {
                         (&*app_state())
-                            .items
+                            .items()
                             .iter()
                             .find(|i| i.kind == MediaKind::Image)
                             .map(|i| i.path.clone())
@@ -1823,9 +1891,9 @@ fn start_self_test() {
                 _ => {
                     let before = SELF_TEST_SELECTED_BEFORE.load(std::sync::atomic::Ordering::SeqCst);
                     let before = if before == usize::MAX { None } else { Some(before) };
-                    let now = unsafe { (*app_state()).selected };
+                    let now = unsafe { (*app_state()).selected() };
                     let root = unsafe { (*app_state()).root.clone() };
-                    let has_directory = unsafe { (*app_state()).items.iter().any(|i| i.kind == MediaKind::Directory) };
+                    let has_directory = unsafe { (*app_state()).items().iter().any(|i| i.kind == MediaKind::Directory) };
                     let double_click_ok = if has_directory {
                         SELF_TEST_ENTERED.load(std::sync::atomic::Ordering::SeqCst)
                     } else {
@@ -1843,7 +1911,7 @@ fn start_self_test() {
                         eprintln!(
                             "self-test: FAIL (before={before:?} now={now:?} root={} count={})",
                             root.display(),
-                            unsafe { (*app_state()).items.len() }
+                            unsafe { (*app_state()).items().len() }
                         );
                         std::process::exit(1);
                     }
@@ -1872,7 +1940,7 @@ fn resident_memory() -> std::io::Result<u64> {
 }
 
 fn benchmark_browsing_memory(window: &NSWindow, grid: &GridView) {
-    let count = unsafe { (*app_state()).items.len() };
+    let count = unsafe { (*app_state()).items().len() };
     assert!(count >= 100, "memory corpus needs at least 100 items");
     unsafe { (*app_state()).view_mode = ViewMode::Grid; }
     window.setContentSize(NSSize::new(1000.0, 700.0));
@@ -1945,8 +2013,7 @@ fn main() {
             Some("grid") => ViewMode::Grid,
             _ => ViewMode::Carousel,
         }};
-        state.items = load_listing(&root, mode);
-        state.selected = if state.items.is_empty() { None } else { Some(0) };
+        show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::First);
     }
 
     unsafe {

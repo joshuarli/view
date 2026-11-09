@@ -32,7 +32,7 @@ The app owns no persistent database. Files trashed by the app are removed from t
 `src/lib.rs` has no AppKit dependency except the `decode_png_native` FFI:
 
 - Discovery: shared natural-name ordering, package/hidden/symlink skipping, extension surface + content sniffing for extensionless files, browser ordering (directories first, size descending) and recursive scan (stable natural relative-path order).
-- Catalog: flat ordered array plus stable selection by URL. Append preserves selection; removing the last selected entry picks the neighbor at the removal index, else the final item.
+- Catalog: flat ordered array plus stable selection by URL. `selected` is the focus. A range keeps its anchor at the start of `selected_all` and its focus on the clicked path. Append preserves selection; removing the last selected entry picks the neighbor at the removal index, else the final item.
 - PreviewSession: stable snapshot of URLs plus the selected index for Quick Look. Survives scan appends and trash removals by identity, never by stale index.
 - Trash: `TrashService` guards one in-flight operation per URL and only removes from the catalog after `recycle` confirms. `restore` moves a trashed file back.
 - TrashHistory: undo/redo stacks for trash operations. Each transaction records the items, their trash locations, their catalog positions, and the selection before trashing.
@@ -45,7 +45,7 @@ The app owns no persistent database. Files trashed by the app are removed from t
 
 - Owns `NSApplication`, the window, the main menu, and shutdown. Termination waits for scan cancellation, thumbnail cancellation, and any pending trash.
 - Custom grid view owns the catalog and both content modes. Browser mode lists one directory, applies each listing atomically, and navigates into folders or to the parent with a scan-generation guard; going up selects the folder it came from. Recursive mode keeps incremental inserts per batch. Both share selection by identity, demand updates from visible plus scroll-direction prefetch, and scroll-into-view after trash and panel navigation. Handles Space, Return, Delete, Cmd+Delete, Cmd+Up, and Ctrl+Delete in `keyDown`.
-- QLPreviewPanel: Space opens the panel; stepping through items updates the grid selection. The grid reflows when the window changes size, and Cmd-minus / Cmd-plus resize thumbnails in both modes. Selected items can be dragged out as file URLs; dropping a folder opens it and dropping a media file selects it.
+- QLPreviewPanel: Space opens the panel on the focused item when one is selected. The panel's items are the current `PreviewSession`, rebuilt from the catalog after the listing changes and closed when that session is empty. Stepping through items updates the grid selection. The grid reflows when the window changes size, and Cmd-minus / Cmd-plus resize thumbnails in both modes. Selected items can be dragged out as file URLs; dropping a folder opens it and dropping a media file selects it.
 - Trash: trashes the selection in one guarded operation and records the batch for undo (Cmd+Z) and redo (Cmd+Shift+Z). Undo and redo atomically rename files or folders without replacing an existing destination. Failed moves stay in history for retry; cross-volume moves are reported as failures.
 
 ## Why AppKit

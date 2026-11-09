@@ -235,14 +235,40 @@ impl std::error::Error for CatalogError {}
 pub struct Catalog {
     entries: Vec<MediaItem>,
     selection: Vec<PathBuf>,
+    focus: Option<PathBuf>,
 }
 
 impl Catalog {
-    pub fn new() -> Self { Self { entries: Vec::new(), selection: Vec::new() } }
+    pub fn new() -> Self { Self { entries: Vec::new(), selection: Vec::new(), focus: None } }
     pub fn items(&self) -> &[MediaItem] { &self.entries }
-    pub fn selected(&self) -> Option<&Path> { self.selection.first().map(PathBuf::as_path) }
+    pub fn selected(&self) -> Option<&Path> { self.focus.as_deref() }
+    pub fn anchor(&self) -> Option<&Path> { self.selection.first().map(PathBuf::as_path) }
     pub fn selected_all(&self) -> &[PathBuf] { &self.selection }
     pub fn count(&self) -> usize { self.entries.len() }
+
+    pub fn focus_index(&self) -> Option<usize> {
+        let focus = self.focus.as_ref()?;
+        self.entries.iter().position(|item| &item.path == focus)
+    }
+
+    pub fn selection_bounds(&self) -> Option<(usize, usize)> {
+        let focus = self.focus_index()?;
+        let anchor = self.anchor()
+            .and_then(|path| self.entries.iter().position(|item| item.path == path))
+            .unwrap_or(focus);
+        Some((anchor.min(focus), anchor.max(focus)))
+    }
+
+    fn repair_focus(&mut self) {
+        self.selection.retain(|path| self.entries.iter().any(|item| item.path == *path));
+        if self.selection.is_empty() {
+            self.focus = None;
+            return;
+        }
+        if self.focus.as_ref().is_none_or(|path| !self.selection.iter().any(|selected| selected == path)) {
+            self.focus = Some(self.selection[0].clone());
+        }
+    }
 
     pub fn append(&mut self, items: Vec<MediaItem>) -> (usize, usize) {
         let start = self.entries.len();
@@ -253,6 +279,7 @@ impl Catalog {
     pub fn select(&mut self, url: &Path) -> Result<(), CatalogError> {
         if self.entries.iter().any(|i| i.path == url) {
             self.selection = vec![url.to_path_buf()];
+            self.focus = Some(url.to_path_buf());
             Ok(())
         } else {
             Err(CatalogError(url.to_path_buf()))
@@ -266,15 +293,20 @@ impl Catalog {
         if !self.selection.iter().any(|p| p.as_path() == url) {
             self.selection.push(url.to_path_buf());
         }
+        if self.focus.is_none() {
+            self.focus = Some(url.to_path_buf());
+        }
         Ok(())
     }
 
     pub fn deselect(&mut self, url: &Path) {
         self.selection.retain(|p| p.as_path() != url);
+        self.repair_focus();
     }
 
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+        self.focus = None;
     }
 
     pub fn select_range(&mut self, anchor: &Path, clicked: &Path) -> Result<(), CatalogError> {
@@ -293,6 +325,7 @@ impl Catalog {
             }
         }
         self.selection = next;
+        self.focus = Some(clicked.to_path_buf());
         Ok(())
     }
 
@@ -310,6 +343,7 @@ impl Catalog {
             let pick = if index < self.entries.len() { index } else { self.entries.len() - 1 };
             self.selection = vec![self.entries[pick].path.clone()];
         }
+        self.repair_focus();
         Some(index)
     }
 }
@@ -1146,6 +1180,60 @@ mod tests {
         let mut items = vec![small.clone(), dir.clone(), big.clone()];
         items.sort_by(browser_order);
         assert_eq!(items, vec![dir, big, small]);
+    }
+
+    #[test]
+    fn range_selection_focuses_the_clicked_path() {
+        let mut catalog = Catalog::new();
+        let a = MediaItem::new("/x/a.png", MediaKind::Image);
+        let b = MediaItem::new("/x/b.png", MediaKind::Image);
+        let c = MediaItem::new("/x/c.png", MediaKind::Image);
+        catalog.append(vec![a.clone(), b.clone(), c.clone()]);
+        catalog.select(&a.path).unwrap();
+        catalog.select_range(&a.path, &c.path).unwrap();
+        assert_eq!(catalog.anchor(), Some(a.path.as_path()));
+        assert_eq!(catalog.selected(), Some(c.path.as_path()));
+        assert_eq!(catalog.selection_bounds(), Some((0, 2)));
+        catalog.remove(&c.path);
+        assert_eq!(catalog.selected(), Some(a.path.as_path()));
+        assert!(catalog.selection_bounds().unwrap().1 < catalog.count());
+        assert!(catalog.selected_all().iter().all(|path| catalog.items().iter().any(|item| &item.path == path)));
+    }
+
+    #[test]
+    fn removing_a_single_selection_keeps_one_live_path() {
+        let mut catalog = Catalog::new();
+        let items: Vec<_> = ["a", "b", "c"].into_iter().map(|name| MediaItem::new(format!("/x/{name}.png"), MediaKind::Image)).collect();
+        catalog.append(items.clone());
+        catalog.select(&items[2].path).unwrap();
+        catalog.remove(&items[2].path);
+        let selected = catalog.selected().unwrap();
+        assert!(catalog.items().iter().any(|item| item.path == selected));
+        let (start, end) = catalog.selection_bounds().unwrap();
+        assert_eq!(start, end);
+        assert!(end < catalog.count());
+    }
+
+    #[test]
+    fn preview_session_rejects_an_empty_selection() {
+        let mut catalog = Catalog::new();
+        let mut session = PreviewSession::new();
+        assert!(!session.begin(&catalog));
+        assert_eq!(session.count(), 0);
+        assert!(session.item_at(0).is_none());
+        catalog.append(vec![MediaItem::new("/x/a.png", MediaKind::Image), MediaItem::new("/x/b.png", MediaKind::Image)]);
+        assert!(!session.begin(&catalog));
+        catalog.select(Path::new("/x/b.png")).unwrap();
+        assert!(session.begin(&catalog));
+        catalog.remove(Path::new("/x/b.png"));
+        session.update(&catalog);
+        let current = session.current_index().unwrap();
+        assert_eq!(session.item_at(current), Some(Path::new("/x/a.png")));
+        assert!(session.item_at(session.count()).is_none());
+        catalog.remove(Path::new("/x/a.png"));
+        session.update(&catalog);
+        assert_eq!(session.count(), 0);
+        assert!(session.item_at(0).is_none());
     }
 
     #[test]

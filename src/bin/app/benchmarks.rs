@@ -76,10 +76,7 @@ fn prepare_window() -> (&'static NSWindow, &'static GridView) {
     state.root = root.clone();
     state.mode = BrowserMode::Browser;
     state.view_mode = ViewMode::Grid;
-    state.items = list_browser(&root).expect("list browser corpus");
-    state.selected = Some(0);
-    state.selection_anchor = Some(0);
-    state.selection_range = (0, 0);
+    show_listing(&mut state.catalog, list_browser(&root).expect("list browser corpus"), ListingPick::First);
     let mtm = objc2::MainThreadMarker::new().expect("AppKit benchmarks must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     let needs_window = { window_refs().is_none() };
@@ -118,17 +115,14 @@ fn capture(grid: &GridView, bitmap: &objc2_app_kit::NSBitmapImageRep) {
 fn open_directory_and_render_grid(bencher: Bencher) {
     let (_, grid) = prepare_window();
     let root = unsafe { (*app_state()).root.clone() };
-    let expected = unsafe { (*app_state()).items.len() };
+    let expected = unsafe { (*app_state()).items().len() };
     let visible = grid.visibleRect();
     let bitmap = grid.bitmapImageRepForCachingDisplayInRect(visible).expect("viewport bitmap");
     bench_appkit(bencher, || {
         let items = list_browser(black_box(&root)).expect("list browser corpus");
         assert_eq!(items.len(), expected, "browser listing changed during measurement");
         let state = unsafe { &mut *app_state() };
-        state.items = items;
-        state.selected = Some(0);
-        state.selection_anchor = Some(0);
-        state.selection_range = (0, 0);
+        show_listing(&mut state.catalog, items, ListingPick::First);
         apply_view_mode_layout();
         capture(grid, &bitmap);
     });
@@ -139,7 +133,7 @@ fn scroll_and_render_grid(bencher: Bencher) {
     let (_, grid) = prepare_window();
     let visible = grid.visibleRect();
     let bitmap = grid.bitmapImageRepForCachingDisplayInRect(visible).expect("viewport bitmap");
-    let count = unsafe { (*app_state()).items.len() };
+    let count = unsafe { (*app_state()).items().len() };
     let origin = grid.visibleRect().origin.y;
     grid.scrollRectToVisible(grid.cell_rect(24));
     assert_ne!(grid.visibleRect().origin.y, origin, "scroll did not change the visible rows");
@@ -189,8 +183,7 @@ fn advance_carousel_preview(bencher: Bencher) {
     };
     let preview_bounds = preview.bounds();
     let preview_bitmap = preview.bitmapImageRepForCachingDisplayInRect(preview_bounds).expect("preview bitmap");
-    let items = unsafe { &(*app_state()).items };
-    let image_pairs: Vec<usize> = items.windows(2).enumerate()
+    let image_pairs: Vec<usize> = unsafe { (*app_state()).items() }.windows(2).enumerate()
         .filter_map(|(index, pair)| (pair[0].kind == MediaKind::Image && pair[1].kind == MediaKind::Image).then_some(index))
         .collect();
     assert!(!image_pairs.is_empty(), "typical corpus needs two adjacent images");
@@ -198,12 +191,12 @@ fn advance_carousel_preview(bencher: Bencher) {
     bench_appkit(bencher, || {
         let current = image_pairs[step % image_pairs.len()];
         step += 1;
-        let state = unsafe { &mut *app_state() };
-        state.selected = Some(current);
-        state.selection_anchor = Some(current);
-        state.selection_range = (current, current);
+        {
+            let state = unsafe { &mut *app_state() };
+            select_index(&mut state.catalog, current);
+        }
         window.sendEvent(&event);
-        assert_eq!(unsafe { (*app_state()).selected }, Some(current + 1), "carousel arrow did not advance");
+        assert_eq!(unsafe { (*app_state()).selected() }, Some(current + 1), "carousel arrow did not advance");
         assert!(image_view.image().is_some(), "carousel preview is empty");
         capture(grid, &bitmap);
         preview.cacheDisplayInRect_toBitmapImageRep(preview_bounds, &preview_bitmap);
@@ -214,7 +207,7 @@ fn advance_carousel_preview(bencher: Bencher) {
 #[rustybench::bench(sample_size = 1)]
 fn generate_video_thumbnail(bencher: Bencher) {
     let (_, _) = prepare_window();
-    let path = unsafe { (&(*app_state()).items).iter().find(|item| item.kind == MediaKind::Movie) }
+    let path = unsafe { (*app_state()).items().iter().find(|item| item.kind == MediaKind::Movie) }
         .expect("VIEW_BENCH_TYPICAL must contain a video").path.clone();
     let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
     bench_appkit(bencher, || {
