@@ -109,14 +109,36 @@ pub fn kind_for_extension(path: &Path) -> Option<MediaKind> {
         | Some("ico") | Some("icns") | Some("svg") | Some("svgz") | Some("pbm") | Some("pgm") | Some("ppm") => Some(MediaKind::Image),
         Some("mp4") | Some("mov") | Some("m4v") | Some("webm") | Some("avi") | Some("mkv") | Some("mpg")
         | Some("mpeg") | Some("3gp") | Some("m2v") | Some("wmv") => Some(MediaKind::Movie),
-        _ => None,
+        _ => sniff_kind(path),
     }
+}
+
+fn sniff_kind(path: &Path) -> Option<MediaKind> {
+    use std::io::Read;
+    let mut buf = [0u8; 12];
+    let n = fs::File::open(path).ok()?.read(&mut buf).ok()?;
+    if n < 4 {
+        return None;
+    }
+    if buf.starts_with(&[0x89, 0x50, 0x4E, 0x47]) || buf.starts_with(&[0xFF, 0xD8, 0xFF])
+        || buf.starts_with(b"GIF8") || buf.starts_with(b"RIFF")
+    {
+        return Some(MediaKind::Image);
+    }
+    if n >= 8 && buf[4..8] == *b"ftyp" {
+        return Some(MediaKind::Movie);
+    }
+    if buf.starts_with(&[0x00, 0x00, 0x01, 0x00]) || buf.starts_with(b"II") || buf.starts_with(b"MM") {
+        return Some(MediaKind::Image);
+    }
+    None
 }
 
 pub fn is_package(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
         Some("app") | Some("bundle") | Some("framework") | Some("scptd") | Some("svc")
+            | Some("pages") | Some("numbers") | Some("key") | Some("fptemplate") | Some("wflow")
     )
 }
 
@@ -341,6 +363,62 @@ impl Scheduler {
 
     pub fn pending(&self) -> Vec<ThumbKey> {
         self.visible.iter().chain(self.prefetch.iter()).take(self.limit).cloned().collect()
+    }
+
+    pub fn generation_of(&self, key: &ThumbKey) -> Option<u64> {
+        self.generations.get(key).copied()
+    }
+
+    pub fn cancel_all(&mut self) {
+        self.next_generation += 1;
+        self.generations.clear();
+        self.visible.clear();
+        self.prefetch.clear();
+    }
+
+    pub fn execute_pending<F>(&self, work: F) -> Vec<(ThumbKey, u64)>
+    where
+        F: Fn(&ThumbKey) + Send + Sync,
+    {
+        let pending = self.pending();
+        let generations = self.generations.clone();
+        std::thread::scope(|scope| {
+            let workers = self.limit.max(1).min(pending.len().max(1));
+            if workers <= 1 || pending.is_empty() {
+                let mut out = Vec::new();
+                for key in &pending {
+                    work(key);
+                    if let Some(generation) = generations.get(key) {
+                        out.push((key.clone(), *generation));
+                    }
+                }
+                return out;
+            }
+            let chunk = pending.len().div_ceil(workers);
+            let handles: Vec<_> = pending
+                .chunks(chunk)
+                .map(|part| {
+                    let part = part.to_vec();
+                    let work = &work;
+                    let generations = &generations;
+                    scope.spawn(move || {
+                        let mut out = Vec::new();
+                        for key in &part {
+                            work(key);
+                            if let Some(generation) = generations.get(key) {
+                                out.push((key.clone(), *generation));
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            let mut out = Vec::new();
+            for handle in handles {
+                out.extend(handle.join().unwrap());
+            }
+            out
+        })
     }
 }
 
@@ -1041,5 +1119,76 @@ mod tests {
         assert_eq!(kind_for_extension(Path::new("/x/photo.avif")), Some(MediaKind::Image));
         assert_eq!(kind_for_extension(Path::new("/x/clip.mkv")), Some(MediaKind::Movie));
         assert_eq!(kind_for_extension(Path::new("/x/notes.txt")), None);
+    }
+
+    #[test]
+    fn package_detection_covers_iwork_and_system_bundles() {
+        assert!(is_package(Path::new("/x/app.pages")));
+        assert!(is_package(Path::new("/x/Foo.app")));
+        assert!(!is_package(Path::new("/x/photo.png")));
+    }
+
+    #[test]
+    fn content_sniffing_detects_png_without_extension() {
+        let dir = std::env::temp_dir().join(format!("view-sniff-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("noext");
+        std::fs::write(&path, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        assert_eq!(kind_for_extension(&path), Some(MediaKind::Image));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scheduler_execute_pending_respects_limit_and_cancel() {
+        let mut scheduler = Scheduler::new(2);
+        let a = ThumbKey { path: PathBuf::from("/a.png"), pixel_size: 320, scale: 2 };
+        let b = ThumbKey { path: PathBuf::from("/b.png"), pixel_size: 320, scale: 2 };
+        let c = ThumbKey { path: PathBuf::from("/c.png"), pixel_size: 320, scale: 2 };
+        scheduler.update_demand(vec![a.clone(), b.clone()], vec![c.clone()]);
+        assert_eq!(scheduler.pending().len(), 2);
+        let done: Vec<_> = scheduler.execute_pending(|_| {}).into_iter().map(|(k, _)| k.path).collect();
+        assert_eq!(done.len(), 2);
+        scheduler.cancel_all();
+        assert!(scheduler.pending().is_empty());
+        assert!(scheduler.generation_of(&a).is_none());
+    }
+
+    #[test]
+    fn trash_undo_redo_round_trip_through_history() {
+        let dir = std::env::temp_dir().join(format!("view-trash-{}", std::process::id()));
+        let trash = dir.join("trash");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&trash);
+        let original = dir.join("a.png");
+        std::fs::write(&original, b"hello").unwrap();
+        let mut service = TrashService::new();
+        let trashed = trash.join("a.png");
+        let outcome = service
+            .move_to_trash(&original, |_url| {
+                std::fs::rename(&original, &trashed).map_err(|e| e.to_string())?;
+                Ok(std::collections::HashMap::from([(original.clone(), trashed.clone())]))
+            })
+            .unwrap();
+        assert_eq!(outcome, TrashOutcome::Removed { trashed_path: trashed.clone() });
+        assert!(!original.exists());
+        assert!(trashed.exists());
+        let mut history = TrashHistory::new();
+        let item = MediaItem::new(&original, MediaKind::Image);
+        history.record_trash(TrashTransaction {
+            files: vec![TrashedFile { item: item.clone(), trashed_path: trashed.clone(), index: 0 }],
+            selection_before_op: vec![original.clone()],
+        });
+        assert!(history.can_undo());
+        let txn = history.pop_undo().unwrap();
+        service
+            .restore(&txn.files[0].trashed_path, &txn.files[0].item.path, |from, to| {
+                std::fs::rename(from, to).map_err(|e| TrashError::MoveFailed(e.to_string()))
+            })
+            .unwrap();
+        assert!(original.exists());
+        assert!(!trashed.exists());
+        history.push_redo(TrashTransaction { files: txn.files, selection_before_op: vec![] });
+        assert!(history.can_redo());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

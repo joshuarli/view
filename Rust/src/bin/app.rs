@@ -16,6 +16,11 @@ use objc2_app_kit::{
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
+use objc2_quick_look_thumbnailing::{
+    QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
+    QLThumbnailRepresentation,
+};
+use objc2_quick_look_ui::{QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource};
 
 use view_core::{
     list_browser, scan_recursive, BrowserMode, MediaKind, MediaItem, TrashHistory, TrashService,
@@ -333,11 +338,22 @@ fn redo_trash(grid: &GridView) {
 }
 
 fn quicklook_selected() {
-    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
-    let _ = std::process::Command::new("qlmanage")
-        .arg("-p")
-        .arg(&item.path)
-        .spawn();
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
+    if panel.isVisible() {
+        panel.orderOut(None);
+        return;
+    }
+    let refs_guard = window_refs();
+    let Some(refs) = refs_guard.as_ref() else { return };
+    let grid_ptr = refs.grid;
+    drop(refs);
+    drop(refs_guard);
+    let grid = unsafe { &*grid_ptr };
+    unsafe { panel.setDataSource(Some(objc2::runtime::ProtocolObject::from_ref(grid))) };
+    let index = unsafe { (*app_state()).selected.unwrap_or(0) } as objc2_foundation::NSInteger;
+    unsafe { panel.setCurrentPreviewItemIndex(index) };
+    panel.orderFront(None);
 }
 
 fn make_context_action_item(target: &GridView, title: &str, action: objc2::runtime::Sel, key: Option<&str>, modifier_mask: objc2_app_kit::NSEventModifierFlags) -> Retained<NSMenuItem> {
@@ -431,6 +447,68 @@ fn system_image(name: &str) -> Option<Retained<NSImage>> {
     unsafe { NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None) }
 }
 
+struct SyncImage(Retained<NSImage>);
+unsafe impl Send for SyncImage {}
+unsafe impl Sync for SyncImage {}
+
+static THUMB_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, SyncImage>>,
+> = std::sync::OnceLock::new();
+static THUMB_PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn thumb_cache() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, SyncImage>> {
+    THUMB_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+}
+
+fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<PathBuf>> {
+    THUMB_PENDING
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+}
+
+fn cached_thumbnail(path: &PathBuf) -> Option<Retained<NSImage>> {
+    thumb_cache().get(path).map(|s| s.0.clone())
+}
+
+fn request_quicklook_thumbnail(path: PathBuf) {
+    if !thumb_pending().insert(path.clone()) {
+        return;
+    }
+    let generator = unsafe { QLThumbnailGenerator::sharedGenerator() };
+    let url = url_from_path(&path);
+    let request: Retained<QLThumbnailGenerationRequest> = unsafe {
+        let alloc = objc2::MainThreadMarker::new().unwrap().alloc::<QLThumbnailGenerationRequest>();
+        QLThumbnailGenerationRequest::initWithFileAtURL_size_scale_representationTypes(
+            alloc,
+            &url,
+            NSSize::new(480.0, 480.0),
+            2.0,
+            QLThumbnailGenerationRequestRepresentationTypes::Thumbnail,
+        )
+    };
+    let path_for_reply = path.clone();
+    let handler = unsafe {
+        block2::RcBlock::new(move |representation: *mut QLThumbnailRepresentation, _error: *mut objc2_foundation::NSError| {
+            thumb_pending().remove(&path_for_reply);
+            if !representation.is_null() {
+                let image = unsafe { (*(representation as *const QLThumbnailRepresentation)).NSImage() };
+                thumb_cache().insert(path_for_reply.clone(), SyncImage(image));
+            }
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                if let Some(refs) = window_refs().as_ref() {
+                    unsafe { &*refs.grid }.setNeedsDisplay(true);
+                }
+            });
+        })
+    };
+    unsafe { generator.generateBestRepresentationForRequest_completionHandler(&request, &handler) };
+}
+
 fn image_for(item: &MediaItem) -> Option<Retained<NSImage>> {
     let data = std::fs::read(&item.path).ok()?;
     if data.is_empty() {
@@ -496,7 +574,23 @@ define_class!(
                     }
                 }
                 let thumb_rect = NSRect::new(NSPoint::new(x + 6.0, y + 6.0), NSSize::new(cw - 12.0, ch - 36.0));
-                match image_for(item) {
+                let cached_movie: Option<Retained<NSImage>> = if item.kind == MediaKind::Movie {
+                    let cached = cached_thumbnail(&item.path);
+                    if cached.is_none() {
+                        request_quicklook_thumbnail(item.path.clone());
+                    }
+                    cached
+                } else {
+                    None
+                };
+                if let Some(image) = cached_movie.clone() {
+                    unsafe {
+                        image.drawInRect_fromRect_operation_fraction(
+                            thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0,
+                        );
+                    }
+                }
+                if cached_movie.is_some() { /* cached QL thumbnail already drawn */ } else { match image_for(item) {
                     Some(image) => unsafe {
                         image.drawInRect_fromRect_operation_fraction(
                             thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
@@ -516,21 +610,20 @@ define_class!(
                             }
                         }
                     }
-                }
+                } }
                 let label_rect = NSRect::new(NSPoint::new(x + 6.0, y + ch - 28.0), NSSize::new(cw - 12.0, 22.0));
                 let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let string = NSString::from_str(&name);
                 let font = unsafe { NSFont::systemFontOfSize(12.0) };
-                let attrs: Retained<objc2_foundation::NSDictionary<objc2_foundation::NSAttributedStringKey, NSObject>> = unsafe {
+                let attrs: Retained<objc2_foundation::NSDictionary<objc2_foundation::NSAttributedStringKey>> = unsafe {
                     objc2_foundation::NSDictionary::dictionaryWithObject_forKey(
                         &*font as &NSObject,
                         objc2::runtime::ProtocolObject::from_ref(unsafe { objc2_app_kit::NSFontAttributeName } as &NSString),
                     )
                 };
                 let _ = mtm;
-                unsafe {
-                    let _size: NSSize = objc2::msg_send![&*string, drawInRect: label_rect, withAttributes: &*attrs];
-                }
+                use objc2_app_kit::NSStringDrawing;
+                unsafe { string.drawInRect_withAttributes(label_rect, Some(&*attrs)) };
             }
             let _ = state;
         }
@@ -882,7 +975,10 @@ define_class!(
             {
                 let state = unsafe { &*app_state() };
                 if let Some(item) = state.selected.and_then(|i| state.items.get(i)) {
-                    if let Some(img) = image_for(item) {
+                    if item.kind == MediaKind::Movie {
+                        request_quicklook_thumbnail(item.path.clone());
+                    }
+                    if let Some(img) = image_for(item).or_else(|| cached_thumbnail(&item.path)) {
                         preview_image.setImage(Some(&*img));
                     } else if let Some(img) = system_image(match item.kind {
                         MediaKind::Directory => "folder",
@@ -952,4 +1048,20 @@ fn main() {
     let delegate: Retained<AppDelegate> = unsafe { objc2::msg_send![AppDelegate::class(), new] };
     app.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
     app.run();
+}
+
+unsafe impl QLPreviewPanelDataSource for GridView {
+    unsafe fn numberOfPreviewItemsInPreviewPanel(&self, _panel: Option<&QLPreviewPanel>) -> objc2_foundation::NSInteger {
+        unsafe { &*app_state() }.items.len() as objc2_foundation::NSInteger
+    }
+
+    unsafe fn previewPanel_previewItemAtIndex(
+        &self,
+        _panel: Option<&QLPreviewPanel>,
+        index: objc2_foundation::NSInteger,
+    ) -> Option<Retained<objc2::runtime::ProtocolObject<dyn QLPreviewItem>>> {
+        let item = unsafe { &*app_state() }.items.get(index as usize)?;
+        let url = url_from_path(&item.path);
+        Some(objc2::runtime::ProtocolObject::from_retained(url))
+    }
 }

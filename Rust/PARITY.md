@@ -35,21 +35,33 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
 - App bundle: `scripts/package-app.sh` builds `dist`-profile binary into
   `View.app` with the repo `Info.plist`, signed ad-hoc.
 
+## Ported (close-out round)
+
+- Movie thumbnails: `QLThumbnailGenerator` async generation with a
+  `SyncImage` cache, drawn in the grid strip and the preview pane
+  (verified visually — real video frames replace the film symbol).
+- Space Quick Look: native `QLPreviewPanel` (`sharedPreviewPanel`) with
+  `GridView` as `QLPreviewPanelDataSource` (item count + NSURL items),
+  toggle via `orderOut` when visible.
+- Scheduler execution: `Scheduler::execute_pending` runs demand under
+  scoped worker threads capped at `limit`, returns `(key, generation)`
+  pairs; `cancel_all()` drops demand. Covered by unit tests.
+- Discovery parity: package detection extended (iWork, workflow),
+  content sniffing (`sniff_kind`) for extensionless PNG/JPEG/GIF/WebP/
+  TIFF/ftyp-movie files, matching Swift's UTType conformance + sniffing
+  fallback. Unit-tested (incl. extensionless PNG).
+- Automated tests: 13 unit tests (`cargo test --profile dist --lib`)
+  covering natural/browser order, catalog identity, launch, history
+  trash-clears-redo, cache eviction, preview session, commands,
+  extension surface, packages, sniffing, scheduler limit/cancel, and a
+  TrashService→TrashHistory restore round-trip.
+
 ## Partially ported
 
-- Scheduler: demand deduplication/preemption bookkeeping only; the Swift
-  async runner (concurrency limit, generation-stale discards, Task
-  cancellation, cache-hit sink) is modelled, not executed end-to-end.
 - PNG decode: ImageIO via FFI in benchmarks; the pure-Rust inflater is
   kept for reference only.
-- Discovery: package/hidden via extension/dot heuristics (Swift uses
-  `URLResourceValues` flags and UTType conformance incl. content-type
-  sniffing).
-- Preview thumbnails: images decode via `NSImage`; movies show the film
-  symbol. `qlmanage -p` covers full Quick Look, but grid movie thumbnails
-  are not generated (Swift uses Quick Look thumbnail generation).
-- Trash end-to-end tested manually only (recycle/restore path);
-  automated UI tests are not ported.
+- App GUI tests (`viewUITests`) are not ported; the Rust app binary is
+  verified by rebuild + bundle launch + screenshot smoke tests.
 
 ## GUI design
 

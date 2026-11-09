@@ -16,7 +16,7 @@ path = "src/bin/app.rs"
 required-features = ["app"]
 
 [features]
-app = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-graphics", "dep:block2", "dep:dispatch2"]
+app = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-graphics", "dep:block2", "dep:dispatch2", "dep:objc2-quick-look-thumbnailing", "dep:objc2-quick-look-ui", "dep:objc2-quick-look", "dep:objc2-uniform-type-identifiers"]
 
 [dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -27,6 +27,10 @@ objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry",
 objc2-core-graphics = { version = "0.3", optional = true }
 block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "0.3", optional = true }
+objc2-quick-look-thumbnailing = { version = "0.3", optional = true }
+objc2-quick-look-ui = { version = "0.3", optional = true }
+objc2-quick-look = { version = "0.3", optional = true }
+objc2-uniform-type-identifiers = { version = "0.3", optional = true }
 
 [profile.dev]
 incremental = false
