@@ -1,25 +1,12 @@
-//! Automated parity coverage for `Tests/viewUITests/ViewUITests.swift`.
-//!
-//! The Swift suite drives a live `NSWindow` + `GridViewController` and
-//! synthesizes `NSEvent`s. The Rust GUI reuses the same core contracts
-//! (`Catalog`, history stacks, `resolve_command`, discovery), so these
-//! tests assert the same observable outcomes at the model layer, plus
-//! the native Quick Look thumbnail path backing Space preview.
+mod support;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use view_core::{
-    list_browser, Catalog, GridCommand, GridKeyModifier, MediaKind, MediaItem,
+    GridCommand, GridKeyModifier, MediaKind, MediaItem,
     TrashError, TrashHistory, TrashService, TrashTransaction, TrashedFile,
 };
-
-fn temp_subdir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("view-uiparity-{}-{}", std::process::id(), tag));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn write_png(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -27,35 +14,11 @@ fn write_png(path: &Path) {
 }
 
 #[test]
-fn entering_directory_selects_first_item() {
-    let root = temp_subdir("enter");
-    let sub = root.join("sub");
-    std::fs::create_dir_all(&sub).unwrap();
-    write_png(&sub.join("a.png"));
-
-    let mut catalog = Catalog::new();
-    catalog.append(list_browser(&root).unwrap());
-    let sub_item = catalog
-        .items()
-        .iter()
-        .find(|i| i.kind == MediaKind::Directory)
-        .cloned()
-        .expect("directory listed");
-    let next = list_browser(&sub_item.path).unwrap();
-    catalog.append(next.clone());
-    assert_eq!(catalog.items().len(), 2);
-    let first = next.first().expect("a.png").clone();
-    catalog.select(&first.path).unwrap();
-    assert_eq!(catalog.selected(), Some(first.path.as_path()));
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn drag_item_initialization_does_not_crash() {
     #[cfg(target_os = "macos")]
     {
         use objc2::ClassType;
-        use objc2_foundation::{NSRect, NSSize, NSString, NSURL};
+        use objc2_foundation::{NSRect, NSSize, NSString};
         use objc2::rc::Retained;
 
         unsafe {
@@ -86,43 +49,6 @@ fn drag_item_initialization_does_not_crash() {
 }
 
 #[test]
-fn back_restores_parent_cursor_position_via_history_stack() {
-    let root = temp_subdir("back");
-    let sub = root.join("sub");
-    std::fs::create_dir_all(&sub).unwrap();
-    write_png(&root.join("a.png"));
-    write_png(&root.join("b.png"));
-    write_png(&sub.join("s.png"));
-
-    let mut back: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
-    let mut root_path = root.clone();
-    let mut items = list_browser(&root_path).unwrap();
-
-    let mut selected = items
-        .iter()
-        .find(|i| i.path.ends_with("b.png"))
-        .map(|i| i.path.clone())
-        .expect("b.png");
-    let sub_dir = items
-        .iter()
-        .find(|i| i.kind == MediaKind::Directory)
-        .map(|i| i.path.clone())
-        .expect("sub dir");
-    back.push((root_path.clone(), Some(selected.clone())));
-    root_path = sub_dir;
-    items = list_browser(&root_path).unwrap();
-    selected = items.first().unwrap().path.clone();
-
-    let (parent, cursor) = back.pop().expect("back entry");
-    root_path = parent;
-    items = list_browser(&root_path).unwrap();
-    selected = cursor.unwrap();
-    assert_eq!(root_path, root);
-    assert!(selected.ends_with("b.png"));
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn shift_left_and_right_resolve_to_history_commands() {
     assert_eq!(
         view_core::resolve_command_key(123, &[GridKeyModifier::Shift]),
@@ -139,72 +65,9 @@ fn shift_left_and_right_resolve_to_history_commands() {
     assert_eq!(view_core::resolve_command_key(51, &[]), Some(GridCommand::UpLevel));
 }
 
-fn next_index(current: isize, delta: isize, count: isize) -> isize {
-    (((current + delta) % count) + count) % count
-}
-
-#[test]
-fn arrow_wraparound_both_directions() {
-    assert_eq!(next_index(0, -1, 2), 1, "up from first wraps to last");
-    assert_eq!(next_index(1, 1, 2), 0, "down from last wraps to first");
-}
-
-#[test]
-fn grid_up_down_steps_by_column_count() {
-    let columns: isize = 5;
-    let first: isize = 0;
-    let target = next_index(first, columns, 12);
-    assert_eq!(target, 5);
-    let back = next_index(target, -columns, 12);
-    assert_eq!(back, 0);
-}
-
-#[test]
-fn undo_redo_round_trips_trashed_file_on_disk() {
-    let dir = temp_subdir("undo");
-    let trash_bin = dir.join("trash-bin");
-    std::fs::create_dir_all(&trash_bin).unwrap();
-    let a = dir.join("a.png");
-    let b = dir.join("b.png");
-    write_png(&a);
-    write_png(&b);
-
-    let mut service = TrashService::new();
-    let trashed = trash_bin.join("a.png");
-    service
-        .move_to_trash(&a, |_url| {
-            std::fs::rename(&a, &trashed).map_err(|e| e.to_string())?;
-            Ok(HashMap::from([(a.clone(), trashed.clone())]))
-        })
-        .unwrap();
-    assert!(!a.exists() && trashed.exists());
-
-    let mut history = TrashHistory::new();
-    history.record_trash(TrashTransaction {
-        files: vec![TrashedFile {
-            item: MediaItem::new(&a, MediaKind::Image),
-            trashed_path: trashed.clone(),
-            index: 0,
-        }],
-        selection_before_op: vec![a.clone()],
-    });
-    assert!(history.can_undo() && !history.can_redo());
-
-    let txn = history.pop_undo().unwrap();
-    let file = &txn.files[0];
-    service
-        .restore(&file.trashed_path, &file.item.path, |from, to| {
-            std::fs::rename(from, to).map_err(|e| TrashError::MoveFailed(e.to_string()))
-        })
-        .unwrap();
-    assert!(a.exists() && !trashed.exists());
-    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn undo_fails_when_destination_reappears() {
-    let dir = temp_subdir("undo-fail");
+    let dir = support::TestDirectory::new("undo-fail");
     let trash_bin = dir.join("trash-bin");
     std::fs::create_dir_all(&trash_bin).unwrap();
     let a = dir.join("a.png");
@@ -239,39 +102,13 @@ fn undo_fails_when_destination_reappears() {
     });
     assert!(failed.is_err());
     assert!(trashed.exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn window_title_shows_full_path() {
-    let root = temp_subdir("title");
-    let sub = root.join("sub");
-    std::fs::create_dir_all(&sub).unwrap();
-    write_png(&sub.join("a.png"));
-    let items = list_browser(&root).unwrap();
-    let dir_item = items.iter().find(|i| i.kind == MediaKind::Directory).unwrap().clone();
-    let title = dir_item.path.display().to_string();
-    assert_eq!(title, sub.display().to_string());
-    assert!(title.contains("sub"));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn quicklook_thumbnail_generator_produces_video_frame() {
-    // Backs Space Quick Look: the same generator+cache path the app
-    // binary uses must yield a usable thumbnail image for a movie.
-    let dir = temp_subdir("ql");
-    let movie_path = {
-        let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".work/tmp/previewtest/preview12.mp4");
-        if corpus.exists() {
-            corpus
-        } else {
-            let fallback = dir.join("clip.mp4");
-            std::fs::write(&fallback, [0u8; 8]).unwrap();
-            fallback
-        }
-    };
+    let dir = support::TestDirectory::new("ql");
+    let movie_path = dir.join("clip.mp4");
+    std::fs::write(&movie_path, include_bytes!("fixtures/carousel.mp4")).unwrap();
     assert_eq!(view_core::kind_for_extension(&movie_path), Some(MediaKind::Movie));
 
     #[cfg(target_os = "macos")]
@@ -310,5 +147,4 @@ fn quicklook_thumbnail_generator_produces_video_frame() {
             drop(pool);
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

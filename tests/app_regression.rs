@@ -1,20 +1,38 @@
 #![cfg(target_os = "macos")]
 
+mod support;
+
+struct TestProcess(std::process::Child);
+
+impl Drop for TestProcess {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 #[test]
 fn app_interactions() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".work/tmp/app-regression");
-    if root.exists() { std::fs::remove_dir_all(&root).unwrap(); }
+    let root = support::TestDirectory::new("app-regression");
     let folder = root.join("folder");
     std::fs::create_dir_all(&folder).unwrap();
-    let png: &[u8] = &[
-        137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,
-        0,0,0,13,73,68,65,84,8,215,99,248,207,192,240,31,0,5,0,1,255,114,156,82,103,0,0,0,0,73,69,78,68,174,66,96,130,
-    ];
-    for name in ["a.png", "b.png", "c.png"] { std::fs::write(folder.join(name), png).unwrap(); }
+    let png = include_bytes!("fixtures/orientation.png");
+    for name in ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png", "g.png", "h.png"] { std::fs::write(folder.join(name), png).unwrap(); }
     std::fs::write(folder.join("weird % café.png"), png).unwrap();
     std::fs::write(root.join(".video.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_app"))
-        .arg("--regression-test").arg(&root).output().unwrap();
-    assert!(output.status.success(), "app failed: {}", String::from_utf8_lossy(&output.stderr));
-    std::fs::remove_dir_all(root).unwrap();
+    let stderr_path = root.join(".stderr");
+    let stderr = std::fs::File::create(&stderr_path).unwrap();
+    let mut child = TestProcess(std::process::Command::new(env!("CARGO_BIN_EXE_app"))
+        .arg("--regression-test").arg(&*root)
+        .stdout(std::process::Stdio::null()).stderr(stderr).spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() { break status; }
+        assert!(std::time::Instant::now() < deadline, "app regression timed out");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(status.success(), "app failed: {stderr}");
 }

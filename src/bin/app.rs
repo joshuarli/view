@@ -1398,6 +1398,18 @@ define_class!(
     }
 );
 
+fn assert_orientation(bitmap: &objc2_app_kit::NSBitmapImageRep) {
+    let pixel = |x: isize, y: isize| bitmap.colorAtX_y(x * bitmap.pixelsWide() as isize / 4, y * bitmap.pixelsHigh() as isize / 4).expect("preview pixel");
+    let upper_left = pixel(1, 1);
+    let upper_right = pixel(3, 1);
+    let lower_left = pixel(1, 3);
+    let lower_right = pixel(3, 3);
+    assert!(upper_left.redComponent() > upper_left.greenComponent() * 2.0 && upper_left.redComponent() > upper_left.blueComponent() * 2.0, "top left is red: {upper_left:?}");
+    assert!(upper_right.greenComponent() > upper_right.redComponent() * 2.0 && upper_right.greenComponent() > upper_right.blueComponent() * 2.0, "top right is green: {upper_right:?}");
+    assert!(lower_left.blueComponent() > lower_left.redComponent() * 2.0 && lower_left.blueComponent() > lower_left.greenComponent() * 2.0, "bottom left is blue: {lower_left:?}");
+    assert!(lower_right.redComponent() > lower_right.blueComponent() * 2.0 && lower_right.greenComponent() > lower_right.blueComponent() * 2.0, "bottom right is yellow: {lower_right:?}");
+}
+
 fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView) {
     unsafe { (*app_state()).view_mode = ViewMode::Carousel; }
     apply_view_mode_layout();
@@ -1408,9 +1420,26 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let bounds = preview.bounds();
     let bitmap = preview.bitmapImageRepForCachingDisplayInRect(bounds).expect("preview bitmap");
     preview.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
-    let color = bitmap.colorAtX_y((bitmap.pixelsWide() / 2) as isize, (bitmap.pixelsHigh() / 2) as isize).expect("preview pixel");
-    assert!(color.redComponent() > 0.7 && color.redComponent() > color.greenComponent() * 2.0 && color.redComponent() > color.blueComponent() * 2.0, "first image is painted: color {:?}, bounds {:?}, bitmap {}x{}", color, bounds, bitmap.pixelsWide(), bitmap.pixelsHigh());
+    assert_orientation(&bitmap);
     assert!(unsafe { (*app_state()).items.len() } >= 3);
+    let folder = unsafe { (*app_state()).root.clone() };
+    let parent = folder.parent().unwrap().to_path_buf();
+    assert_eq!(window.title().to_string(), folder.display().to_string(), "directory entry updates the window title");
+    let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+    window.makeKeyAndOrderFront(None);
+    let _ = window.makeFirstResponder(Some(grid));
+    send_key_via_app(&app, 123, false);
+    assert_eq!(unsafe { (*app_state()).selected }, Some(unsafe { (*app_state()).items.len() } - 1), "left from the first item wraps to the last");
+    send_key_via_app(&app, 124, false);
+    assert_eq!(unsafe { (*app_state()).selected }, Some(0), "right from the last item wraps to the first");
+    send_key_via_app(&app, 123, true);
+    assert_eq!(unsafe { (*app_state()).root.clone() }, parent, "back returns to the previous folder");
+    assert_eq!(unsafe { (*app_state()).selected.and_then(|i| (&(*app_state()).items).get(i)).map(|item| item.path.clone()) }, Some(folder.clone()), "back restores the directory selection");
+    assert_eq!(window.title().to_string(), parent.display().to_string(), "back updates the window title");
+    send_key_via_app(&app, 124, true);
+    assert_eq!(unsafe { (*app_state()).root.clone() }, folder, "forward reopens the folder");
+    assert_eq!(unsafe { (*app_state()).selected }, Some(0), "forward restores the selected item");
+    assert_eq!(window.title().to_string(), folder.display().to_string(), "forward updates the window title");
 
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
@@ -1450,9 +1479,17 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     assert!(wide.origin.y < narrow.origin.y, "window resize reflows columns");
     assert!((grid.bounds().size.width - window.contentView().unwrap().bounds().size.width).abs() < 1.0);
     assert_eq!(grid.index_at_point(NSPoint::new(wide.origin.x + 2.0, wide.origin.y + 2.0)), Some(2));
-    let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+    let thumb = grid.cell_rect(0);
+    let bounds = NSRect::new(NSPoint::new(thumb.origin.x + 6.0, thumb.origin.y + 6.0), NSSize::new(148.0, 134.0));
+    let bitmap = grid.bitmapImageRepForCachingDisplayInRect(bounds).expect("thumbnail bitmap");
+    grid.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+    assert_orientation(&bitmap);
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
+    send_key_via_app(&app, 125, false);
+    assert_eq!(unsafe { (*app_state()).selected }, Some(6), "down moves by the visible column count");
+    send_key_via_app(&app, 126, false);
+    assert_eq!(unsafe { (*app_state()).selected }, Some(2), "up returns by the visible column count");
     let row_before_zoom = grid.cell_rect(3).origin.y;
     send_key_command(&app, 24);
     assert!(grid.cell_rect(0).size.width > CELL_W, "command plus increases thumbnails");
