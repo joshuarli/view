@@ -1,10 +1,13 @@
-.PHONY: build test package install bench
+.PHONY: build test package install bench swift
 
 APP := View.app
 INSTALL_DIR ?= /Applications
 
 build:
 	cargo build --profile dist --bin app --features app
+
+swift:
+	sh swift/scripts/build-app.sh
 
 test:
 	cargo test --profile dist
