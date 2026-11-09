@@ -1058,6 +1058,39 @@ define_class!(
 
 static SELF_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SELF_TEST_SELECTED_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+static SELF_TEST_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static SELF_TEST_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn send_mouse_via_app(app: &NSApplication, count: objc2_foundation::NSInteger) {
+    let window = match app.keyWindow() {
+        Some(w) => w,
+        None => return,
+    };
+    let width = window.frame().size.width.max(400.0);
+    let dir_index = unsafe { (*app_state()).items.iter().position(|i| i.kind == MediaKind::Directory) };
+    let index = dir_index.unwrap_or(0);
+    let point = objc2_foundation::NSPoint::new(12.0 + index as f64 * 128.0 + 60.0, 92.0);
+    let flags = objc2_app_kit::NSEventModifierFlags::empty();
+    let event = unsafe {
+        objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            objc2_app_kit::NSEventType::LeftMouseDown,
+            point,
+            flags,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+            window.windowNumber(),
+            None,
+            0,
+            count,
+            0.0,
+        )
+    };
+    if let Some(event) = event {
+        app.sendEvent(&event);
+    }
+}
 
 fn send_key_via_app(app: &NSApplication, key_code: u16, shift: bool) {
     let flags = if shift {
@@ -1096,6 +1129,7 @@ fn start_self_test() {
             let step = SELF_TEST_STEP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match step {
                 0 => {
+                    SELF_TEST_ROOT.set(unsafe { (*app_state()).root.clone() }).ok();
                     #[allow(deprecated)] unsafe { app.activateIgnoringOtherApps(true) };
                     if let Some(refs) = window_refs().as_ref() {
                         unsafe { &*refs.window }.makeKeyWindow();
@@ -1107,17 +1141,36 @@ fn start_self_test() {
                     send_key_via_app(&app, 124, false);
                 }
                 1 => send_key_via_app(&app, 124, false),
-                2 => send_key_via_app(&app, 123, true),
+                2 => {
+                    send_mouse_via_app(&app, 2);
+                    send_mouse_via_app(&app, 2);
+                }
+                3 => {
+                    let entered = match SELF_TEST_ROOT.get() {
+                        Some(start) => { let cur = unsafe { &*app_state() }.root.clone(); cur != *start }
+                        None => false,
+                    };
+                    SELF_TEST_ENTERED.store(entered, std::sync::atomic::Ordering::SeqCst);
+                    send_key_via_app(&app, 123, true);
+                }
                 _ => {
                     let before = SELF_TEST_SELECTED_BEFORE.load(std::sync::atomic::Ordering::SeqCst);
                     let before = if before == usize::MAX { None } else { Some(before) };
                     let now = unsafe { (*app_state()).selected };
-                    if before != now && now.is_some() {
-                        eprintln!("self-test: PASS (NSApplication.sendEvent routing: arrows, wraparound, shift-left)");
+                    let root = unsafe { (*app_state()).root.clone() };
+                    let has_directory = unsafe { (*app_state()).items.iter().any(|i| i.kind == MediaKind::Directory) };
+                    let double_click_ok = if has_directory {
+                        SELF_TEST_ENTERED.load(std::sync::atomic::Ordering::SeqCst)
+                    } else {
+                        before != now && now.is_some()
+                    };
+                    if before != now && now.is_some() && double_click_ok {
+                        eprintln!("self-test: PASS (arrows, double-click enter, shift-left history via NSApplication.sendEvent)");
                         std::process::exit(0);
                     } else {
                         eprintln!(
-                            "self-test: FAIL (before={before:?} now={now:?} count={})",
+                            "self-test: FAIL (before={before:?} now={now:?} root={} count={})",
+                            root.display(),
                             unsafe { (*app_state()).items.len() }
                         );
                         std::process::exit(1);
