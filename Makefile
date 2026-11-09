@@ -13,6 +13,7 @@ package:
 	sh scripts/package-app.sh
 
 install: package
+	mkdir -p $(INSTALL_DIR)
 	cp -R $(APP) $(INSTALL_DIR)/
 	echo "installed $(INSTALL_DIR)/$(APP)"
 
