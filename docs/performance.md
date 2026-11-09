@@ -86,3 +86,19 @@ Measured 2026-11-08 on arm64, macOS 27, release build, five samples per workflow
 | Thumbnail decode | 100 PNGs | 9.3 ms | 12.4 ms | +0.2 MiB |
 
 These are recorded workflow baselines, not comparison claims. The recursive scan is the outlier worth watching: it sits above the 1,000 ms launch budget for 2,000 items and grows with corpus size, so fast-scroll and per-batch collection-view updates need their own measurements before claiming a speedup. Steady-state RSS stayed near 50 MiB in this run; peak footprint and idle CPU still need the launches above for a full picture.
+
+## Rust port head-to-head
+
+A core-only Rust port of the same workflows lives in `Rust/` (Discovery, Catalog, demand bookkeeping, PNG decode). The AppKit GUI, Quick Look, and panel controllers are not ported. The Rust toolchain is pinned by `rust-toolchain.toml` (nightly-2026-09-15) and profiles mirror `~/d/ish/Cargo.toml` (`release` thin-LTO, `dist` fat-LTO at single codegen-unit, stripped). Dist is the profile used for the final numbers below; Swift stays at `swift run -c release ViewBenchmarks`. Both harnesses print identical JSON (median, p95, RSS).
+
+Measured 2026-11-08 on arm64, macOS 27, dist vs release, five samples per workflow (browser listing 100-item group folder of a 2,000-item PNG corpus; recursive/scroll/decode 20,000-item PNG corpus). Same fixture folders for both sides.
+
+| Workflow | Swift median | Rust dist median | Delta |
+| --- | ---: | ---: | ---: |
+| Browser list (100 items) | 5.03 ms | 0.34 ms | Rust ~14× faster |
+| Catalog interact (5,000) | 13.59 ms | 13.39 ms | Rust ~1.0× (tie) |
+| Recursive scan (20,000) | 1,377 ms | 210 ms | Rust ~6.6× faster |
+| Scroll/prefetch (sliding 24+48) | 206 ms | 10.7 ms | Rust ~19× faster* |
+| Thumbnail decode (100 PNGs) | 9.12 ms | 10.25 ms serial / 3.41 ms parallel | See note |
+
+* The scroll comparison is not purely bookkeeping: the Swift harness decodes real PNG buffers inside its scheduler request while the Rust harness only advances demand state, so the 19× figure overstates a language win and mainly highlights that decode cost was bundled with scroll. The usefully comparable reading is browser-list (single metadata pass vs Swift double `resourceValues` + UTType detection per file) and recursive-scan (same counting work with fewer Foundation hops), which are where the algorithmic Rust design is genuinely cheaper. Steady RSS for scan was ~5.8 MiB (Rust) versus ~32 MiB (Swift) in this run, and process RSS stayed ~14 MiB (Rust bench) versus ~53 MiB (Swift bench, AppKit-linked). Those totals reflect binary scale rather than per-item retention.
