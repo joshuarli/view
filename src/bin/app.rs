@@ -1545,6 +1545,36 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     send_key_via_app(&app, 36, false);
     assert_eq!(unsafe { (*app_state()).root.clone() }, folder, "return enters the selected directory");
     assert!(preview.image().is_some(), "return paints the first carousel image");
+    let original = folder.join("a.png");
+    let trashed = parent.join(".trashed-a.png");
+    let content = std::fs::read(&original).unwrap();
+    std::fs::rename(&original, &trashed).unwrap();
+    {
+        let state = unsafe { &mut *app_state() };
+        let index = state.items.iter().position(|item| item.path == original).unwrap();
+        let item = state.items.remove(index);
+        state.selected = Some(0);
+        state.trash_history.record_trash(TrashTransaction {
+            files: vec![view_core::TrashedFile { item, trashed_path: trashed.clone(), index }],
+            selection_before_op: vec![original.clone()],
+        });
+    }
+    send_key_command(&app, 6);
+    assert_eq!(std::fs::read(&original).unwrap(), content, "undo restores the file contents");
+    assert!(!trashed.exists(), "undo removes the trashed copy");
+    assert!(unsafe { (*app_state()).items.iter().any(|item| item.path == original) }, "undo restores the catalog item");
+    unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
+    assert!(!original.exists(), "redo removes the original file");
+    assert_eq!(std::fs::read(&trashed).unwrap(), content, "redo preserves the file contents");
+    assert!(!unsafe { (*app_state()).items.iter().any(|item| item.path == original) }, "redo removes the catalog item");
+    std::fs::write(&original, b"replacement").unwrap();
+    send_key_command(&app, 6);
+    assert_eq!(std::fs::read(&original).unwrap(), b"replacement", "undo preserves a conflicting file");
+    assert_eq!(std::fs::read(&trashed).unwrap(), content, "conflict leaves the trashed file intact");
+    assert!(!unsafe { (*app_state()).items.iter().any(|item| item.path == original) }, "conflict does not restore the catalog item");
+    std::fs::remove_file(&original).unwrap();
+    send_key_command(&app, 6);
+    assert_eq!(std::fs::read(&original).unwrap(), content, "undo can be retried after resolving a conflict");
     let video_dir = folder.join("video");
     std::fs::create_dir(&video_dir).unwrap();
     let video = video_dir.join("clip.mp4");

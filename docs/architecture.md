@@ -59,7 +59,7 @@ UI, catalog, scheduler bookkeeping, and Quick Look state are main-thread. Thumbn
 ## Testing
 
 - `cargo test --profile dist --lib` (unit) and `cargo test --profile dist` (unit + `tests/` integration + UI-parity suites).
-- `cargo test --features app --test app_regression` exercises the live AppKit window, navigation and history, image orientation, Quick Look selection, layout, thumbnail completion, and file URL drag/drop. This test is not included unless the `app` feature is enabled.
+- `cargo test --features app --test app_regression` exercises the live AppKit window, navigation and history, image orientation, Quick Look selection, layout, thumbnail completion, file URL drag/drop, and file undo/redo with an isolated simulated Trash. This test is not included unless the `app` feature is enabled.
 - `cargo test --profile dist --test ui_parity` checks core shortcuts and trash conflict handling, native drag-item construction, and movie thumbnail generation.
 - `cargo build --profile dist --bin app --features app` builds the AppKit binary; `cargo run --profile dist --bin bench` runs the benchmark harness (release-quality numbers in [docs/performance.md](performance.md)).
 - `sh scripts/package-app.sh` builds the signed `View.app`. `View.app/Contents/MacOS/view --self-test <dir>` boots the real window and asserts key handling end-to-end through the live run loop; it exits nonzero on failure.
