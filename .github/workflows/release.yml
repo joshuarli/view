@@ -13,9 +13,6 @@ defaults:
   run:
     shell: bash -euo pipefail {0}
 
-env:
-  CARGO_INCREMENTAL: 0
-
 jobs:
   preflight:
     name: Validate release ref
@@ -45,14 +42,34 @@ jobs:
     needs: preflight
     runs-on: macos-latest
     permissions:
+      actions: write
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Install Rust toolchain
+        run: rustup show
+
       - name: Build
-        run: echo ok > view-aarch64-apple-darwin
+        run: cargo build --profile dist --bin app --features app --locked
+
+      - name: Test
+        run: cargo test --profile dist --locked
+
+      - name: Package binary
+        run: cp target/dist/app view-aarch64-apple-darwin
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -61,7 +78,6 @@ jobs:
 
   release:
     name: Create pre-release
-    if: false
     needs: [preflight, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
