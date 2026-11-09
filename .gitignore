@@ -1,2 +1,3 @@
 .build/
 View.app/
+**/target/
