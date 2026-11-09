@@ -370,20 +370,27 @@ fn trash_selected(grid: &GridView) {
     workspace.recycleURLs_completionHandler(&ns_urls, Some(&handler));
 }
 
+fn move_trash_item(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let from = std::ffi::CString::new(from.as_os_str().as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let to = std::ffi::CString::new(to.as_os_str().as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
 fn undo_trash(grid: &GridView) {
     let transaction = unsafe { (&mut *app_state()).trash_history.pop_undo() };
     let Some(transaction) = transaction else { return };
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
-        let exists = std::path::Path::new(&file.trashed_path).exists();
-        let dest_exists = std::path::Path::new(&file.item.path).exists();
-        match (exists, dest_exists) {
-            (true, false) => {
-                let _ = std::fs::copy(&file.trashed_path, &file.item.path).and_then(|_| std::fs::remove_file(&file.trashed_path));
-                succeeded.push(file);
+        match move_trash_item(&file.trashed_path, &file.item.path) {
+            Ok(()) => succeeded.push(file),
+            Err(error) => {
+                eprintln!("view: cannot restore {}: {error}", file.item.path.display());
+                residual.push(file);
             }
-            _ => residual.push(file),
         }
     }
     {
@@ -409,13 +416,12 @@ fn redo_trash(grid: &GridView) {
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
-        let present = std::path::Path::new(&file.item.path).exists();
-        match present {
-            true => {
-                let _ = std::fs::copy(&file.item.path, &file.trashed_path).and_then(|_| std::fs::remove_file(&file.item.path));
-                succeeded.push(file);
+        match move_trash_item(&file.item.path, &file.trashed_path) {
+            Ok(()) => succeeded.push(file),
+            Err(error) => {
+                eprintln!("view: cannot redo trash for {}: {error}", file.item.path.display());
+                residual.push(file);
             }
-            false => residual.push(file),
         }
     }
     {
@@ -1575,6 +1581,29 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     std::fs::remove_file(&original).unwrap();
     send_key_command(&app, 6);
     assert_eq!(std::fs::read(&original).unwrap(), content, "undo can be retried after resolving a conflict");
+    let album = folder.join("album");
+    let trashed_album = parent.join(".trashed-album");
+    std::fs::create_dir(&album).unwrap();
+    std::fs::write(album.join("inside.png"), &content).unwrap();
+    std::fs::rename(&album, &trashed_album).unwrap();
+    unsafe { (&mut *app_state()).trash_history.record_trash(TrashTransaction {
+        files: vec![view_core::TrashedFile { item: MediaItem::new(&album, MediaKind::Directory), trashed_path: trashed_album.clone(), index: 0 }],
+        selection_before_op: vec![album.clone()],
+    }); }
+    send_key_command(&app, 6);
+    assert_eq!(std::fs::read(album.join("inside.png")).expect("undo restores folder contents"), content);
+    assert!(!trashed_album.exists(), "undo removes the trashed folder");
+    std::fs::create_dir(&trashed_album).unwrap();
+    std::fs::write(trashed_album.join("replacement"), b"replacement").unwrap();
+    unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
+    assert_eq!(std::fs::read(album.join("inside.png")).unwrap(), content, "redo preserves the source on conflict");
+    assert_eq!(std::fs::read(trashed_album.join("replacement")).unwrap(), b"replacement", "redo preserves the conflicting destination");
+    assert!(unsafe { (*app_state()).items.iter().any(|item| item.path == album) }, "redo conflict leaves the folder in the catalog");
+    std::fs::remove_file(trashed_album.join("replacement")).unwrap();
+    std::fs::remove_dir(&trashed_album).unwrap();
+    unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
+    assert!(!album.exists(), "redo removes the original folder");
+    assert_eq!(std::fs::read(trashed_album.join("inside.png")).expect("redo preserves folder contents"), content);
     let video_dir = folder.join("video");
     std::fs::create_dir(&video_dir).unwrap();
     let video = video_dir.join("clip.mp4");

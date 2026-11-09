@@ -46,7 +46,7 @@ The app owns no persistent database. Files trashed by the app are removed from t
 - Owns `NSApplication`, the window, the main menu, and shutdown. Termination waits for scan cancellation, thumbnail cancellation, and any pending trash.
 - Custom grid view owns the catalog and both content modes. Browser mode lists one directory, applies each listing atomically, and navigates into folders or to the parent with a scan-generation guard; going up selects the folder it came from. Recursive mode keeps incremental inserts per batch. Both share selection by identity, demand updates from visible plus scroll-direction prefetch, and scroll-into-view after trash and panel navigation. Handles Space, Return, Delete, Cmd+Delete, Cmd+Up, and Ctrl+Delete in `keyDown`.
 - QLPreviewPanel: Space opens the panel; stepping through items updates the grid selection. The grid reflows when the window changes size, and Cmd-minus / Cmd-plus resize thumbnails in both modes. Selected items can be dragged out as file URLs; dropping a folder opens it and dropping a media file selects it.
-- Trash: trashes the selection in one guarded operation and records the batch for undo (Cmd+Z) and redo (Cmd+Shift+Z). Undo moves files back and reinserts those still browsed; destination conflicts stay on the undo stack for retry, and permanently missing trashed files are dropped.
+- Trash: trashes the selection in one guarded operation and records the batch for undo (Cmd+Z) and redo (Cmd+Shift+Z). Undo and redo atomically rename files or folders without replacing an existing destination. Failed moves stay in history for retry; cross-volume moves are reported as failures.
 
 ## Why AppKit
 
