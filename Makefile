@@ -1,4 +1,4 @@
-.PHONY: build test lint package install bench
+.PHONY: build test lint package install bench toolchain
 
 APP := View.app
 INSTALL_DIR ?= /Applications
@@ -22,3 +22,6 @@ install: package
 
 bench:
 	sh scripts/bench.sh $(BENCH) $(BENCH_ARGS)
+
+toolchain:
+	sh scripts/install-gluon.sh
