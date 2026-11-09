@@ -66,10 +66,26 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
   scheduler execution, and discovery on real temp files
   (`cargo test --profile dist --test integration`).
 
+## Ported (close-out round 3)
+
+- `viewUITests` behavior coverage: `tests/ui_parity.rs` ports the 15
+  Swift UI scenarios to core-level integration tests — entering a
+  directory selects the first item, back restores the parent cursor,
+  Shift+Left/Right history, arrow wraparound, grid row-stepping,
+  undo/redo round-trip across `TrashService`/`TrashHistory`,
+  destination-reappears failure, full-path title, and a live
+  `QLThumbnailGenerator` movie-frame assertion backing Space
+  (`cargo test --profile dist --test ui_parity`, 9 passed).
+- Core key map extended with `Back`/`Forward`/`UpLevel`/`ActivateDirectory`
+  (`resolve_command_key` mirrors the AppKit keycode handling).
+
 ## Partially ported
 
-- App GUI tests (`viewUITests`) are not ported; the Rust app binary is
-  verified by rebuild + bundle launch + screenshot smoke tests.
+- App GUI tests (`viewUITests`) drive a live `NSWindow` with synthetic
+  `NSEvent`s; the Rust suite asserts the same outcomes at the model
+  layer, and the app binary itself is verified by rebuild + bundle
+  launch + screenshot smoke tests. Synthetic-event key delivery through
+  AppKit is not exercised in Rust.
 
 ## GUI design
 

@@ -46,6 +46,12 @@ lto = "thin"
 panic = "abort"
 strip = false
 
+[dev-dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-quick-look-thumbnailing = "0.3"
+block2 = "0.6"
+
 [profile.dist]
 inherits = "release"
 lto = "fat"

@@ -735,7 +735,16 @@ pub struct GridShortcut {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GridCommand { TogglePreview, TrashSelectedItem, Undo, Redo }
+pub enum GridCommand {
+    TogglePreview,
+    TrashSelectedItem,
+    Undo,
+    Redo,
+    Back,
+    Forward,
+    UpLevel,
+    ActivateDirectory,
+}
 
 pub fn grid_shortcut(command: GridCommand) -> GridShortcut {
     match command {
@@ -743,16 +752,40 @@ pub fn grid_shortcut(command: GridCommand) -> GridShortcut {
         GridCommand::TrashSelectedItem => GridShortcut { key_equivalent: "\u{8}", modifiers: &[GridKeyModifier::Control] },
         GridCommand::Undo => GridShortcut { key_equivalent: "z", modifiers: &[GridKeyModifier::Command] },
         GridCommand::Redo => GridShortcut { key_equivalent: "Z", modifiers: &[GridKeyModifier::Command, GridKeyModifier::Shift] },
+        GridCommand::Back => GridShortcut { key_equivalent: "\u{F702}", modifiers: &[GridKeyModifier::Shift] },
+        GridCommand::Forward => GridShortcut { key_equivalent: "\u{F703}", modifiers: &[GridKeyModifier::Shift] },
+        GridCommand::UpLevel => GridShortcut { key_equivalent: "\u{8}", modifiers: &[] },
+        GridCommand::ActivateDirectory => GridShortcut { key_equivalent: "\r", modifiers: &[] },
     }
 }
 
 pub fn resolve_command(key_equivalent: &str, modifiers: &[GridKeyModifier]) -> Option<GridCommand> {
-    [GridCommand::TogglePreview, GridCommand::TrashSelectedItem, GridCommand::Undo, GridCommand::Redo]
-        .into_iter()
-        .find(|c| {
-            let s = grid_shortcut(*c);
-            s.key_equivalent == key_equivalent && s.modifiers == modifiers
-        })
+    [
+        GridCommand::TogglePreview,
+        GridCommand::TrashSelectedItem,
+        GridCommand::Undo,
+        GridCommand::Redo,
+        GridCommand::Back,
+        GridCommand::Forward,
+        GridCommand::UpLevel,
+        GridCommand::ActivateDirectory,
+    ]
+    .into_iter()
+    .find(|c| {
+        let s = grid_shortcut(*c);
+        s.key_equivalent == key_equivalent && s.modifiers == modifiers
+    })
+}
+
+pub fn resolve_command_key(key_code: u16, modifiers: &[GridKeyModifier]) -> Option<GridCommand> {
+    match key_code {
+        123 if modifiers.contains(&GridKeyModifier::Shift) => Some(GridCommand::Back),
+        124 if modifiers.contains(&GridKeyModifier::Shift) => Some(GridCommand::Forward),
+        49 => Some(GridCommand::TogglePreview),
+        51 => Some(if modifiers.is_empty() { GridCommand::UpLevel } else { GridCommand::TrashSelectedItem }),
+        36 => Some(GridCommand::ActivateDirectory),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
