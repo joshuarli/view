@@ -1268,9 +1268,6 @@ mod tests {
         // bitmap is bottom-up: source row 0 (top-left) lands on the last
         // buffer row. Sample top-left through both decoders.
         let row = (h as usize) - 1;
-        for probe in [0usize, (w as usize) * (h as usize) / 2, w as usize * (h - 1) as usize] {
-            let base = probe * 4;
-            eprintln!("probe row {} starting bytes: {:?}", probe, &pixels[base..base + 12.min(pixels.len() - base)]);
         }
         let offset = row * (w as usize) * 4;
         let native_top_left = [
