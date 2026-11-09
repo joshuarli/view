@@ -467,7 +467,7 @@ pub fn decode_png_native(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
             8,
             bytes_per_row,
             color_space,
-            2, // kCGImageAlphaPremultipliedLast
+            1, // kCGImageAlphaPremultipliedLast
         );
         if context.is_null() {
             cg_color_space_release(color_space);
@@ -475,8 +475,11 @@ pub fn decode_png_native(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
             cf_release(source as *const std::ffi::c_void);
             return Err("context failed".into());
         }
-        let rect: [f64; 4] = [0.0, 0.0, width as f64, height as f64];
-cg_context_draw_image(context, rect.as_ptr(), image);
+        // CGRect is a by-value struct; build it by copying bytes out of a zero-initialized C-style area to rule out var-sized layout issues
+        let mut rect = [0.0f64; 4];
+        rect[2] = width as f64;
+        rect[3] = height as f64;
+        cg_context_draw_image(context, *rect.as_ptr().cast::<(f64, f64, f64, f64)>(), image);
         cg_context_release(context);
         cg_color_space_release(color_space);
         cg_image_release(image);
@@ -533,7 +536,7 @@ unsafe extern "C" {
     fn cg_color_space_create_device_rgb() -> *mut CGColorSpace;
     #[link_name = "CGColorSpaceRelease"]
     fn cg_color_space_release(color_space: *mut CGColorSpace);
-    #[link_name = "CGContextCreate"]
+    #[link_name = "CGBitmapContextCreate"]
     fn cg_context_create(
         data: *mut std::ffi::c_void,
         width: usize,
@@ -544,7 +547,7 @@ unsafe extern "C" {
         bitmap_info: u32,
     ) -> *mut CGContext;
     #[link_name = "CGContextDrawImage"]
-    fn cg_context_draw_image(context: *mut CGContext, rect: *const f64, image: *mut CGImage);
+    fn cg_context_draw_image(context: *mut CGContext, rect: (f64, f64, f64, f64), image: *mut CGImage);
     #[link_name = "CGContextRelease"]
     fn cg_context_release(context: *mut CGContext);
 }
@@ -1261,7 +1264,28 @@ mod tests {
         drop(pool);
         let (pw, ph, pure_pixels) = decode_png(&path).unwrap();
         assert_eq!((pw, ph), (w, h));
-        assert_ne!(pure_pixels.len(), pixels.len(), "pure RGB vs native RGBA layouts differ");
+        // ImageIO RGBA matches pure RGB modulo the alpha byte and the
+        // bitmap is bottom-up: source row 0 (top-left) lands on the last
+        // buffer row. Sample top-left through both decoders.
+        let row = (h as usize) - 1;
+        for probe in [0usize, (w as usize) * (h as usize) / 2, w as usize * (h - 1) as usize] {
+            let base = probe * 4;
+            eprintln!("probe row {} starting bytes: {:?}", probe, &pixels[base..base + 12.min(pixels.len() - base)]);
+        }
+        let offset = row * (w as usize) * 4;
+        let native_top_left = [
+            pixels[offset],
+            pixels[offset + 1],
+            pixels[offset + 2],
+            pixels[offset + 3],
+        ];
+        assert_eq!(
+            native_top_left[..3].to_vec(),
+            pure_pixels[..3].to_vec(),
+            "top-left pixel differs: native {native_top_left:?} pure {:?}",
+            &pure_pixels[..3]
+        );
+        assert_eq!(native_top_left[3], 255, "drawn pixels must be opaque");
     }
 
     #[test]
