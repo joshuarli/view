@@ -47,3 +47,6 @@ Build with `cargo build --profile dist --bin app --features app`, test with `car
 ## Licensing
 
 See `LICENSE` if present; otherwise this personal project is provided as-is.
+
+
+For a one-shot build-and-install, use `make install` (installs `View.app` to `/Applications` by default; override with `INSTALL_DIR=...`).
