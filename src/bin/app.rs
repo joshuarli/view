@@ -12,7 +12,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont, NSImage,
-    NSImageView, NSMenu, NSMenuItem, NSScrollView, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
+    NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -108,6 +108,7 @@ struct WindowRefs {
     preview: *mut NSView,
     divider: *mut NSBox,
     preview_image: *mut NSImageView,
+    preview_label: *mut NSTextField,
 }
 unsafe impl Send for WindowRefs {}
 unsafe impl Sync for WindowRefs {}
@@ -249,36 +250,52 @@ fn persist_view_mode() {
 }
 
 fn update_carousel_preview() {
-    let (preview_image_ptr, preview_ptr) = {
+    let (preview_image_ptr, preview_ptr, preview_label_ptr) = {
         let refs = window_refs();
         let Some(refs) = refs.as_ref() else { return };
-        (refs.preview_image, refs.preview)
+        (refs.preview_image, refs.preview, refs.preview_label)
     };
     let preview_image = unsafe { &*preview_image_ptr };
     let preview = unsafe { &*preview_ptr };
+    let preview_label = unsafe { &*preview_label_ptr };
     let state = unsafe { &*app_state() };
     if state.view_mode != ViewMode::Carousel {
         return;
     }
     let Some(index) = state.selected() else {
         preview_image.setImage(None);
+        preview_label.setHidden(true);
         return;
     };
     let Some(item) = state.items().get(index) else {
         preview_image.setImage(None);
+        preview_label.setHidden(true);
         return;
     };
     let preview_bounds = preview.bounds();
     if item.kind == MediaKind::Directory {
+        let items = view_core::list_browser(&item.path).unwrap_or_default();
+        let count = items.len();
+        let size: u64 = items.iter().filter_map(|i| i.file_size).map(|s| s.max(0) as u64).sum();
+        let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let size_str = byte_count_string(size);
+        let detail = format!("{name}\n{count} items, {}", size_str);
+        preview_label.setStringValue(&NSString::from_str(&detail));
+        preview_label.setHidden(false);
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyDown);
+        let label_h = ((preview_bounds.size.height * 0.35).clamp(48.0, 140.0)).min(preview_bounds.size.height - 80.0).max(48.0);
+        let icon_area_h = (preview_bounds.size.height - label_h - 24.0).max(64.0);
+        let icon_size = icon_area_h.min(preview_bounds.size.width - 32.0).min(256.0).max(64.0);
         if let Some(icon) = folder_like_icon(item) {
-            unsafe { icon.setSize(NSSize::new(256.0, 256.0)); }
+            unsafe { icon.setSize(NSSize::new(icon_size, icon_size)); }
             preview_image.setImage(Some(&*icon));
-            let x = ((preview_bounds.size.width - 256.0) / 2.0).round();
-            let y = ((preview_bounds.size.height - 256.0) / 2.0).round();
-            preview_image.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(256.0, 256.0)));
+            let x = ((preview_bounds.size.width - icon_size) / 2.0).round();
+            let y = (label_h + 16.0 + (icon_area_h - icon_size) / 2.0).round();
+            preview_image.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(icon_size, icon_size)));
         }
+        preview_label.setFrame(NSRect::new(NSPoint::new(16.0, 8.0), NSSize::new((preview_bounds.size.width - 32.0).max(0.0), label_h)));
     } else {
+        preview_label.setHidden(true);
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
         let pixels = pixel_limit(preview, preview_bounds);
         let image = if item.kind == MediaKind::Movie {
@@ -601,10 +618,16 @@ fn enter_directory(path: PathBuf) {
         state.root.display().to_string()
     };
     if let Some(refs) = window_refs().as_ref() {
-        unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
+        unsafe {
+            (&*refs.window).setTitle(&NSString::from_str(&title));
+        }
     }
     apply_view_mode_layout();
     reconcile_preview();
+    if let Some(refs) = window_refs().as_ref() {
+        unsafe { (&*refs.grid).scroll_selection_into_view() };
+        unsafe { (&*refs.grid).setNeedsDisplay(true) };
+    }
 }
 
 fn open_selected() {
@@ -1301,7 +1324,10 @@ define_class!(
                     }
                 }
 
-                let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                if name.chars().count() > 128 {
+                    name = name.chars().take(128).collect();
+                }
                 let string = NSString::from_str(&name);
                 let name_dict = if item.kind == MediaKind::Directory { &bold_dict } else { &name_dict };
                 use objc2_app_kit::NSStringDrawing;
@@ -1369,6 +1395,7 @@ define_class!(
                     apply_view_mode_layout();
                     update_carousel_preview();
                     reconcile_preview();
+                    self.scroll_selection_to_center();
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -1389,6 +1416,7 @@ define_class!(
                     apply_view_mode_layout();
                     update_carousel_preview();
                     reconcile_preview();
+                    self.scroll_selection_to_center();
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -1789,6 +1817,18 @@ define_class!(
             preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
             preview_image.setImageAlignment(objc2_app_kit::NSImageAlignment::AlignCenter);
             preview_nsview.addSubview(&*preview_image);
+            let preview_label = NSTextField::new(objc2::MainThreadMarker::new().unwrap());
+            preview_label.setEditable(false);
+            preview_label.setSelectable(true);
+            preview_label.setBezeled(false);
+            preview_label.setDrawsBackground(false);
+            preview_label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+            preview_label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByCharWrapping);
+            preview_label.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+            preview_label.setTextColor(Some(&NSColor::labelColor()));
+            unsafe { let _: () = objc2::msg_send![&*preview_label, setUsesSingleLineMode: false]; }
+            unsafe { let _: () = objc2::msg_send![&*preview_label, setMaximumNumberOfLines: 0i64]; }
+            preview_nsview.addSubview(&*preview_label);
             let divider = NSBox::new(objc2::MainThreadMarker::new().unwrap());
             let scroll = NSScrollView::new(objc2::MainThreadMarker::new().unwrap());
             scroll.setHasVerticalScroller(!view_mode_carousel);
@@ -1819,6 +1859,7 @@ define_class!(
                 preview: Retained::into_raw(preview_nsview.clone()) as *mut NSView,
                 divider: Retained::into_raw(divider.clone()) as *mut NSBox,
                 preview_image: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
+                preview_label: Retained::into_raw(preview_label.clone()) as *mut NSTextField,
             });
             update_carousel_preview();
             install_main_menu(self, view_mode_carousel, &grid);
