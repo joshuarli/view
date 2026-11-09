@@ -434,7 +434,13 @@ fn begin_drag_session(view: &GridView, path: &PathBuf, event: &objc2_app_kit::NS
     let dragging_item: Retained<objc2_app_kit::NSDraggingItem> = unsafe {
         let ptr: *mut objc2_app_kit::NSDraggingItem =
             objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), initWithPasteboardWriter: &*item];
-        Retained::from_raw(ptr).unwrap()
+        match Retained::from_raw(ptr) {
+            Some(retained) => retained,
+            None => {
+                DRAG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        }
     };
     let items = NSArray::from_retained_slice(&[dragging_item]);
     let source = objc2::runtime::ProtocolObject::from_ref(view);
@@ -473,14 +479,14 @@ fn thumb_cache() -> std::sync::MutexGuard<'static, std::collections::HashMap<Pat
     THUMB_CACHE
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<PathBuf>> {
     THUMB_PENDING
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 fn cached_thumbnail(path: &PathBuf) -> Option<Retained<NSImage>> {
