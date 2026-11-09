@@ -1486,6 +1486,8 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let url = writer.downcast_ref::<NSURL>().expect("file URL pasteboard writer");
         assert_eq!(path_from_url(url), unsafe { (&(*app_state()).items)[index].path.clone() });
     }
+    assert!(grid.respondsToSelector(objc2::sel!(draggingEntered:)), "drop negotiation is registered");
+    assert!(grid.respondsToSelector(objc2::sel!(performDragOperation:)), "drop handler is registered");
     let pasteboard = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
     let folder = unsafe { (*app_state()).root.clone() };
     let parent = folder.parent().unwrap();
@@ -1509,18 +1511,25 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let video_dir = folder.join("video");
     std::fs::create_dir(&video_dir).unwrap();
     let video = video_dir.join("clip.mp4");
-    std::fs::write(&video, [0u8; 8]).unwrap();
-    let image_item = MediaItem::new(folder.join("a.png"), MediaKind::Image);
-    let image = image_for(&image_item).expect("test image");
-    thumb_pending().insert(video.clone());
+    std::fs::copy(parent.join(".video.mp4"), &video).unwrap();
     unsafe { (*app_state()).view_mode = ViewMode::Carousel; }
     enter_directory(video_dir);
     assert_eq!(unsafe { (&(*app_state()).items)[0].kind }, MediaKind::Movie);
     assert!(preview.image().is_none(), "video preview waits for its thumbnail");
-    thumbnail_completed(video, SyncImage(image));
-    assert!(preview.image().is_some(), "first video preview updates when thumbnail completes");
-    eprintln!("app regression: PASS");
-    std::process::exit(0);
+    let started = std::time::Instant::now();
+    let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
+        if cached_thumbnail(&video).is_some() {
+            let image = {
+                let refs = window_refs();
+                unsafe { (&*refs.as_ref().unwrap().preview_image).image() }
+            };
+            assert!(image.is_some(), "first video preview updates when thumbnail completes");
+            eprintln!("app regression: PASS");
+            std::process::exit(0);
+        }
+        assert!(started.elapsed().as_secs() < 10, "video thumbnail did not complete");
+    });
+    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &block) };
 }
 
 static SELF_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

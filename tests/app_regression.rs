@@ -12,6 +12,7 @@ fn app_interactions() {
     ];
     for name in ["a.png", "b.png", "c.png"] { std::fs::write(folder.join(name), png).unwrap(); }
     std::fs::write(folder.join("weird % café.png"), png).unwrap();
+    std::fs::write(root.join(".video.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_app"))
         .arg("--regression-test").arg(&root).output().unwrap();
     assert!(output.status.success(), "app failed: {}", String::from_utf8_lossy(&output.stderr));
