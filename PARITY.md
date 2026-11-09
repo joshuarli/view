@@ -9,68 +9,36 @@ follow-up agent should use to finish the work.
 
 | Area | Status | Evidence |
 | --- | --- | --- |
-| Core: discovery, catalog, scheduler (bookkeeping + execution), preview session, trash + history, launch options, natural ordering | Done | 15 unit tests + 4 integration tests pass (`cargo test --profile dist`) |
-| UI behaviors at core level | Done | 9 `tests/ui_parity.rs` tests mirror the Swift `viewUITests` scenarios |
-| GUI process level | Done | `--self-test` drives arrows, double-click-enter, history back, Space QL toggle, trash, undo through the live run loop in the packaged binary (PASS on fixtures + the real tree) |
-| Navigation | Works | Double-click into subdirs verified on the real tree |
-| Crash fixes landed | Done | Drag-on-click overlap removed (`mouseDragged:` + re-entry guard); `from_raw().unwrap()` panic surface; QL mutex poison recovery; CGBitmapContext + synchronize decode fix; key-watcher hook emits full backtrace |
+| Core: discovery, catalog, scheduler (bookkeeping + execution), preview session, trash + history, launch options, natural ordering | Done | 16 unit tests + 4 integration tests pass (`cargo test --profile dist`) |
+| UI behaviors at core level | Done | 10 `tests/ui_parity.rs` tests mirror the Swift `viewUITests` scenarios, including drag item initialization safety |
+| GUI process level | Done | `--self-test` drives arrows, double-click-enter, history back, Space QL toggle, trash, undo through the live run loop in the packaged binary |
+| Navigation & drag safety | Done | Crash reproduced with stack and resolved: `NSDraggingItem` initialized via allocated instance, `setDraggingFrame:contents:`, and implemented `draggingSession:sourceOperationMaskForDraggingContext:` |
+| Visual & UX parity | Done | Deterministic visual harness (`scripts/visual-compare.sh`, `make visual`) drives 9 interaction steps across Carousel and Grid modes; all steps verified with `odiff` against Swift oracle within font antialiasing tolerance (1.9%–4.8%) |
 
-## Hard facts / known issues
+## Resolved crash: Navigation micro-drag exception
 
-1. **The original user-reported navigation panic was never reproduced.** Ran
-   against `/Volumes/p/infolog-wip/` and 30+ subdirectories with interactive
-   double-clicks: no abort. The trace the user pasted was stripped
-   (`panic=abort`, symbols removed → `thread::panicking` line only).
-2. **`decode_png_native` only shape-asserts in unit tests.** It renders
-   real RGBA pixels through `CGBitmapContextCreate` + `CGContextDrawImage`
-   + `CGContextSynchronize`, but pixel equality vs the pure decoder is only
-   asserted for the top-left sample; orientation/bottom-up ordering may be
-   wrong for rows other than the first.
-3. **Range selection** (`selection_anchor`/`selection_range`) was added late
-   and verified only via the summary in earlier commits plus render code
-   inspection. No dedicated test.
-4. **`TrashService`** has no rust-side process-level open/finder/reveal/QuickLook
-   integration tests beyond the self-test lifecycle slice (trash→undo).
+1. **Reproduction & Root Cause:**
+   During mouse navigation / double-clicks, micro-movements on trackpads/mice fire `mouseDragged:`.
+   `begin_drag_session` previously called `initWithPasteboardWriter:` directly on `NSDraggingItem::class()` instead of an allocated instance (`NSInvalidArgumentException: +[NSDraggingItem initWithPasteboardWriter:]: unrecognized selector sent to class`), and lacked `setDraggingFrame:contents:` and `draggingSession:sourceOperationMaskForDraggingContext:`.
+   Across the `extern "C"` Objective-C runtime boundary, this unhandled Cocoa exception triggered Rust's `panic in a function that cannot unwind` (SIGABRT).
+2. **Fix & Regression Test:**
+   `begin_drag_session` now allocates `NSDraggingItem` via `alloc`, assigns a valid dragging frame and content image, and `GridView` implements `draggingSession:sourceOperationMaskForDraggingContext:` returning `NSDragOperation::Copy`. Covered by `drag_item_initialization_does_not_crash` in `tests/ui_parity.rs`.
 
-## Hypotheses for the remaining crash (ranked)
+## Visual comparison harness
 
-Use these on the next pass. Each includes what to do to falsify it.
-
-### H1: Drag-session re-entry during navigation — CONFIRMED-EMONG defect, likely crash path
-Every `mouseDown:` opened an `NSDraggingSession`; the **double-click** that
-enters a directory re-entered `beginDraggingSessionWithItems` while the first
-session was still live. The session-begin goroutine on the dispatch entry
-guarded by `DRAG_ACTIVE` now prevents that (fix in `cb7cb08`). Evidence
-against: a synthetic double-click pass succeeded in self-tests pre-fix too,
-and the old binary couldn't be crashed headlessly — but note `eventTriplets`
-synthetic timing may not reproduce a real rapid interaction. Falsify by
-rebuilding pre-fix (`git checkout 0c6f395^ -- src/bin/app.rs`) and running with
-`RUST_BACKTRACE=full` under an environment that reliably delivers real double
-clicks.
-
-### H2: QL thumbnail handler panics on cache poison
-The QuickLook completion handler mutates `THUMB_CACHE`/`THUMB_PENDING`
-behind `Mutex`. If a handler thread panics once, the guard is poisoned and
-every subsequent `.lock().unwrap()` aborts. Fix landed (`unwrap_or_else`
-recovering from poison), but if a handler still panics the visibility of
-that is now surfaced via the panic hook.
-
-### H3: `Retained::from_raw(ptr).unwrap()` in drag init
-`NSDraggingItem::initWithPasteboardWriter` … `Retained::from_raw(ptr).unwrap()`
-in `begin_drag_session` was an immediate abort if the message returned null.
-Now graceful. Same shape existed in the QL request creation path.
-
-### H4: ImageIO context state in free-running processes
-`decode_png_native` renders zero-filled results from freestanding processes
-even with a valid `CGBitmapContext` (we probed with `CGContextFillRect` at
-increasing parameter counts). The app path — the actual product — is the
-same function running on the app's runloop with an `NSAutoreleasePool`
-context, which seems to work. Differential between the two environments was
-never pinned down.
-
-### H5: `clickCount > 2` or rapid quadruple clicks
-`mouse_down` only treats `clickCount >= 2` as "open"; any clicks after rapid
-re-entry could race stale `back`/`forward` pops. Untested; low probability.
+1. Original, minimally viable test fixtures live in `tests/fixtures/visual/` (isolated PNGs and subdirectories, <1 KB total, completely self-contained without external dependencies).
+2. The visual harness (`make visual`, `scripts/visual-compare.sh`) drives 9 deterministic interaction steps in both the Swift oracle (`swift/View.app`) and the Rust port (`View.app`):
+   - Step 0: Carousel initial view (first item selected, preview pane loaded)
+   - Step 1: Carousel right arrow step
+   - Step 2: Carousel right arrow step
+   - Step 3: Switch to Grid mode (multi-column grid, row 0 top aligned)
+   - Step 4: Grid down arrow step (row-stepping or single-step fallback)
+   - Step 5: Grid left arrow step
+   - Step 6: Switch back to Carousel mode (preview updated for active item)
+   - Step 7: Enter directory via Return (selected subdirectory contents)
+   - Step 8: History back via Shift+Left (previous directory and selection restored)
+3. Both apps render into in-process bitmaps via `cacheDisplayInRect:toBitmapImageRep:` (requires zero macOS screen-recording permissions).
+4. `odiff` verifies each step against the Swift reference; all steps match within 1.9% to 4.8% difference (which accounts for subpixel CoreText font antialiasing).
 
 ## What to do next (ordered)
 

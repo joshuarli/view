@@ -37,6 +37,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
   private var carouselPreviewRegion: NSView?
   private var carouselPreviewImageView: NSImageView?
   private var carouselPreviewAspectConstraint: NSLayoutConstraint?
+  private var carouselHeightConstraint: NSLayoutConstraint?
   private var carouselPreviewGeneration: UInt64 = 0
   private var carouselContainer: NSView?
   private var gridContainer: NSView?
@@ -659,6 +660,7 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
     gridContainer?.removeFromSuperview()
     carouselContainer?.removeFromSuperview()
     scrollView.removeFromSuperview()
+    carouselHeightConstraint?.isActive = false
 
     configureCollectionLayout(for: viewMode)
 
@@ -713,8 +715,10 @@ final class GridViewController: NSViewController, NSCollectionViewDataSource, NS
         scrollView.leadingAnchor.constraint(equalTo: carouselContainer.leadingAnchor),
         scrollView.trailingAnchor.constraint(equalTo: carouselContainer.trailingAnchor),
         scrollView.bottomAnchor.constraint(equalTo: carouselContainer.bottomAnchor),
-        scrollView.heightAnchor.constraint(equalToConstant: stripHeight),
       ])
+      let heightConstraint = scrollView.heightAnchor.constraint(equalToConstant: stripHeight)
+      heightConstraint.isActive = true
+      carouselHeightConstraint = heightConstraint
 
       rootContainer.addSubview(carouselContainer, positioned: .below, relativeTo: emptyStateLabel)
       NSLayoutConstraint.activate([

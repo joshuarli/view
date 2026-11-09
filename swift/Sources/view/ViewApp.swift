@@ -5,10 +5,23 @@ public enum ViewApp {
   private static var delegate: ViewAppDelegate?
 
   public static func main() {
-    let arguments = Array(CommandLine.arguments.dropFirst())
-    if arguments.contains("--help") || arguments.contains("-h") {
+    let rawArguments = Array(CommandLine.arguments.dropFirst())
+    if rawArguments.contains("--help") || rawArguments.contains("-h") {
       printUsage()
       return
+    }
+
+    var dumpVisualDir: String?
+    var arguments: [String] = []
+    var idx = 0
+    while idx < rawArguments.count {
+      if rawArguments[idx] == "--dump-visual", idx + 1 < rawArguments.count {
+        dumpVisualDir = rawArguments[idx + 1]
+        idx += 2
+      } else {
+        arguments.append(rawArguments[idx])
+        idx += 1
+      }
     }
 
     let options: LaunchOptions
@@ -25,7 +38,7 @@ public enum ViewApp {
     let metrics = ViewMetrics(enabled: ProcessInfo.processInfo.environment["VIEW_METRICS"] == "1")
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
-    let delegate = ViewAppDelegate(root: options.root, mode: options.mode, metrics: metrics)
+    let delegate = ViewAppDelegate(root: options.root, mode: options.mode, metrics: metrics, dumpVisualDir: dumpVisualDir)
     Self.delegate = delegate
     app.delegate = delegate
     app.run()
@@ -43,14 +56,16 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
   private let root: RootDirectory
   private let mode: BrowserMode
   private let metrics: ViewMetrics
+  private let dumpVisualDir: String?
   private var window: NSWindow?
   private var shutdownTask: Task<Void, Never>?
   private var signalSources: [DispatchSourceSignal] = []
 
-  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics) {
+  init(root: RootDirectory, mode: BrowserMode, metrics: ViewMetrics, dumpVisualDir: String? = nil) {
     self.root = root
     self.mode = mode
     self.metrics = metrics
+    self.dumpVisualDir = dumpVisualDir
   }
 
   func applicationWillFinishLaunching(_ notification: Notification) {
@@ -73,9 +88,11 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
     window.contentViewController = previewController
     installMainMenu(previewController: previewController)
     window.setContentSize(NSSize(width: 1100, height: 760))
-    if let savedFrame = savedFrame {
+    if dumpVisualDir == nil, let savedFrame = savedFrame {
       window.setFrame(savedFrame, display: true)
     } else {
+      let contentRect = NSRect(x: 0, y: 0, width: 1100, height: 760)
+      window.setFrame(window.frameRect(forContentRect: contentRect), display: true)
       window.center()
     }
     window.makeKeyAndOrderFront(nil)
@@ -83,6 +100,118 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
     metrics.windowShown()
     self.window = window
     NSApp.activate()
+
+    if let dir = dumpVisualDir {
+      runVisualDump(window: window, controller: previewController, outputDir: URL(filePath: dir))
+    }
+  }
+
+  private func captureScreenshot(window: NSWindow, to url: URL) {
+    let contentRect = NSRect(x: 0, y: 0, width: 1100, height: 760)
+    window.setFrame(window.frameRect(forContentRect: contentRect), display: true)
+    window.layoutIfNeeded()
+    guard let content = window.contentView else { return }
+    content.setFrameSize(NSSize(width: 1100, height: 760))
+    content.layoutSubtreeIfNeeded()
+    let bounds = NSRect(x: 0, y: 0, width: 1100, height: 760)
+    guard let rep = content.bitmapImageRepForCachingDisplay(in: bounds) else { return }
+    content.cacheDisplay(in: bounds, to: rep)
+    guard let data = rep.representation(using: .png, properties: [:]) else { return }
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? data.write(to: url)
+  }
+
+  private func sendKey(window: NSWindow, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
+    let event = NSEvent.keyEvent(
+      with: .keyDown,
+      location: .zero,
+      modifierFlags: modifiers,
+      timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: window.windowNumber,
+      context: nil,
+      characters: "",
+      charactersIgnoringModifiers: "",
+      isARepeat: false,
+      keyCode: keyCode
+    )!
+    window.sendEvent(event)
+  }
+
+  private func runVisualDump(window: NSWindow, controller: PreviewPanelController, outputDir: URL) {
+    Task { @MainActor in
+      // Ensure initial view is carousel
+      controller.grid.setViewMode(.carousel)
+      window.layoutIfNeeded()
+      controller.view.layoutSubtreeIfNeeded()
+
+      // Wait until scan completes
+      for _ in 0..<50 {
+        if controller.grid.catalog.count > 0 { break }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+      }
+      try? await Task.sleep(nanoseconds: 200_000_000)
+
+      // Step 0: Carousel initial view
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_0_carousel_initial.png"))
+
+      // Step 1: Right arrow
+      sendKey(window: window, keyCode: 124)
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_1_carousel_right.png"))
+
+      // Step 2: Right arrow again
+      sendKey(window: window, keyCode: 124)
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_2_carousel_red.png"))
+
+      // Step 3: Switch to Grid mode
+      controller.grid.setViewMode(.grid)
+      window.layoutIfNeeded()
+      controller.view.layoutSubtreeIfNeeded()
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_3_grid_mode.png"))
+
+      // Step 4: Down arrow in Grid
+      sendKey(window: window, keyCode: 125)
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_4_grid_down.png"))
+
+      // Step 5: Left arrow in Grid
+      sendKey(window: window, keyCode: 123)
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_5_grid_left.png"))
+
+      // Step 6: Switch back to Carousel
+      controller.grid.setViewMode(.carousel)
+      window.layoutIfNeeded()
+      controller.view.layoutSubtreeIfNeeded()
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_6_back_to_carousel.png"))
+
+      // Step 7: Select directory (index 0) and enter with Return (keyCode 36)
+      sendKey(window: window, keyCode: 123)
+      sendKey(window: window, keyCode: 123)
+      sendKey(window: window, keyCode: 123)
+      try? await Task.sleep(nanoseconds: 100_000_000)
+      sendKey(window: window, keyCode: 36)
+      for _ in 0..<50 {
+        if controller.grid.catalog.count > 0 { break }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+      }
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_7_entered_subdir.png"))
+
+      // Step 8: History back (Shift+Left, keyCode 123 with Shift)
+      sendKey(window: window, keyCode: 123, modifiers: [.shift])
+      for _ in 0..<50 {
+        if controller.grid.catalog.count > 0 { break }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+      }
+      try? await Task.sleep(nanoseconds: 200_000_000)
+      captureScreenshot(window: window, to: outputDir.appending(path: "step_8_history_back.png"))
+
+      exit(0)
+    }
   }
 
   private var savedFrame: NSRect? {
@@ -95,7 +224,7 @@ final class ViewAppDelegate: NSObject, NSApplicationDelegate {
   private func observeWindowFrame(_ window: NSWindow) {
     let center = NotificationCenter.default
     for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didEndLiveResizeNotification, NSWindow.didMiniaturizeNotification] {
-      let observer = center.addObserver(forName: name, object: window, queue: nil) { [weak window] _ in
+      let observer = center.addObserver(forName: name, object: window, queue: .main) { [weak window] _ in
         guard let window else { return }
         if let data = try? NSKeyedArchiver.archivedData(withRootObject: NSValue(rect: window.frame), requiringSecureCoding: true) {
           UserDefaults.standard.set(data, forKey: "View.WindowFrame")
