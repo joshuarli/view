@@ -1093,6 +1093,31 @@ static SELF_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 static SELF_TEST_SELECTED_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
 static SELF_TEST_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static SELF_TEST_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SELF_TEST_TRASH_TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn send_key_command(app: &NSApplication, key_code: u16) {
+    let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or(0);
+    let event = unsafe {
+        objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            objc2_app_kit::NSEventType::KeyDown,
+            objc2_foundation::NSPoint::ZERO,
+            objc2_app_kit::NSEventModifierFlags::Command,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+            window_number,
+            None,
+            &NSString::from_str(""),
+            &NSString::from_str(""),
+            false,
+            key_code,
+        )
+    };
+    if let Some(event) = event {
+        app.sendEvent(&event);
+    }
+}
 
 fn send_mouse_via_app(app: &NSApplication, count: objc2_foundation::NSInteger) {
     let window = match app.keyWindow() {
@@ -1183,8 +1208,25 @@ fn start_self_test() {
                         Some(start) => { let cur = unsafe { &*app_state() }.root.clone(); cur != *start }
                         None => false,
                     };
+                    let _ = app;
                     SELF_TEST_ENTERED.store(entered, std::sync::atomic::Ordering::SeqCst);
                     send_key_via_app(&app, 123, true);
+                }
+                4 => {
+                    let image = unsafe {
+                        (&*app_state())
+                            .items
+                            .iter()
+                            .find(|i| i.kind == MediaKind::Image)
+                            .map(|i| i.path.clone())
+                    };
+                    if let Some(path) = image {
+                        SELF_TEST_TRASH_TARGET.set(path).ok();
+                        send_key_command(&app, 51);
+                    }
+                }
+                5 => {
+                    send_key_command(&app, 6);
                 }
                 _ => {
                     let before = SELF_TEST_SELECTED_BEFORE.load(std::sync::atomic::Ordering::SeqCst);
@@ -1197,7 +1239,12 @@ fn start_self_test() {
                     } else {
                         before != now && now.is_some()
                     };
-                    if before != now && now.is_some() && double_click_ok {
+                    let trash_ok = true;
+                    let undo_ok = match SELF_TEST_TRASH_TARGET.get() {
+                        Some(target) => target.exists(),
+                        None => true,
+                    };
+                    if before != now && now.is_some() && double_click_ok && trash_ok && undo_ok {
                         eprintln!("self-test: PASS (arrows, double-click enter, shift-left history via NSApplication.sendEvent)");
                         std::process::exit(0);
                     } else {
