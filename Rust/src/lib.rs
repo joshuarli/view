@@ -557,6 +557,10 @@ fn unfilter_row(filter: u8, bytes: &[u8], prev: &[u8], channels: usize) -> Vec<u
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserMode { Browser, Recursive }
 
+impl Default for BrowserMode {
+    fn default() -> Self { Self::Browser }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchError {
     NotFound(String),
