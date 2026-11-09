@@ -17,20 +17,24 @@ esac
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 cd "$tmpdir"
-gh release download --repo "$REPO" --prerelease \
-    "gluon-$triple.zip" --clobber
-gh release download --repo "$REPO" --prerelease \
-    SHA256SUMS --clobber
+tag=$(gh release list --repo "$REPO" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+if [ -z "${tag:-}" ]; then
+    echo "install-gluon: no release found for $REPO" >&2
+    exit 1
+fi
+gh release download "$tag" --repo "$REPO" --clobber --pattern "gluon-$triple.zip"
+gh release download "$tag" --repo "$REPO" --clobber --pattern "SHA256SUMS"
 name="gluon-$triple.zip"
 if command -v shasum >/dev/null 2>&1; then
-    grep "  $name$\| \*$name$" SHA256SUMS | shasum -a 256 -c -
+    grep -F "$name" SHA256SUMS | shasum -a 256 -c -
 else
-    grep "  $name$\| \*$name$" SHA256SUMS | sha256sum -c -
+    grep -F "$name" SHA256SUMS | sha256sum -c -
 fi
 unzip -o "$name"
 for bin in meson ninja gluon-build; do
-    test -x "$bin" || { echo "install-gluon: missing $bin in $name" >&2; exit 1; }
+    test -f "$bin" || { echo "install-gluon: missing $bin in $name" >&2; exit 1; }
     cp "$bin" "$GLUON_DIR/bin/$bin"
+    chmod +x "$GLUON_DIR/bin/$bin"
 done
 echo "installed gluon ($triple) to $GLUON_DIR/bin"
 "$GLUON_DIR/bin/gluon-build" --version
