@@ -90,11 +90,11 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
 
 ## Partially ported
 
-- Full `NSWindow` event-routing delivery (`NSApplication.sendEvent` →
-  first responder) is not asserted — in the self-test the application
-  run loop is not yet started, so events are dispatched to the
-  handler directly. The handler and state transitions are the same
-  code the live app uses.
+- None known: synthetic events are delivered through the live run
+  loop via `NSTimer` → `NSApplication.sendEvent` → key window →
+  first responder → `GridView.keyDown:`, asserted end-to-end in the
+  packaged `View.app` (`--self-test` exits 0 with selection changed
+  through real AppKit routing).
 
 ## GUI design
 

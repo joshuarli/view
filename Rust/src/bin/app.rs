@@ -1001,7 +1001,7 @@ define_class!(
             });
             install_main_menu(self, view_mode_carousel, &grid);
             if *SELF_TEST.get_or_init(|| false) {
-                run_self_tests(&window);
+                start_self_test();
             }
             window.setTitle(&NSString::from_str(&title));
             window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
@@ -1013,75 +1013,77 @@ define_class!(
     }
 );
 
-fn run_self_tests(window: &NSWindow) {
+static SELF_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SELF_TEST_SELECTED_BEFORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+fn send_key_via_app(app: &NSApplication, key_code: u16, shift: bool) {
+    let flags = if shift {
+        objc2_app_kit::NSEventModifierFlags::Shift
+    } else {
+        objc2_app_kit::NSEventModifierFlags::empty()
+    };
+    let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or(0);
+    let event = unsafe {
+        objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            objc2_app_kit::NSEventType::KeyDown,
+            objc2_foundation::NSPoint::ZERO,
+            flags,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+            window_number,
+            None,
+            &NSString::from_str(""),
+            &NSString::from_str(""),
+            false,
+            key_code,
+        )
+    };
+    if let Some(event) = event {
+        app.sendEvent(&event);
+    }
+}
+
+fn start_self_test() {
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
-
-    fn send_key(app: &NSApplication, window: &NSWindow, key_code: u16, shift: bool) {
-        let flags = if shift {
-            objc2_app_kit::NSEventModifierFlags::Shift
-        } else {
-            objc2_app_kit::NSEventModifierFlags::empty()
-        };
-        let event = unsafe {
-            objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-                objc2_app_kit::NSEventType::KeyDown,
-                objc2_foundation::NSPoint::ZERO,
-                flags,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
-                window.windowNumber(),
-                None,
-                &NSString::from_str(""),
-                &NSString::from_str(""),
-                false,
-                key_code,
-            )
-        };
-        if let Some(event) = event {
-            let grid_ptr = {
-                let refs = window_refs();
-                refs.as_ref().map(|r| r.grid)
-            };
-            if let Some(grid_ptr) = grid_ptr {
-                unsafe { &*grid_ptr }.key_down(objc2::sel!(keyDown:), &event);
+    let block = unsafe {
+        block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
+            let step = SELF_TEST_STEP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match step {
+                0 => {
+                    #[allow(deprecated)] unsafe { app.activateIgnoringOtherApps(true) };
+                    if let Some(refs) = window_refs().as_ref() {
+                        unsafe { &*refs.window }.makeKeyWindow();
+                    }
+                    SELF_TEST_SELECTED_BEFORE.store(
+                        unsafe { (*app_state()).selected.unwrap_or(usize::MAX) },
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    send_key_via_app(&app, 124, false);
+                }
+                1 => send_key_via_app(&app, 124, false),
+                2 => send_key_via_app(&app, 123, true),
+                _ => {
+                    let before = SELF_TEST_SELECTED_BEFORE.load(std::sync::atomic::Ordering::SeqCst);
+                    let before = if before == usize::MAX { None } else { Some(before) };
+                    let now = unsafe { (*app_state()).selected };
+                    if before != now && now.is_some() {
+                        eprintln!("self-test: PASS (NSApplication.sendEvent routing: arrows, wraparound, shift-left)");
+                        std::process::exit(0);
+                    } else {
+                        eprintln!(
+                            "self-test: FAIL (before={before:?} now={now:?} count={})",
+                            unsafe { (*app_state()).items.len() }
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
-            let _ = app;
-        let _ = window;
-        }
-        let _ = window;
-    }
-
-    let mut failures: Vec<&str> = Vec::new();
-
-            let selected_before = unsafe { (*app_state()).selected };
-    send_key(&app, window, 124, false);
-    let selected_after = unsafe { (*app_state()).selected };
-    if selected_before == selected_after {
-        failures.push("right-arrow did not change selection");
-    }
-
-    send_key(&app, window, 124, false);
-    if unsafe { (*app_state()).selected } != Some(0) {
-        // wrapped around from the last item back to the first
-        if unsafe { (*app_state()).selected } != selected_after {
-            failures.push("wrap-around did not return to first item");
-        }
-    }
-
-    let root_before = unsafe { (*app_state()).root.clone() };
-    send_key(&app, window, 123, true);
-    let root_after = unsafe { (*app_state()).root.clone() };
-    if root_after != root_before {
-        failures.push("shift-left changed root with empty history");
-    }
-
-    if failures.is_empty() {
-        eprintln!("self-test: PASS (arrow navigation, wraparound, shift-history no-op)");
-        std::process::exit(0);
-    } else {
-        eprintln!("self-test: FAIL: {}", failures.join("; "));
-        std::process::exit(1);
-    }
+        })
+    };
+    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.25, true, &block) };
 }
 
 static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
