@@ -1398,14 +1398,14 @@ define_class!(
                     let parent = state.root.parent().map(|p| p.to_path_buf());
                     if let Some(parent_url) = parent {
                         if parent_url != state.root {
-                            let current = state.root.clone();
+                            let came_from = state.root.clone();
                             let leaving = state.catalog.selected().map(|path| path.to_path_buf());
-                            state.back.push((current, leaving));
+                            state.back.push((came_from.clone(), leaving));
                             state.forward.clear();
                             state.root = parent_url;
                             let mode = state.mode;
                             let root = state.root.clone();
-                            show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::First);
+                            show_listing(&mut state.catalog, load_listing(&root, mode), ListingPick::Restored(Some(came_from)));
                             let title = state.root.display().to_string();
                             if let Some(refs) = window_refs().as_ref() {
                                 unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
