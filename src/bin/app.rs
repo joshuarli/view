@@ -166,6 +166,23 @@ fn thumbnail_scale() -> f64 {
     1.2_f64.powi(unsafe { (*app_state()).thumbnail_size_step } as i32)
 }
 
+fn cell_content_rects(cell: NSRect, carousel: bool, scale: f64) -> (NSRect, NSRect, NSRect) {
+    let (x, y) = (cell.origin.x, cell.origin.y);
+    if carousel {
+        (
+            NSRect::new(NSPoint::new(x + 6.0 * scale, y + 6.0 * scale), NSSize::new(108.0 * scale, 110.0 * scale)),
+            NSRect::new(NSPoint::new(x + 6.0 * scale, y + 120.0 * scale), NSSize::new(108.0 * scale, 16.0 * scale)),
+            NSRect::new(NSPoint::new(x + 6.0 * scale, y + 137.0 * scale), NSSize::new(108.0 * scale, 14.0 * scale)),
+        )
+    } else {
+        (
+            NSRect::new(NSPoint::new(x + 6.0 * scale, y + 6.0 * scale), NSSize::new(148.0 * scale, 134.0 * scale)),
+            NSRect::new(NSPoint::new(x + 6.0 * scale, y + 144.0 * scale), NSSize::new(148.0 * scale, 16.0 * scale)),
+            NSRect::new(NSPoint::new(x + 6.0 * scale, y + 161.0 * scale), NSSize::new(148.0 * scale, 14.0 * scale)),
+        )
+    }
+}
+
 fn columns_for(width: f64) -> usize {
     let scale = thumbnail_scale();
     let available = (width - 32.0).max(0.0);
@@ -747,6 +764,12 @@ fn cached_thumbnail(path: &PathBuf) -> Option<Retained<NSImage>> {
     thumb_store().images.get(path).and_then(|entries| entries.last().map(|entry| entry.image.0.clone()))
 }
 
+fn thumbnail_is_cached(path: &std::path::Path, pixels: u32, file_size: Option<i64>, modification: Option<u64>) -> bool {
+    thumb_store().images.get(path).is_some_and(|entries| {
+        entries.iter().any(|entry| entry.pixels == pixels && entry.file_size == file_size && entry.modification == modification)
+    })
+}
+
 fn cached_sized(path: &std::path::Path, pixels: u32, file_size: Option<i64>, modification: Option<u64>) -> Option<Retained<NSImage>> {
     let store = thumb_store();
     let entries = store.images.get(path)?;
@@ -858,18 +881,100 @@ fn pixel_limit(view: &NSView, rect: NSRect) -> u32 {
     (rect.size.width.max(rect.size.height) * scale).round().clamp(1.0, 4096.0) as u32
 }
 
+#[derive(Clone)]
+struct ThumbRequest {
+    path: PathBuf,
+    pixels: u32,
+    file_size: Option<i64>,
+    modification: Option<u64>,
+}
+
+struct DecodedCg {
+    image: *mut std::ffi::c_void,
+    width: usize,
+    height: usize,
+}
+
+// SAFETY: DecodedCg owns one CGImage and moves that ownership between threads.
+// ImageIO creates the image on a worker; the main thread is the only user after join.
+unsafe impl Send for DecodedCg {}
+
+impl Drop for DecodedCg {
+    fn drop(&mut self) {
+        if !self.image.is_null() {
+            cf_release(self.image);
+            self.image = std::ptr::null_mut();
+        }
+    }
+}
+
+struct AutoreleasePool(*mut std::ffi::c_void);
+
+impl AutoreleasePool {
+    fn push() -> Self {
+        Self(unsafe { objc_autorelease_pool_push() })
+    }
+}
+
+impl Drop for AutoreleasePool {
+    fn drop(&mut self) {
+        unsafe { objc_autorelease_pool_pop(self.0) }
+    }
+}
+
 fn display_image(path: &std::path::Path, pixels: u32, file_size: Option<i64>, modification: Option<u64>) -> Option<Retained<NSImage>> {
     if let Some(image) = cached_sized(path, pixels, file_size, modification) {
         return Some(image);
     }
-    let (image, cost) = imageio_thumbnail(path, pixels)?;
-    remember_thumbnail(path.to_path_buf(), pixels, file_size, modification, SyncImage(image.clone()), cost);
-    Some(image)
+    ensure_thumbnails(&[ThumbRequest { path: path.to_path_buf(), pixels, file_size, modification }]);
+    cached_sized(path, pixels, file_size, modification)
 }
 
-fn imageio_thumbnail(path: &std::path::Path, max_pixel: u32) -> Option<(Retained<NSImage>, usize)> {
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mtm = objc2::MainThreadMarker::new()?;
+fn ensure_thumbnails(requests: &[ThumbRequest]) {
+    let missing: Vec<ThumbRequest> = requests.iter().filter(|request| {
+        !thumbnail_is_cached(&request.path, request.pixels, request.file_size, request.modification)
+    }).cloned().collect();
+    if missing.is_empty() {
+        return;
+    }
+    let decoded = decode_cg_thumbnails(&missing);
+    for (request, decoded) in missing.into_iter().zip(decoded) {
+        let Some(decoded) = decoded else { continue };
+        let Some(image) = nsimage_from_cg(&decoded) else { continue };
+        let cost = decoded.width.saturating_mul(decoded.height).saturating_mul(4);
+        remember_thumbnail(request.path, request.pixels, request.file_size, request.modification, SyncImage(image), cost);
+    }
+}
+
+fn decode_cg_thumbnails(requests: &[ThumbRequest]) -> Vec<Option<DecodedCg>> {
+    let mut slots = Vec::with_capacity(requests.len());
+    slots.resize_with(requests.len(), || None);
+    if requests.len() <= 1 {
+        if let Some(request) = requests.first() {
+            slots[0] = decode_cg_thumbnail(request);
+        }
+        return slots;
+    }
+    let slots_ptr = slots.as_mut_ptr() as usize;
+    let requests_ptr = requests.as_ptr() as usize;
+    let block = block2::RcBlock::new(move |index: usize| {
+        let decoded = std::panic::catch_unwind(|| {
+            // SAFETY: dispatch_apply invokes each index once, on one thread, and both
+            // allocations outlive the call. Distinct indices do not alias.
+            let request = unsafe { &*(requests_ptr as *const ThumbRequest).add(index) };
+            decode_cg_thumbnail(request)
+        });
+        let decoded = decoded.unwrap_or(None);
+        // SAFETY: the slot starts as None and this index is written by this invocation only.
+        unsafe { *(slots_ptr as *mut Option<DecodedCg>).add(index) = decoded };
+    });
+    dispatch2::DispatchQueue::apply_with_block(requests.len(), None, &block);
+    slots
+}
+
+fn decode_cg_thumbnail(request: &ThumbRequest) -> Option<DecodedCg> {
+    let _pool = AutoreleasePool::push();
+    let c_path = std::ffi::CString::new(request.path.as_os_str().as_bytes()).ok()?;
     unsafe {
         let cf_path = cf_string_create_with_c_string(std::ptr::null(), c_path.as_ptr(), 0x0800_0100);
         if cf_path.is_null() {
@@ -885,7 +990,7 @@ fn imageio_thumbnail(path: &std::path::Path, max_pixel: u32) -> Option<(Retained
         if source.is_null() {
             return None;
         }
-        let options = thumbnail_options(max_pixel);
+        let options = thumbnail_options(request.pixels);
         let cg = cg_image_source_create_thumbnail_at_index(source, 0, options);
         if !options.is_null() {
             cf_release(options);
@@ -900,12 +1005,16 @@ fn imageio_thumbnail(path: &std::path::Path, max_pixel: u32) -> Option<(Retained
             cf_release(cg as *const std::ffi::c_void);
             return None;
         }
-        let size = NSSize::new(width as f64, height as f64);
-        let cg = cg.cast::<CGImage>();
-        let image: Retained<NSImage> = objc2::msg_send![mtm.alloc::<NSImage>(), initWithCGImage: &*cg, size: size];
-        cf_release(cg.cast::<std::ffi::c_void>());
-        Some((image, width.saturating_mul(height).saturating_mul(4)))
+        Some(DecodedCg { image: cg, width, height })
     }
+}
+
+fn nsimage_from_cg(decoded: &DecodedCg) -> Option<Retained<NSImage>> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    let size = NSSize::new(decoded.width as f64, decoded.height as f64);
+    let cg = decoded.image.cast::<CGImage>();
+    let image: Retained<NSImage> = unsafe { objc2::msg_send![mtm.alloc::<NSImage>(), initWithCGImage: &*cg, size: size] };
+    Some(image)
 }
 
 unsafe fn thumbnail_options(max_pixel: u32) -> *const std::ffi::c_void {
@@ -1014,6 +1123,20 @@ fn cg_image_get_height(image: *mut std::ffi::c_void) -> usize {
     unsafe { CGImageGetHeight(image) }
 }
 
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+    fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+}
+
+fn objc_autorelease_pool_push() -> *mut std::ffi::c_void {
+    unsafe { objc_autoreleasePoolPush() }
+}
+
+fn objc_autorelease_pool_pop(pool: *mut std::ffi::c_void) {
+    unsafe { objc_autoreleasePoolPop(pool) }
+}
+
 fn k_cf_boolean_true() -> *const std::ffi::c_void {
     unsafe { kCFBooleanTrue }
 }
@@ -1111,6 +1234,25 @@ define_class!(
             let detail_font = unsafe { NSFont::systemFontOfSize(10.0 * scale) };
             let detail_color = unsafe { NSColor::secondaryLabelColor() };
             let detail_dict = text_attributes(&detail_font, &detail_color, &pstyle_detail);
+            let carousel = state.view_mode == ViewMode::Carousel;
+            let mut requests = Vec::new();
+            for (i, item) in state.items().iter().enumerate() {
+                if item.kind != MediaKind::Image {
+                    continue;
+                }
+                let cell = self.cell_rect(i);
+                if !objc2_foundation::NSIntersectsRect(cell, rect) {
+                    continue;
+                }
+                let (thumb_rect, _, _) = cell_content_rects(cell, carousel, scale);
+                requests.push(ThumbRequest {
+                    path: item.path.clone(),
+                    pixels: pixel_limit(self, thumb_rect),
+                    file_size: item.file_size,
+                    modification: item.modification,
+                });
+            }
+            ensure_thumbnails(&requests);
 
             for (i, item) in state.items().iter().enumerate() {
                 let cell = self.cell_rect(i);
@@ -1129,20 +1271,7 @@ define_class!(
                     unsafe { path.stroke() };
                 }
 
-                let (x, y) = (cell.origin.x, cell.origin.y);
-                let (thumb_rect, name_rect, detail_rect) = if state.view_mode == ViewMode::Carousel {
-                    (
-                        NSRect::new(NSPoint::new(x + 6.0 * scale, y + 6.0 * scale), NSSize::new(108.0 * scale, 110.0 * scale)),
-                        NSRect::new(NSPoint::new(x + 6.0 * scale, y + 120.0 * scale), NSSize::new(108.0 * scale, 16.0 * scale)),
-                        NSRect::new(NSPoint::new(x + 6.0 * scale, y + 137.0 * scale), NSSize::new(108.0 * scale, 14.0 * scale)),
-                    )
-                } else {
-                    (
-                        NSRect::new(NSPoint::new(x + 6.0 * scale, y + 6.0 * scale), NSSize::new(148.0 * scale, 134.0 * scale)),
-                        NSRect::new(NSPoint::new(x + 6.0 * scale, y + 144.0 * scale), NSSize::new(148.0 * scale, 16.0 * scale)),
-                        NSRect::new(NSPoint::new(x + 6.0 * scale, y + 161.0 * scale), NSSize::new(148.0 * scale, 14.0 * scale)),
-                    )
-                };
+                let (thumb_rect, name_rect, detail_rect) = cell_content_rects(cell, carousel, scale);
 
                 let thumb_img = if item.kind == MediaKind::Directory {
                     folder_like_icon(item)
