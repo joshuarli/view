@@ -420,7 +420,13 @@ fn copy_selected_path() {
     unsafe { pasteboard.setString_forType(&NSString::from_str(&item.path.display().to_string()), &objc2_app_kit::NSPasteboardTypeString) };
 }
 
+static DRAG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[allow(dead_code)]
 fn begin_drag_session(view: &GridView, path: &PathBuf, event: &objc2_app_kit::NSEvent) {
+    if DRAG_ACTIVE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let item = objc2_app_kit::NSPasteboardItem::new();
     let url = url_from_path(path);
     let file_text = url.path().map(|s| s.to_string()).unwrap_or_else(|| path.display().to_string());
@@ -440,6 +446,12 @@ fn load_listing(root: &PathBuf, mode: BrowserMode) -> Vec<MediaItem> {
         BrowserMode::Browser => list_browser(root).unwrap_or_default(),
         BrowserMode::Recursive => scan_recursive(root).unwrap_or_default(),
     }
+}
+
+fn folder_like_icon(item: &MediaItem) -> Option<Retained<NSImage>> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let icon = workspace.iconForFile(&NSString::from_str(&item.path.display().to_string()));
+    Some(icon)
 }
 
 fn system_image(name: &str) -> Option<Retained<NSImage>> {
@@ -597,16 +609,27 @@ define_class!(
                         );
                     },
                     None => {
+                        if item.kind == MediaKind::Directory || item.kind == MediaKind::Movie {
+                            if let Some(image) = folder_like_icon(item) {
+                                unsafe {
+                                    image.drawInRect_fromRect_operation_fraction(
+                                        thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
+                                    );
+                                }
+                            }
+                        }
                         let name = match item.kind {
                             MediaKind::Directory => "folder",
                             MediaKind::Image => "photo",
                             MediaKind::Movie => "film",
                         };
-                        if let Some(image) = system_image(name) {
-                            unsafe {
-                                image.drawInRect_fromRect_operation_fraction(
-                                    thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
-                                );
+                        if item.kind == MediaKind::Image {
+                            if let Some(image) = system_image(name) {
+                                unsafe {
+                                    image.drawInRect_fromRect_operation_fraction(
+                                        thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
+                                    );
+                                }
                             }
                         }
                     }
@@ -834,18 +857,34 @@ define_class!(
             }
             self.scroll_selection_into_view();
             self.setNeedsDisplay(true);
-            if event.clickCount() == 1 {
-                if let Some(item) = unsafe { (&*app_state()).items.get(index).cloned() } {
-                    let path = item.path.clone();
-                    begin_drag_session(self, &path, event);
-                }
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &objc2_app_kit::NSEvent) {
+            let state = unsafe { &mut *app_state() };
+            if state.items.is_empty() {
+                return;
+            }
+            let Some(index) = state.selected else { return };
+            if let Some(item) = unsafe { (&*app_state()).items.get(index).cloned() } {
+                let path = item.path.clone();
+                begin_drag_session(self, &path, event);
             }
         }
     }
 );
 
 unsafe impl objc2_foundation::NSObjectProtocol for GridView {}
-unsafe impl objc2_app_kit::NSDraggingSource for GridView {}
+unsafe impl objc2_app_kit::NSDraggingSource for GridView {
+    fn draggingSession_endedAtPoint_operation(
+        &self,
+        _session: &objc2_app_kit::NSDraggingSession,
+        _screen_point: objc2_foundation::NSPoint,
+        _operation: objc2_app_kit::NSDragOperation,
+    ) {
+        DRAG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 impl GridView {
     fn cell_rect(&self, index: usize) -> NSRect {
@@ -1000,6 +1039,10 @@ define_class!(
                 preview_image: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
             });
             install_main_menu(self, view_mode_carousel, &grid);
+            if *DEBUG_ENTER.get_or_init(|| false) {
+                open_selected();
+                std::process::exit(0);
+            }
             if *SELF_TEST.get_or_init(|| false) {
                 start_self_test();
             }
@@ -1087,12 +1130,15 @@ fn start_self_test() {
 }
 
 static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let self_test = args.iter().any(|a| a == "--self-test");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test").collect();
+    let debug_enter = args.iter().any(|a| a == "--debug-enter");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter").collect();
     SELF_TEST.set(self_test).ok();
+    DEBUG_ENTER.set(debug_enter).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,
