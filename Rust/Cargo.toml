@@ -10,8 +10,21 @@ path = "src/lib.rs"
 name = "bench"
 path = "src/bin/bench.rs"
 
+[[bin]]
+name = "app"
+path = "src/bin/app.rs"
+required-features = ["app"]
+
+[features]
+app = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-graphics", "dep:block2"]
+
 [dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem"] }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification"] }
+objc2-core-graphics = { version = "0.3", optional = true }
+block2 = { version = "0.6", optional = true }
 
 [profile.dev]
 incremental = false
