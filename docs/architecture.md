@@ -45,7 +45,7 @@ The app owns no persistent database. Files trashed by the app are removed from t
 
 - Owns `NSApplication`, the window, the main menu, and shutdown. Termination waits for scan cancellation, thumbnail cancellation, and any pending trash.
 - Custom grid view owns the catalog and both content modes. Browser mode lists one directory, applies each listing atomically, and navigates into folders or to the parent with a scan-generation guard; going up selects the folder it came from. Recursive mode keeps incremental inserts per batch. Both share selection by identity, demand updates from visible plus scroll-direction prefetch, and scroll-into-view after trash and panel navigation. Handles Space, Return, Delete, Cmd+Delete, Cmd+Up, and Ctrl+Delete in `keyDown`.
-- QLPreviewPanel: the grid view is the panel's data source. Space and double-click toggle via menu and `keyDown`; the panel steps through items while key.
+- QLPreviewPanel: Space opens the panel; stepping through items updates the grid selection. The grid reflows when the window changes size, and Cmd-minus / Cmd-plus resize thumbnails in both modes. Selected items can be dragged out as file URLs; dropping a folder opens it and dropping a media file selects it.
 - Trash: trashes the selection in one guarded operation and records the batch for undo (Cmd+Z) and redo (Cmd+Shift+Z). Undo moves files back and reinserts those still browsed; destination conflicts stay on the undo stack for retry, and permanently missing trashed files are dropped.
 
 ## Why AppKit
@@ -59,6 +59,7 @@ UI, catalog, scheduler bookkeeping, and Quick Look state are main-thread. Thumbn
 ## Testing
 
 - `cargo test --profile dist --lib` (unit) and `cargo test --profile dist` (unit + `tests/` integration + UI-parity suites).
+- `cargo test --features app --test app_regression` exercises the live AppKit window, Quick Look selection, layout, thumbnail completion, and file URL drag/drop.
 - `cargo test --profile dist --test ui_parity` ports the Swift `viewUITests` scenarios to core-level integration tests, plus a live `QLThumbnailGenerator` movie-frame assertion backing Space.
 - `cargo build --profile dist --bin app --features app` builds the AppKit binary; `cargo run --profile dist --bin bench` runs the benchmark harness (release-quality numbers in [docs/performance.md](performance.md)).
 - `sh scripts/package-app.sh` builds the signed `View.app`. `View.app/Contents/MacOS/view --self-test <dir>` boots the real window and asserts key handling end-to-end through the live run loop; it exits nonzero on failure.

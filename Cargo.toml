@@ -59,3 +59,8 @@ lto = "fat"
 codegen-units = 1
 debug = true
 strip = false
+
+[[test]]
+name = "app_regression"
+path = "tests/app_regression.rs"
+required-features = ["app"]
