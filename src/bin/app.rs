@@ -1413,6 +1413,7 @@ define_class!(
                             apply_view_mode_layout();
                             update_carousel_preview();
                             reconcile_preview();
+                            self.scroll_selection_to_center();
                             self.setNeedsDisplay(true);
                         }
                     }
@@ -1694,6 +1695,23 @@ impl GridView {
         let Some(index) = index else { return };
         let cell = self.cell_rect(index);
         unsafe { self.scrollRectToVisible(cell); };
+    }
+
+    fn scroll_selection_to_center(&self) {
+        let Some(index) = (unsafe { (*app_state()).selected() }) else { return };
+        let cell = self.cell_rect(index);
+        let Some(scroll) = self.enclosingScrollView() else {
+            unsafe { self.scrollRectToVisible(cell); };
+            return;
+        };
+        let clip = scroll.contentView();
+        let visible = clip.bounds().size;
+        let origin = NSPoint::new(
+            (cell.origin.x + cell.size.width / 2.0 - visible.width / 2.0).clamp(0.0, (self.bounds().size.width - visible.width).max(0.0)),
+            (cell.origin.y + cell.size.height / 2.0 - visible.height / 2.0).clamp(0.0, (self.bounds().size.height - visible.height).max(0.0)),
+        );
+        clip.scrollToPoint(origin);
+        scroll.reflectScrolledClipView(&clip);
     }
 }
 
