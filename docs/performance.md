@@ -105,9 +105,9 @@ thumbnails to finish. None of these measurements represents a cold disk cache.
 
 ## Baseline
 
-The table below is the private-corpus measurement from 2026-11-09. The harness
-no longer reads that disk, so do not compare a generated-corpus run with these
-numbers. A generated-corpus baseline has not been recorded yet.
+The table below is the private-corpus measurement from 2026-11-09, before
+concurrent thumbnail decode. The harness no longer reads that disk. Compare a
+generated-corpus run only with the generated-corpus section.
 
 On that date, an Apple M1 with 8 GiB RAM and macOS 27.2 ran five independent
 guarded processes per workload, with five samples per process. The two paint
@@ -146,9 +146,18 @@ request is still a 480-point Quick Look thumbnail at scale 2.
 
 An unreported sample of the scroll benchmark, taken after the timed runs,
 spent about half of its main-thread paint samples in
-`CGImageSourceCreateThumbnailAtIndex`, most of them in AppleJPEG. That decode
-is why a new page stays near 83 ms. A warm resize of cells already in the
-cache is 9.1 ms.
+`CGImageSourceCreateThumbnailAtIndex`, most of them in AppleJPEG. That serial
+decode is why the table above stays near 83 ms. A warm resize of cells already
+in the cache is 9.1 ms.
+
+Concurrent decode of visible cache misses shipped after that table. On the
+same retired corpus, five interleaved processes of five samples moved scroll
+from 82.731 ms (82.529–121.718) to 27.614 ms (26.530–27.806). Carousel measured
+31.142 ms (30.977–31.230) before that change and 31.107 ms (31.014–32.405)
+after it. Resize measured 8.955 ms (8.922–9.845) before and 9.178 ms
+(9.081–9.682) after. The carousel and resize ranges overlap across the two
+builds. Scroll's ranges do not. Carousel Rust allocations rose from 51–57
+(2,122–2,438 bytes) to 70–74 (3,913–4,119 bytes), still under the 64 KiB aim.
 
 Five production-app memory runs on the typical directory sampled a median
 maximum of 114.2 MiB RSS (range 114.1–114.2) and a median final RSS of 113.7
@@ -160,4 +169,41 @@ thumbnails.
 The production `dist` binary, with the debug info that the `dist` profile
 keeps, was 866,176 bytes before this paint change and 886,912 bytes after.
 Rustybench and its dependencies are enabled only by the `benchmark` feature.
-Production build-time impact has not been measured.
+Production build-time impact has not been measured. Binary size after
+concurrent decode has not been remeasured.
+
+## Generated corpus
+
+On 2026-11-09 the same Apple M1 ran the current `dist` bench on the generated
+corpus. Five processes of five samples were interleaved with a rejected
+point-size build. The rows below are the current-code side. Each value is the
+median of the five run medians, and the range is the spread of those medians.
+
+| Workflow | Median ms | Range ms | Rust allocations | Rust bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Advance carousel image | 35.760 | 34.777–36.576 | 52 | 2,949 |
+| Resize and paint grid | 8.012 | 7.930–8.476 | 82 | 3,712 |
+| Scroll and paint grid | 50.235 | 48.725–53.257 | 154–160 | 12,204–18,702 |
+
+Launch, both directory lists, the recursive scan, open, and the video
+thumbnail have no five-process measurement on this corpus.
+
+One instrumented scroll process is excluded from the table. Its first draw
+decoded 20 cells in 49–53 ms. Its second draw blitted those cells in about
+8 ms from the cache. One instrumented carousel advance decoded the new
+1920×1080 frame in 11–12 ms. The medians above include that decode and the
+paint after it. Resize stays under 16.7 ms on a warm cache. Scroll and
+carousel stay over 16.7 ms because the timed region decodes each new JPEG.
+
+A backing-scale point size for each still was the other side of the same
+interleave. Scroll measured 49.217 ms (48.925–57.450), carousel 35.692 ms
+(35.520–37.238), and resize 8.157 ms (7.799–8.354). Each range overlaps the
+current-code side.
+
+Removing the grid layer was measured later, while another build was using the
+machine. Scroll measured 55.248 ms (54.979–64.825) against a same-interleave
+current-code side of 52.507 ms (51.007–63.628). Resize measured 9.159 ms
+(8.286–10.195) against 9.052 ms (8.502–9.137). Carousel measured 35.767 ms
+(34.910–35.925) against 35.775 ms (35.387–38.593). The ranges overlap.
+Sampled maximum RSS was 106.33 MiB (106.22–106.36) against 106.06 MiB
+(105.81–106.38). Treat that resident-set pair as a busy-host sample.
