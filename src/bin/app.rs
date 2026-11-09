@@ -11,7 +11,7 @@ use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSFont, NSImage,
+    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont, NSImage,
     NSImageView, NSMenu, NSMenuItem, NSScrollView, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
@@ -1189,27 +1189,30 @@ define_class!(
             url_from_path(&item.path)
         }
     }
+
+    unsafe impl NSDraggingSource for GridView {
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn draggingSession_sourceOperationMaskForDraggingContext(
+            &self,
+            _session: &objc2_app_kit::NSDraggingSession,
+            _context: objc2_app_kit::NSDraggingContext,
+        ) -> objc2_app_kit::NSDragOperation {
+            objc2_app_kit::NSDragOperation::Copy
+        }
+
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn draggingSession_endedAtPoint_operation(
+            &self,
+            _session: &objc2_app_kit::NSDraggingSession,
+            _screen_point: objc2_foundation::NSPoint,
+            _operation: objc2_app_kit::NSDragOperation,
+        ) {
+            DRAG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 );
 
 unsafe impl objc2_foundation::NSObjectProtocol for GridView {}
-unsafe impl objc2_app_kit::NSDraggingSource for GridView {
-    fn draggingSession_sourceOperationMaskForDraggingContext(
-        &self,
-        _session: &objc2_app_kit::NSDraggingSession,
-        _context: objc2_app_kit::NSDraggingContext,
-    ) -> objc2_app_kit::NSDragOperation {
-        objc2_app_kit::NSDragOperation::Copy
-    }
-
-    fn draggingSession_endedAtPoint_operation(
-        &self,
-        _session: &objc2_app_kit::NSDraggingSession,
-        _screen_point: objc2_foundation::NSPoint,
-        _operation: objc2_app_kit::NSDragOperation,
-    ) {
-        DRAG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
 
 impl GridView {
     fn cell_rect(&self, index: usize) -> NSRect {
@@ -1468,6 +1471,14 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     state.selected = Some(1);
     state.selection_anchor = Some(0);
     state.selection_range = (0, 1);
+    assert!(grid.respondsToSelector(objc2::sel!(draggingSession:sourceOperationMaskForDraggingContext:)), "drag source operation callback is registered");
+    assert!(grid.respondsToSelector(objc2::sel!(draggingSession:endedAtPoint:operation:)), "drag completion callback is registered");
+    DRAG_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+    let session = NSObject::new();
+    unsafe {
+        let _: () = objc2::msg_send![grid, draggingSession: &*session, endedAtPoint: NSPoint::ZERO, operation: objc2_app_kit::NSDragOperation::empty()];
+    }
+    assert!(!DRAG_ACTIVE.load(std::sync::atomic::Ordering::SeqCst), "completed drag permits another session");
     let items = dragging_items(grid);
     assert_eq!(items.len(), 2, "drag contains the selection");
     for (index, item) in items.iter().enumerate() {
