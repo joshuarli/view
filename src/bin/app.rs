@@ -1379,7 +1379,7 @@ define_class!(
             if *SELF_TEST.get_or_init(|| false) {
                 start_self_test();
             }
-            if !*REGRESSION_TEST.get_or_init(|| false) {
+            if !*REGRESSION_TEST.get_or_init(|| false) && !*BENCHMARK_STARTUP.get_or_init(|| false) && !*BENCHMARK_MEMORY.get_or_init(|| false) && !benchmark_mode() {
                 window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
             }
             window.setTitle(&NSString::from_str(&title));
@@ -1389,7 +1389,21 @@ define_class!(
             let mtm = objc2::MainThreadMarker::new().unwrap();
             let app = NSApplication::sharedApplication(mtm);
             #[allow(deprecated)]
-            unsafe { app.activateIgnoringOtherApps(true); }
+            if !benchmark_mode() { unsafe { app.activateIgnoringOtherApps(true); } }
+            if *BENCHMARK_MEMORY.get_or_init(|| false) {
+                benchmark_browsing_memory(&window, &grid);
+                std::process::exit(0);
+            }
+            if *BENCHMARK_STARTUP.get_or_init(|| false) {
+                assert_eq!(unsafe { (&(*app_state()).items)[0].kind }, MediaKind::Image, "startup corpus must begin with an image");
+                assert!(preview_image.image().is_some(), "startup preview must contain an image");
+                let bounds = preview_nsview.bounds();
+                let bitmap = preview_nsview.bitmapImageRepForCachingDisplayInRect(bounds).expect("startup preview bitmap");
+                preview_nsview.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+                std::hint::black_box(bitmap.bitmapData());
+                window.displayIfNeeded();
+                std::process::exit(0);
+            }
             if *REGRESSION_TEST.get_or_init(|| false) {
                 let window = window.clone();
                 let grid = grid.clone();
@@ -1840,7 +1854,57 @@ fn start_self_test() {
     unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.25, true, &block) };
 }
 
+fn resident_memory() -> std::io::Result<u64> {
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn task_info(task: u32, flavor: u32, info: *mut i32, count: *mut u32) -> i32;
+    }
+    let mut info: libc::mach_task_basic_info_data_t = unsafe { std::mem::zeroed() };
+    let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+    let result = unsafe {
+        task_info(mach_task_self_, libc::MACH_TASK_BASIC_INFO, (&mut info as *mut libc::mach_task_basic_info_data_t).cast(), &mut count)
+    };
+    if result == libc::KERN_SUCCESS && count == libc::MACH_TASK_BASIC_INFO_COUNT {
+        Ok(info.resident_size)
+    } else {
+        Err(std::io::Error::other(format!("task_info returned {result} with {count} fields")))
+    }
+}
+
+fn benchmark_browsing_memory(window: &NSWindow, grid: &GridView) {
+    let count = unsafe { (*app_state()).items.len() };
+    assert!(count >= 100, "memory corpus needs at least 100 items");
+    unsafe { (*app_state()).view_mode = ViewMode::Grid; }
+    window.setContentSize(NSSize::new(1000.0, 700.0));
+    apply_view_mode_layout();
+    let mut peak = resident_memory().expect("read resident memory");
+    for step in 0..80 {
+        let pool = unsafe { objc2_foundation::NSAutoreleasePool::new() };
+        let index = (step * 8) % count;
+        grid.scrollRectToVisible(grid.cell_rect(index));
+        let visible = grid.visibleRect();
+        let bitmap = grid.bitmapImageRepForCachingDisplayInRect(visible).expect("memory viewport bitmap");
+        grid.setNeedsDisplay(true);
+        grid.cacheDisplayInRect_toBitmapImageRep(visible, &bitmap);
+        std::hint::black_box(bitmap.bitmapData());
+        drop(bitmap);
+        drop(pool);
+        peak = peak.max(resident_memory().expect("read resident memory"));
+    }
+    let final_rss = resident_memory().expect("read resident memory");
+    println!("{{\"frames\":80,\"max_sampled_rss_bytes\":{peak},\"final_rss_bytes\":{final_rss}}}");
+}
+
+fn benchmark_mode() -> bool {
+    #[cfg(feature = "benchmark")]
+    { return benchmarks::active(); }
+    #[cfg(not(feature = "benchmark"))]
+    { false }
+}
+
 static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static BENCHMARK_MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static BENCHMARK_STARTUP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static REGRESSION_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -1852,12 +1916,16 @@ fn main() {
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let self_test = args.iter().any(|a| a == "--self-test");
+    let benchmark_memory = args.iter().any(|a| a == "--benchmark-memory");
+    let benchmark_startup = args.iter().any(|a| a == "--benchmark-startup");
     let regression_test = args.iter().any(|a| a == "--regression-test");
     let debug_enter = args.iter().any(|a| a == "--debug-enter");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter" && a != "--regression-test").collect();
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter" && a != "--regression-test" && a != "--benchmark-startup" && a != "--benchmark-memory").collect();
     SELF_TEST.set(self_test).ok();
     DEBUG_ENTER.set(debug_enter).ok();
     REGRESSION_TEST.set(regression_test).ok();
+    BENCHMARK_STARTUP.set(benchmark_startup).ok();
+    BENCHMARK_MEMORY.set(benchmark_memory).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,
@@ -1873,10 +1941,10 @@ fn main() {
         let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
         let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode"))
             .map(|s| s.to_string());
-        state.view_mode = match saved.as_deref() {
+        state.view_mode = if benchmark_memory { ViewMode::Grid } else if benchmark_startup { ViewMode::Carousel } else { match saved.as_deref() {
             Some("grid") => ViewMode::Grid,
             _ => ViewMode::Carousel,
-        };
+        }};
         state.items = load_listing(&root, mode);
         state.selected = if state.items.is_empty() { None } else { Some(0) };
     }
@@ -1899,3 +1967,7 @@ fn main() {
 
 unsafe impl QLPreviewPanelDataSource for GridView {
 }
+
+#[cfg(feature = "benchmark")]
+#[path = "app/benchmarks.rs"]
+mod benchmarks;

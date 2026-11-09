@@ -18,4 +18,4 @@ install: package
 	echo "installed $(INSTALL_DIR)/$(APP)"
 
 bench:
-	cargo run --profile dist --bin bench -- --browser-corpus .work/corpus-2k/group-00 --recursive-corpus .work/corpus-20k --samples 7
+	sh scripts/bench.sh $(BENCH) $(BENCH_ARGS)

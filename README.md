@@ -37,7 +37,7 @@ Search, tagging, libraries, editing, custom video playback, slideshows, AI index
 
 - `src/lib.rs`: discovery, catalog, thumbnails, trash, preview session, launch options. See [docs/architecture.md](docs/architecture.md).
 - `src/bin/app.rs`: the AppKit window, grid, Quick Look panel, menus, drag-out.
-- `src/bin/bench.rs`: benchmark harness. See [docs/performance.md](docs/performance.md).
+- `benches/view.rs` and `src/bin/app/benchmarks.rs`: benchmark harness. See [docs/performance.md](docs/performance.md).
 - `tests/`: integration and UI-parity suites.
 - `scripts/package-app.sh`: packages `View.app` from a dist build.
 - `Info.plist`: bundle metadata.
