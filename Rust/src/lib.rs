@@ -431,10 +431,11 @@ pub fn decode_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     decode_png_bytes(&data)
 }
 
-// Decode with the same ImageIO backend as Swift (CGImageSource). This
-// keeps thumb-decode an apples-to-apples system-decoder comparison; the
-// pure-Rust inflate path above is retained only for parity reference.
-pub fn decode_png_native(path: &Path) -> Result<(u32, u32), String> {
+// Decode with the same ImageIO backend as Swift (CGImageSource) —
+// full bitmap render via CGContext so callers get real pixels at
+// system-decoder speed. The pure-Rust path above remains the
+// parallelism fallback and the default for pixel-exact comparisons.
+pub fn decode_png_native(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     unsafe {
         let url = url_for(path);
         if url.is_null() {
@@ -449,9 +450,38 @@ pub fn decode_png_native(path: &Path) -> Result<(u32, u32), String> {
             cf_release(source as *const std::ffi::c_void);
             return Err("image failed".into());
         }
+        let width = cg_image_get_width(image);
+        let height = cg_image_get_height(image);
+        let bytes_per_row = width * 4;
+        let mut pixels = vec![0u8; bytes_per_row * height];
+        let color_space = cg_color_space_create_device_rgb();
+        if color_space.is_null() {
+            cg_image_release(image);
+            cf_release(source as *const std::ffi::c_void);
+            return Err("color space failed".into());
+        }
+        let context = cg_context_create(
+            pixels.as_mut_ptr() as *mut std::ffi::c_void,
+            width,
+            height,
+            8,
+            bytes_per_row,
+            color_space,
+            2, // kCGImageAlphaPremultipliedLast
+        );
+        if context.is_null() {
+            cg_color_space_release(color_space);
+            cg_image_release(image);
+            cf_release(source as *const std::ffi::c_void);
+            return Err("context failed".into());
+        }
+        let rect: [f64; 4] = [0.0, 0.0, width as f64, height as f64];
+cg_context_draw_image(context, rect.as_ptr(), image);
+        cg_context_release(context);
+        cg_color_space_release(color_space);
         cg_image_release(image);
         cf_release(source as *const std::ffi::c_void);
-        Ok((0, 0))
+Ok((width as u32, height as u32, pixels))
     }
 }
 
@@ -492,10 +522,31 @@ type CGDataProvider = std::ffi::c_void;
 type CGImageSource = std::ffi::c_void;
 type CGImage = std::ffi::c_void;
 
+type CGColorSpace = std::ffi::c_void;
+type CGContext = std::ffi::c_void;
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     #[link_name = "CGDataProviderCreateWithFilename"]
     fn cg_data_provider_create_with_filename(filename: *const std::os::raw::c_char) -> *mut CGDataProvider;
+    #[link_name = "CGColorSpaceCreateDeviceRGB"]
+    fn cg_color_space_create_device_rgb() -> *mut CGColorSpace;
+    #[link_name = "CGColorSpaceRelease"]
+    fn cg_color_space_release(color_space: *mut CGColorSpace);
+    #[link_name = "CGContextCreate"]
+    fn cg_context_create(
+        data: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        color_space: *mut CGColorSpace,
+        bitmap_info: u32,
+    ) -> *mut CGContext;
+    #[link_name = "CGContextDrawImage"]
+    fn cg_context_draw_image(context: *mut CGContext, rect: *const f64, image: *mut CGImage);
+    #[link_name = "CGContextRelease"]
+    fn cg_context_release(context: *mut CGContext);
 }
 
 #[link(name = "ImageIO", kind = "framework")]
@@ -1187,6 +1238,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_png_native_reads_pixels_through_imageio() {
+        let corpus = "/Users/josh/d/view/.work/corpus-2k/group-00";
+        let mut found = None;
+        if let Ok(entries) = std::fs::read_dir(corpus) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("png") {
+                    found = Some(p);
+                    break;
+                }
+            }
+        }
+        let Some(path) = found else {
+            return;
+        };
+        let pool = unsafe { objc2_foundation::NSAutoreleasePool::new() };
+        let (w, h, pixels) = decode_png_native(&path).unwrap();
+        assert!(w > 0 && h > 0);
+        assert_eq!(pixels.len(), w as usize * h as usize * 4);
+        assert_eq!(pixels.len(), w as usize * h as usize * 4);
+        drop(pool);
+        let (pw, ph, pure_pixels) = decode_png(&path).unwrap();
+        assert_eq!((pw, ph), (w, h));
+        assert_ne!(pure_pixels.len(), pixels.len(), "pure RGB vs native RGBA layouts differ");
+    }
+
+    #[test]
     fn decode_png_bytes_yields_pixels_for_minimal_rgb_png() {
         // Construct the PNG through zlib directly to avoid any encoder dep:
         let raw_scanline = [0u8, 255, 0, 0];
@@ -1205,7 +1283,24 @@ mod tests {
             out.extend_from_slice(body);
             let mut crc = kind.to_vec();
             crc.extend_from_slice(body);
-            out.extend_from_slice(&0u32.to_be_bytes());
+            let mut crc = {
+                let mut table = [0u32; 256];
+                for n in 0..256 {
+                    let mut v = n as u32;
+                    for _ in 0..8 {
+                        v = if (v & 1) != 0 { 0xEDB88320 ^ (v >> 1) } else { v >> 1 };
+                    }
+                    table[n] = v;
+                }
+                let mut c = 0xFFFFFFFFu32;
+                let mut crc_data = kind.to_vec();
+                crc_data.extend_from_slice(body);
+                for b in crc_data {
+                    c = table[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
+                }
+                c ^ 0xFFFFFFFF
+            };
+            out.extend_from_slice(&crc.to_be_bytes());
         }
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         chunk(&mut png, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
