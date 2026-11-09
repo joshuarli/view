@@ -164,8 +164,8 @@ pub fn list_browser(dir: &Path) -> std::io::Result<Vec<MediaItem>> {
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
             items.push(MediaItem::new(path, MediaKind::Directory));
-        } else if metadata.is_file() {
-            if let Some(kind) = kind_for_extension(&path) {
+        } else if metadata.is_file()
+            && let Some(kind) = kind_for_extension(&path) {
                 let mut item = MediaItem::new(path, kind);
                 item.file_size = Some(metadata.len() as i64);
                 item.modification = metadata
@@ -175,7 +175,6 @@ pub fn list_browser(dir: &Path) -> std::io::Result<Vec<MediaItem>> {
                     .map(|d| d.as_secs());
                 items.push(item);
             }
-        }
     }
     items.sort_by(browser_order);
     Ok(items)
@@ -204,8 +203,8 @@ pub fn scan_recursive(root: &Path) -> std::io::Result<Vec<MediaItem>> {
                 stack.push(path.clone());
                 continue;
             }
-            if metadata.as_ref().map(|m| m.is_file()).unwrap_or(false) {
-                if let Some(kind) = kind_for_extension(path) {
+            if metadata.as_ref().map(|m| m.is_file()).unwrap_or(false)
+                && let Some(kind) = kind_for_extension(path) {
                     let mut item = MediaItem::new(path.clone(), kind);
                     item.file_size = metadata.as_ref().map(|m| m.len() as i64);
                     item.modification = metadata
@@ -215,7 +214,6 @@ pub fn scan_recursive(root: &Path) -> std::io::Result<Vec<MediaItem>> {
                         .map(|d| d.as_secs());
                     out.push(item);
                 }
-            }
         }
     }
     Ok(out)
@@ -509,11 +507,13 @@ pub fn decode_png_native(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
             cf_release(source as *const std::ffi::c_void);
             return Err("context failed".into());
         }
-        // CGRect is a by-value struct; build it by copying bytes out of a zero-initialized C-style area to rule out var-sized layout issues
-        let mut rect = [0.0f64; 4];
-        rect[2] = width as f64;
-        rect[3] = height as f64;
-        cg_context_draw_image(context, *rect.as_ptr().cast::<(f64, f64, f64, f64)>(), image);
+        let rect = CGRect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f64,
+            height: height as f64,
+        };
+        cg_context_draw_image(context, rect, image);
         cg_context_release(context);
         cg_color_space_release(color_space);
         cg_image_release(image);
@@ -550,22 +550,28 @@ fn url_for(path: &Path) -> CFURLRef {
         if url.is_null() {
             return std::ptr::null_mut();
         }
-        guard.insert(path.to_path_buf(), CachedUrl(url as *mut std::ffi::c_void));
+        guard.insert(path.to_path_buf(), CachedUrl(url));
         url
     }
 }
 
-type CGDataProvider = std::ffi::c_void;
 type CGImageSource = std::ffi::c_void;
 type CGImage = std::ffi::c_void;
 
 type CGColorSpace = std::ffi::c_void;
 type CGContext = std::ffi::c_void;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    #[link_name = "CGDataProviderCreateWithFilename"]
-    fn cg_data_provider_create_with_filename(filename: *const std::os::raw::c_char) -> *mut CGDataProvider;
     #[link_name = "CGColorSpaceCreateDeviceRGB"]
     fn cg_color_space_create_device_rgb() -> *mut CGColorSpace;
     #[link_name = "CGColorSpaceRelease"]
@@ -581,17 +587,20 @@ unsafe extern "C" {
         bitmap_info: u32,
     ) -> *mut CGContext;
     #[link_name = "CGContextDrawImage"]
-    fn cg_context_draw_image(context: *mut CGContext, rect: (f64, f64, f64, f64), image: *mut CGImage);
+    fn cg_context_draw_image(context: *mut CGContext, rect: CGRect, image: *mut CGImage);
     #[link_name = "CGContextRelease"]
     fn cg_context_release(context: *mut CGContext);
+}
+
+#[cfg(test)]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
     #[link_name = "CGContextSynchronize"]
     fn cg_context_synchronize(context: *mut CGContext);
-    #[link_name = "CGContextSetFillColor"]
-    fn cg_context_set_fill_color(context: *mut CGContext, components: *const f64);
     #[link_name = "CGContextSetRGBFillColor"]
     fn cg_context_set_rgb_fill_color(context: *mut CGContext, red: f64, green: f64, blue: f64, alpha: f64);
     #[link_name = "CGContextFillRect"]
-    fn cg_context_fill_rect(context: *mut CGContext, rect: (f64, f64, f64, f64));
+    fn cg_context_fill_rect(context: *mut CGContext, rect: CGRect);
 }
 
 #[link(name = "ImageIO", kind = "framework")]
@@ -687,13 +696,6 @@ pub fn decode_png_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((width, height, out))
 }
 
-fn recon_prev(x: usize, out: &[u8], y: usize, stride: usize, _channels: usize) -> u8 {
-    let _ = (out, y, stride);
-    // Not used in the sequential unfilter below; kept for signature clarity.
-    let _ = x;
-    0
-}
-
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
     let a = a as i16;
     let b = b as i16;
@@ -729,11 +731,10 @@ fn unfilter_row(filter: u8, bytes: &[u8], prev: &[u8], channels: usize) -> Vec<u
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrowserMode { Browser, Recursive }
+#[derive(Default)]
+pub enum BrowserMode { #[default]
+Browser, Recursive }
 
-impl Default for BrowserMode {
-    fn default() -> Self { Self::Browser }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchError {
@@ -941,13 +942,12 @@ impl PreviewSession {
             self.selected = Some(index);
             return;
         }
-        if let Some(selected_url) = catalog.selected() {
-            if let Some(index) = next_urls.iter().position(|u| u.as_path() == selected_url) {
+        if let Some(selected_url) = catalog.selected()
+            && let Some(index) = next_urls.iter().position(|u| u.as_path() == selected_url) {
                 self.urls = next_urls;
                 self.selected = Some(index);
                 return;
             }
-        }
         self.selected = Some(previous_index.min(next_urls.len() - 1));
         self.urls = next_urls;
     }
@@ -1347,9 +1347,13 @@ mod tests {
             let cs = cg_color_space_create_device_rgb();
             let ctx = cg_context_create(pixels.as_mut_ptr() as *mut c_void, 4, 4, 8, 16, cs, 1);
             assert!(!ctx.is_null());
-            let red = [1.0f64, 0.0, 0.0, 1.0];
             cg_context_set_rgb_fill_color(ctx, 0.0, 1.0, 0.0, 1.0);
-            let rect = (0.0, 0.0, 4.0, 4.0);
+            let rect = CGRect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+            };
             cg_context_fill_rect(ctx, rect);
             cg_context_synchronize(ctx);
             cg_context_release(ctx);
@@ -1421,14 +1425,14 @@ mod tests {
             out.extend_from_slice(body);
             let mut crc = kind.to_vec();
             crc.extend_from_slice(body);
-            let mut crc = {
+            let crc = {
                 let mut table = [0u32; 256];
-                for n in 0..256 {
+                for (n, slot) in table.iter_mut().enumerate() {
                     let mut v = n as u32;
                     for _ in 0..8 {
                         v = if (v & 1) != 0 { 0xEDB88320 ^ (v >> 1) } else { v >> 1 };
                     }
-                    table[n] = v;
+                    *slot = v;
                 }
                 let mut c = 0xFFFFFFFFu32;
                 let mut crc_data = kind.to_vec();

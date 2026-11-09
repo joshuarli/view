@@ -1,4 +1,4 @@
-.PHONY: build test package install bench
+.PHONY: build test lint package install bench
 
 APP := View.app
 INSTALL_DIR ?= /Applications
@@ -8,6 +8,9 @@ build:
 
 test:
 	cargo test --profile dist
+
+lint:
+	cargo clippy --profile dist --lib --all-features --locked -- -D warnings
 
 package:
 	sh scripts/package-app.sh
