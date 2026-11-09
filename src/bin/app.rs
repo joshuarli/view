@@ -14,8 +14,9 @@ use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont, NSImage,
     NSImageView, NSMenu, NSMenuItem, NSScrollView, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSArray, NSData, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSArray, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
@@ -136,6 +137,21 @@ fn aspect_fit(img_size: NSSize, target: NSRect) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(fitted_w, fitted_h))
 }
 
+fn text_attributes(font: &NSFont, color: &NSColor, paragraph: &objc2_app_kit::NSMutableParagraphStyle) -> Retained<NSDictionary<objc2_foundation::NSAttributedStringKey>> {
+    unsafe {
+        let keys = NSArray::from_slice(&[
+            objc2_app_kit::NSFontAttributeName,
+            objc2_app_kit::NSForegroundColorAttributeName,
+            objc2_app_kit::NSParagraphStyleAttributeName,
+        ]);
+        let objs: [&NSObject; 3] = [font as &NSObject, color as &NSObject, paragraph as &NSObject];
+        let values = NSArray::from_slice(&objs);
+        let dict_ptr: *mut NSDictionary<objc2_foundation::NSAttributedStringKey> =
+            objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObjects: &*values, forKeys: &*keys];
+        Retained::retain(dict_ptr).unwrap()
+    }
+}
+
 fn byte_count_string(bytes: u64) -> Retained<NSString> {
     unsafe {
         objc2::msg_send![
@@ -247,7 +263,12 @@ fn update_carousel_preview() {
         }
     } else {
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
-        let image = if item.kind == MediaKind::Movie { cached_thumbnail(&item.path) } else { image_for(item) };
+        let pixels = pixel_limit(preview, preview_bounds);
+        let image = if item.kind == MediaKind::Movie {
+            cached_sized(&item.path, pixels, None, None)
+        } else {
+            display_image(&item.path, pixels, item.file_size, item.modification)
+        };
         if let Some(img) = image {
             let fitted = aspect_fit(img.size(), preview_bounds);
             preview_image.setFrame(fitted);
@@ -255,7 +276,7 @@ fn update_carousel_preview() {
         } else {
             preview_image.setImage(None);
             if item.kind == MediaKind::Movie {
-                request_quicklook_thumbnail(item.path.clone());
+                request_quicklook_thumbnail_sized(item.path.clone(), pixels);
             }
         }
     }
@@ -681,20 +702,41 @@ struct SyncImage(Retained<NSImage>);
 unsafe impl Send for SyncImage {}
 unsafe impl Sync for SyncImage {}
 
-static THUMB_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, SyncImage>>,
-> = std::sync::OnceLock::new();
-static THUMB_PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+struct CachedThumb {
+    pixels: u32,
+    file_size: Option<i64>,
+    modification: Option<u64>,
+    image: SyncImage,
+    cost: usize,
+}
+
+struct ThumbStore {
+    images: std::collections::HashMap<PathBuf, Vec<CachedThumb>>,
+    order: std::collections::VecDeque<(PathBuf, u32)>,
+    cost: usize,
+}
+
+static THUMB_CACHE: std::sync::OnceLock<std::sync::Mutex<ThumbStore>> = std::sync::OnceLock::new();
+static THUMB_PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(PathBuf, u32)>>> =
     std::sync::OnceLock::new();
 
-fn thumb_cache() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, SyncImage>> {
+#[cfg(feature = "benchmark")]
+const MOVIE_PREVIEW_PIXELS: u32 = 960;
+
+fn thumb_store() -> std::sync::MutexGuard<'static, ThumbStore> {
     THUMB_CACHE
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .get_or_init(|| {
+            std::sync::Mutex::new(ThumbStore {
+                images: std::collections::HashMap::new(),
+                order: std::collections::VecDeque::new(),
+                cost: 0,
+            })
+        })
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<PathBuf>> {
+fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<(PathBuf, u32)>> {
     THUMB_PENDING
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
@@ -702,21 +744,84 @@ fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<P
 }
 
 fn cached_thumbnail(path: &PathBuf) -> Option<Retained<NSImage>> {
-    thumb_cache().get(path).map(|s| s.0.clone())
+    thumb_store().images.get(path).and_then(|entries| entries.last().map(|entry| entry.image.0.clone()))
 }
 
+fn cached_sized(path: &std::path::Path, pixels: u32, file_size: Option<i64>, modification: Option<u64>) -> Option<Retained<NSImage>> {
+    let store = thumb_store();
+    let entries = store.images.get(path)?;
+    entries.iter().find(|entry| entry.pixels == pixels && entry.file_size == file_size && entry.modification == modification).map(|entry| entry.image.0.clone())
+}
+
+fn remember_thumbnail(path: PathBuf, pixels: u32, file_size: Option<i64>, modification: Option<u64>, image: SyncImage, cost: usize) {
+    let mut store = thumb_store();
+    let replaced = {
+        let entries = store.images.entry(path.clone()).or_default();
+        if let Some(existing) = entries.iter_mut().find(|entry| entry.pixels == pixels && entry.file_size == file_size && entry.modification == modification) {
+            let previous = existing.cost;
+            existing.image = image;
+            existing.cost = cost;
+            Some(previous)
+        } else {
+            entries.push(CachedThumb { pixels, file_size, modification, image, cost });
+            None
+        }
+    };
+    if let Some(previous) = replaced {
+        store.cost = store.cost.saturating_sub(previous).saturating_add(cost);
+    } else {
+        store.order.push_back((path, pixels));
+        store.cost = store.cost.saturating_add(cost);
+    }
+    while store.cost > view_core::THUMBNAIL_CACHE_LIMIT {
+        let Some((old_path, old_pixels)) = store.order.pop_front() else { break };
+        let removed = store.images.get_mut(&old_path).and_then(|entries| {
+            let position = entries.iter().position(|entry| entry.pixels == old_pixels)?;
+            Some(entries.remove(position).cost)
+        });
+        let Some(removed) = removed else { continue };
+        store.cost = store.cost.saturating_sub(removed);
+        if store.images.get(&old_path).is_some_and(|entries| entries.is_empty()) {
+            store.images.remove(&old_path);
+        }
+    }
+}
+
+#[cfg(feature = "benchmark")]
+fn forget_thumbnail(path: &std::path::Path) {
+    let mut store = thumb_store();
+    if let Some(entries) = store.images.remove(path) {
+        for entry in entries {
+            store.cost = store.cost.saturating_sub(entry.cost);
+        }
+    }
+    store.order.retain(|(old_path, _)| old_path != path);
+}
+
+#[cfg(feature = "benchmark")]
+fn thumbnail_is_pending(path: &std::path::Path) -> bool {
+    thumb_pending().iter().any(|(pending, _)| pending == path)
+}
+
+#[cfg(feature = "benchmark")]
 fn request_quicklook_thumbnail(path: PathBuf) {
-    if !thumb_pending().insert(path.clone()) {
+    request_quicklook_thumbnail_sized(path, MOVIE_PREVIEW_PIXELS);
+}
+
+fn request_quicklook_thumbnail_sized(path: PathBuf, pixels: u32) {
+    let pixels = pixels.clamp(1, 4096);
+    if !thumb_pending().insert((path.clone(), pixels)) {
         return;
     }
     let generator = unsafe { QLThumbnailGenerator::sharedGenerator() };
     let url = url_from_path(&path);
+    let points = (pixels as f64 / 2.0).max(1.0);
     let request: Retained<QLThumbnailGenerationRequest> = unsafe {
         let alloc = objc2::MainThreadMarker::new().unwrap().alloc::<QLThumbnailGenerationRequest>();
         QLThumbnailGenerationRequest::initWithFileAtURL_size_scale_representationTypes(
             alloc,
             &url,
-            NSSize::new(480.0, 480.0),
+            NSSize::new(points, points),
             2.0,
             QLThumbnailGenerationRequestRepresentationTypes::Thumbnail,
         )
@@ -724,7 +829,7 @@ fn request_quicklook_thumbnail(path: PathBuf) {
     let path_for_reply = path.clone();
     let handler = block2::RcBlock::new(move |representation: *mut QLThumbnailRepresentation, error: *mut objc2_foundation::NSError| {
         if representation.is_null() {
-            thumb_pending().remove(&path_for_reply);
+            thumb_pending().remove(&(path_for_reply.clone(), pixels));
             if !error.is_null() {
                 eprintln!("view: thumbnail {}: {:?}", path_for_reply.display(), unsafe { &*error });
             }
@@ -732,28 +837,189 @@ fn request_quicklook_thumbnail(path: PathBuf) {
         }
         let image = SyncImage(unsafe { (*(representation as *const QLThumbnailRepresentation)).NSImage() });
         let path = path_for_reply.clone();
-        dispatch2::DispatchQueue::main().exec_async(move || thumbnail_completed(path, image));
+        dispatch2::DispatchQueue::main().exec_async(move || thumbnail_completed(path, pixels, image));
     });
     unsafe { generator.generateBestRepresentationForRequest_completionHandler(&request, &handler) };
 }
 
-fn thumbnail_completed(path: PathBuf, image: SyncImage) {
-    thumb_pending().remove(&path);
-    thumb_cache().insert(path, image);
+fn thumbnail_completed(path: PathBuf, pixels: u32, image: SyncImage) {
+    thumb_pending().remove(&(path.clone(), pixels));
+    let size = image.0.size();
+    let cost = ((size.width.max(1.0) * size.height.max(1.0) * 4.0) as usize).saturating_mul(4);
+    remember_thumbnail(path, pixels, None, None, image, cost);
     if let Some(refs) = window_refs().as_ref() {
         unsafe { &*refs.grid }.setNeedsDisplay(true);
     }
     update_carousel_preview();
 }
 
-fn image_for(item: &MediaItem) -> Option<Retained<NSImage>> {
-    let data = std::fs::read(&item.path).ok()?;
-    if data.is_empty() {
-        return None;
+fn pixel_limit(view: &NSView, rect: NSRect) -> u32 {
+    let scale = view.window().map(|window| window.backingScaleFactor()).unwrap_or(2.0).max(1.0);
+    (rect.size.width.max(rect.size.height) * scale).round().clamp(1.0, 4096.0) as u32
+}
+
+fn display_image(path: &std::path::Path, pixels: u32, file_size: Option<i64>, modification: Option<u64>) -> Option<Retained<NSImage>> {
+    if let Some(image) = cached_sized(path, pixels, file_size, modification) {
+        return Some(image);
     }
+    let (image, cost) = imageio_thumbnail(path, pixels)?;
+    remember_thumbnail(path.to_path_buf(), pixels, file_size, modification, SyncImage(image.clone()), cost);
+    Some(image)
+}
+
+fn imageio_thumbnail(path: &std::path::Path, max_pixel: u32) -> Option<(Retained<NSImage>, usize)> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mtm = objc2::MainThreadMarker::new()?;
-    let nsdata = unsafe { NSData::initWithBytes_length(mtm.alloc(), data.as_ptr().cast(), data.len()) };
-    unsafe { NSImage::initWithData(mtm.alloc(), &nsdata) }
+    unsafe {
+        let cf_path = cf_string_create_with_c_string(std::ptr::null(), c_path.as_ptr(), 0x0800_0100);
+        if cf_path.is_null() {
+            return None;
+        }
+        let url = cf_url_create_with_file_system_path(std::ptr::null(), cf_path, 0, false);
+        cf_release(cf_path as *const std::ffi::c_void);
+        if url.is_null() {
+            return None;
+        }
+        let source = cg_image_source_create_with_url(url, std::ptr::null());
+        cf_release(url as *const std::ffi::c_void);
+        if source.is_null() {
+            return None;
+        }
+        let options = thumbnail_options(max_pixel);
+        let cg = cg_image_source_create_thumbnail_at_index(source, 0, options);
+        if !options.is_null() {
+            cf_release(options);
+        }
+        cf_release(source as *const std::ffi::c_void);
+        if cg.is_null() {
+            return None;
+        }
+        let width = cg_image_get_width(cg);
+        let height = cg_image_get_height(cg);
+        if width == 0 || height == 0 {
+            cf_release(cg as *const std::ffi::c_void);
+            return None;
+        }
+        let size = NSSize::new(width as f64, height as f64);
+        let cg = cg.cast::<CGImage>();
+        let image: Retained<NSImage> = objc2::msg_send![mtm.alloc::<NSImage>(), initWithCGImage: &*cg, size: size];
+        cf_release(cg.cast::<std::ffi::c_void>());
+        Some((image, width.saturating_mul(height).saturating_mul(4)))
+    }
+}
+
+unsafe fn thumbnail_options(max_pixel: u32) -> *const std::ffi::c_void {
+    unsafe {
+        let always = cf_key("kCGImageSourceCreateThumbnailFromImageAlways");
+        let transform = cf_key("kCGImageSourceCreateThumbnailWithTransform");
+        let max_key = cf_key("kCGImageSourceThumbnailMaxPixelSize");
+        let cache_key = cf_key("kCGImageSourceShouldCache");
+        let max_value = max_pixel as i32;
+        let number = cf_number_create(std::ptr::null(), 3, &max_value);
+        let keys = [always, transform, max_key, cache_key];
+        let values = [k_cf_boolean_true(), k_cf_boolean_true(), number, k_cf_boolean_false()];
+        let dict = cf_dictionary_create(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            4,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        );
+        for key in keys {
+            if !key.is_null() {
+                cf_release(key as *const std::ffi::c_void);
+            }
+        }
+        if !number.is_null() {
+            cf_release(number as *const std::ffi::c_void);
+        }
+        dict
+    }
+}
+
+unsafe fn cf_key(value: &str) -> *const std::ffi::c_void {
+    let Ok(c_string) = std::ffi::CString::new(value) else { return std::ptr::null() };
+    unsafe { cf_string_create_with_c_string(std::ptr::null(), c_string.as_ptr(), 0x0800_0100) }
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const std::ffi::c_void);
+    fn CFStringCreateWithCString(allocator: *const std::ffi::c_void, c_string: *const std::os::raw::c_char, encoding: u32) -> *const std::ffi::c_void;
+    fn CFURLCreateWithFileSystemPath(allocator: *const std::ffi::c_void, path: *const std::ffi::c_void, style: i32, is_directory: bool) -> *const std::ffi::c_void;
+    fn CFNumberCreate(allocator: *const std::ffi::c_void, number_type: i32, value: *const i32) -> *const std::ffi::c_void;
+    fn CFDictionaryCreate(
+        allocator: *const std::ffi::c_void,
+        keys: *const *const std::ffi::c_void,
+        values: *const *const std::ffi::c_void,
+        count: isize,
+        key_callbacks: *const u8,
+        value_callbacks: *const u8,
+    ) -> *const std::ffi::c_void;
+    static kCFBooleanTrue: *const std::ffi::c_void;
+    static kCFBooleanFalse: *const std::ffi::c_void;
+    static kCFTypeDictionaryKeyCallBacks: u8;
+    static kCFTypeDictionaryValueCallBacks: u8;
+}
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageSourceCreateWithURL(url: *const std::ffi::c_void, options: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGImageSourceCreateThumbnailAtIndex(source: *mut std::ffi::c_void, index: usize, options: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGImageGetWidth(image: *mut std::ffi::c_void) -> usize;
+    fn CGImageGetHeight(image: *mut std::ffi::c_void) -> usize;
+}
+
+fn cf_release(cf: *const std::ffi::c_void) {
+    unsafe { CFRelease(cf) }
+}
+
+fn cf_string_create_with_c_string(allocator: *const std::ffi::c_void, c_string: *const std::os::raw::c_char, encoding: u32) -> *const std::ffi::c_void {
+    unsafe { CFStringCreateWithCString(allocator, c_string, encoding) }
+}
+
+fn cf_url_create_with_file_system_path(allocator: *const std::ffi::c_void, path: *const std::ffi::c_void, style: i32, is_directory: bool) -> *const std::ffi::c_void {
+    unsafe { CFURLCreateWithFileSystemPath(allocator, path, style, is_directory) }
+}
+
+fn cf_number_create(allocator: *const std::ffi::c_void, number_type: i32, value: *const i32) -> *const std::ffi::c_void {
+    unsafe { CFNumberCreate(allocator, number_type, value) }
+}
+
+fn cf_dictionary_create(
+    allocator: *const std::ffi::c_void,
+    keys: *const *const std::ffi::c_void,
+    values: *const *const std::ffi::c_void,
+    count: isize,
+    key_callbacks: *const u8,
+    value_callbacks: *const u8,
+) -> *const std::ffi::c_void {
+    unsafe { CFDictionaryCreate(allocator, keys, values, count, key_callbacks, value_callbacks) }
+}
+
+fn cg_image_source_create_with_url(url: *const std::ffi::c_void, options: *const std::ffi::c_void) -> *mut std::ffi::c_void {
+    unsafe { CGImageSourceCreateWithURL(url, options) }
+}
+
+fn cg_image_source_create_thumbnail_at_index(source: *mut std::ffi::c_void, index: usize, options: *const std::ffi::c_void) -> *mut std::ffi::c_void {
+    unsafe { CGImageSourceCreateThumbnailAtIndex(source, index, options) }
+}
+
+fn cg_image_get_width(image: *mut std::ffi::c_void) -> usize {
+    unsafe { CGImageGetWidth(image) }
+}
+
+fn cg_image_get_height(image: *mut std::ffi::c_void) -> usize {
+    unsafe { CGImageGetHeight(image) }
+}
+
+fn k_cf_boolean_true() -> *const std::ffi::c_void {
+    unsafe { kCFBooleanTrue }
+}
+
+fn k_cf_boolean_false() -> *const std::ffi::c_void {
+    unsafe { kCFBooleanFalse }
 }
 
 define_class!(
@@ -837,6 +1103,14 @@ define_class!(
                 p.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
                 p
             };
+            let name_font = unsafe { NSFont::systemFontOfSize(12.0 * scale) };
+            let bold_font = unsafe { NSFont::boldSystemFontOfSize(12.0 * scale) };
+            let label = unsafe { NSColor::labelColor() };
+            let name_dict = text_attributes(&name_font, &label, &pstyle);
+            let bold_dict = text_attributes(&bold_font, &label, &pstyle);
+            let detail_font = unsafe { NSFont::systemFontOfSize(10.0 * scale) };
+            let detail_color = unsafe { NSColor::secondaryLabelColor() };
+            let detail_dict = text_attributes(&detail_font, &detail_color, &pstyle_detail);
 
             for (i, item) in state.items().iter().enumerate() {
                 let cell = self.cell_rect(i);
@@ -873,13 +1147,15 @@ define_class!(
                 let thumb_img = if item.kind == MediaKind::Directory {
                     folder_like_icon(item)
                 } else if item.kind == MediaKind::Movie {
-                    let cached = cached_thumbnail(&item.path);
+                    let pixels = pixel_limit(self, thumb_rect);
+                    let cached = cached_sized(&item.path, pixels, None, None);
                     if cached.is_none() {
-                        request_quicklook_thumbnail(item.path.clone());
+                        request_quicklook_thumbnail_sized(item.path.clone(), pixels);
                     }
                     cached.or_else(|| folder_like_icon(item)).or_else(|| system_image("film"))
                 } else {
-                    image_for(item).or_else(|| system_image("exclamationmark.triangle"))
+                    display_image(&item.path, pixel_limit(self, thumb_rect), item.file_size, item.modification)
+                        .or_else(|| system_image("exclamationmark.triangle"))
                 };
 
                 if let Some(img) = thumb_img {
@@ -898,54 +1174,13 @@ define_class!(
 
                 let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let string = NSString::from_str(&name);
-                let font: Retained<NSFont> = unsafe {
-                    if item.kind == MediaKind::Directory {
-                        NSFont::boldSystemFontOfSize(12.0 * scale)
-                    } else {
-                        NSFont::systemFontOfSize(12.0 * scale)
-                    }
-                };
-                let color = unsafe { NSColor::labelColor() };
-                let name_dict: Retained<NSDictionary<objc2_foundation::NSAttributedStringKey>> = unsafe {
-                    let keys = NSArray::from_slice(&[
-                        objc2_app_kit::NSFontAttributeName,
-                        objc2_app_kit::NSForegroundColorAttributeName,
-                        objc2_app_kit::NSParagraphStyleAttributeName,
-                    ]);
-                    let objs: [&NSObject; 3] = [
-                        &*font as &NSObject,
-                        &*color as &NSObject,
-                        &*pstyle as &NSObject,
-                    ];
-                    let values = NSArray::from_slice(&objs);
-                    let dict_ptr: *mut NSDictionary<objc2_foundation::NSAttributedStringKey> =
-                        objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObjects: &*values, forKeys: &*keys];
-                    Retained::retain(dict_ptr).unwrap()
-                };
+                let name_dict = if item.kind == MediaKind::Directory { &bold_dict } else { &name_dict };
                 use objc2_app_kit::NSStringDrawing;
-                unsafe { string.drawInRect_withAttributes(name_rect, Some(&*name_dict)) };
+                unsafe { string.drawInRect_withAttributes(name_rect, Some(&**name_dict)) };
 
                 if item.kind != MediaKind::Directory {
-                    let file_size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+                    let file_size = item.file_size.unwrap_or(0).max(0) as u64;
                     let detail_str = byte_count_string(file_size);
-                    let font_detail: Retained<NSFont> = unsafe { NSFont::systemFontOfSize(10.0 * scale) };
-                    let color_detail = unsafe { NSColor::secondaryLabelColor() };
-                    let detail_dict: Retained<NSDictionary<objc2_foundation::NSAttributedStringKey>> = unsafe {
-                        let keys = NSArray::from_slice(&[
-                            objc2_app_kit::NSFontAttributeName,
-                            objc2_app_kit::NSForegroundColorAttributeName,
-                            objc2_app_kit::NSParagraphStyleAttributeName,
-                        ]);
-                        let objs: [&NSObject; 3] = [
-                            &*font_detail as &NSObject,
-                            &*color_detail as &NSObject,
-                            &*pstyle_detail as &NSObject,
-                        ];
-                        let values = NSArray::from_slice(&objs);
-                        let dict_ptr: *mut NSDictionary<objc2_foundation::NSAttributedStringKey> =
-                            objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObjects: &*values, forKeys: &*keys];
-                        Retained::retain(dict_ptr).unwrap()
-                    };
                     unsafe { detail_str.drawInRect_withAttributes(detail_rect, Some(&*detail_dict)) };
                 }
             }

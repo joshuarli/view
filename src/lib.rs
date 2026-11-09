@@ -1096,6 +1096,8 @@ struct CacheEntry {
     order: u64,
 }
 
+pub const THUMBNAIL_CACHE_LIMIT: usize = 96 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct ThumbnailCache {
     entries: HashMap<ThumbCacheKey, CacheEntry>,
@@ -1111,7 +1113,7 @@ impl ThumbnailCache {
         Self { entries: HashMap::new(), order: Vec::new(), next_index: 0, next_sequence: 0, tracked_cost: 0, limit }
     }
 
-    pub fn with_default_limit() -> Self { Self::new(96 * 1024 * 1024) }
+    pub fn with_default_limit() -> Self { Self::new(THUMBNAIL_CACHE_LIMIT) }
     pub fn cost_bytes(&self) -> usize { self.tracked_cost }
 
     pub fn insert(&mut self, key: ThumbCacheKey, cost: usize) {

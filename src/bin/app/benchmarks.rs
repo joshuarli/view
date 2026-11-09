@@ -211,7 +211,7 @@ fn generate_video_thumbnail(bencher: Bencher) {
         .expect("VIEW_BENCH_TYPICAL must contain a video").path.clone();
     let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
     bench_appkit(bencher, || {
-        thumb_cache().remove(&path);
+        forget_thumbnail(&path);
         request_quicklook_thumbnail(path.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
@@ -220,7 +220,7 @@ fn generate_video_thumbnail(bencher: Bencher) {
                 black_box(image);
                 break;
             }
-            assert!(thumb_pending().contains(&path), "video thumbnail generation failed");
+            assert!(thumbnail_is_pending(&path), "video thumbnail generation failed");
             assert!(std::time::Instant::now() < deadline, "video thumbnail timed out");
             let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05);
             run_loop.runMode_beforeDate(unsafe { objc2_foundation::NSDefaultRunLoopMode }, &until);

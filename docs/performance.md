@@ -2,8 +2,8 @@
 
 These targets describe interactive browsing on an Apple Silicon Mac. They are
 engineering goals, not automated release gates. Compare changes on the same
-machine and unchanged corpus. The current baseline misses the interactive
-rendering targets.
+machine and unchanged corpus. Resize meets its frame target. Scroll and
+carousel still miss theirs.
 
 ## Targets
 
@@ -109,32 +109,54 @@ thumbnails to finish. None of these measurements represents a cold disk cache.
 ## Baseline
 
 On 2026-11-09, an Apple M1 with 8 GiB RAM and macOS 27.2 ran five independent
-guarded processes per workload, with five samples per process. The values below
-are the median of the five run medians; the range is the spread of those run
-medians. The small folder held 42 images. The typical folder held 157 images and
-20 videos. The recursive tree held roughly 3,300 media files. The typical image
-median was about 230 KiB. This is one warm-cache corpus, not a universal device
-or workload baseline.
+guarded processes per workload, with five samples per process. The two paint
+paths alternated, and each process passed `perf-gate-ready` immediately before
+and after the timed work. The values below are the median of the five run
+medians. The range is the spread of those run medians. Rustybench reported
+process CPU time as unsupported, so these times are wall-clock medians. The
+small folder held 42 images. The typical folder held 157 images and 20 videos.
+The recursive tree held roughly 3,300 media files. The typical image median
+was about 230 KiB. This is one warm-cache corpus, not a universal device or
+workload baseline.
 
 | Workflow | Median ms | Range ms | Rust allocations | Rust bytes |
 | --- | ---: | ---: | ---: | ---: |
-| Launch and paint first image | 180.3 | 178.2–182.8 | n/a | n/a |
-| List small directory | 0.119 | 0.115–0.123 | 171 | 6,729 |
-| List typical directory | 0.376 | 0.372–0.380 | 712 | 22,329 |
-| Recursive scan | 17.2 | 16.8–17.7 | 113,927 | 3,573,906 |
-| Open and paint grid | 29.0 | 27.7–33.1 | 860 | 2,548,403 |
-| Advance carousel image | 53.3 | 51.0–56.7 | 45 | 4,405,124 |
-| Generate video thumbnail | 30.7 | 30.4–34.8 | 27 | 1,260,524 |
-| Resize and paint grid | 31.3 | 30.2–32.2 | 148 | 2,526,074 |
-| Scroll and paint grid | 117.6 | 117.1–140.3 | 86 | 10,454,659 |
+| Launch and paint first image | 177.6 | 175.4–180.1 | n/a | n/a |
+| List small directory | 0.115 | 0.114–0.126 | 171 | 6,729 |
+| List typical directory | 0.366 | 0.362–0.378 | 712 | 22,329 |
+| Recursive scan | 16.2 | 16.1–17.1 | 113,927 | 3,573,906 |
+| Open and paint grid | 8.3 | 8.1–9.3 | 859 | 39,925 |
+| Advance carousel image | 31.6 | 31.3–32.6 | 57 | 2,438 |
+| Generate video thumbnail | 9.3 | 6.2–20.3 | 30 | 1,022 |
+| Resize and paint grid | 9.1 | 9.0–9.1 | 142 | 6,082 |
+| Scroll and paint grid | 82.7 | 82.5–85.1 | 201 | 17,685 |
 
-One production-app memory run on the same typical directory sampled a maximum
-of 86.6 MiB RSS after a frame and 84.7 MiB at the end. A separate diagnostic
-profile of grid scrolling showed ImageIO JPEG decoding on the main drawing path.
-The old Swift comparison numbers and synthetic scheduler and decoder timings do
-not measure these workflows and are not comparable to this baseline.
+Open and resize repeat one viewport inside the process, so those medians are
+warm cache hits after the first paint. Scroll advances 24 items per sample, so
+its median is a mostly new page. Against the previous paint path in the same
+session, launch, both directory lists, and the recursive scan stayed inside
+the earlier spread. Scroll moved from 98.8 ms (96.2–126.4) to 82.7 ms, and
+its Rust bytes moved from 10,454,659 to 17,685. Resize moved from 26.9 ms
+(25.7–27.7) to 9.1 ms. Open moved from 27.6 ms (26.8–29.8) to 8.3 ms. Carousel
+moved from 52.1 ms (49.1–55.6) to 31.6 ms. The video row moved from 29.7 ms
+(27.0–37.4) to 9.3 ms because thumbnail completion repaints the grid, and that
+repaint no longer reads each visible file into a Rust buffer. The video
+request is still a 480-point Quick Look thumbnail at scale 2.
 
-The production `dist` binary was 738,000 bytes before this benchmark work and
-744,576 bytes afterward. The added command-line instrumentation accounts for
-the application change. Rustybench and its dependencies are enabled only by the
-`benchmark` feature. Production build-time impact has not been measured.
+An unreported sample of the scroll benchmark, taken after the timed runs,
+spent about half of its main-thread paint samples in
+`CGImageSourceCreateThumbnailAtIndex`, most of them in AppleJPEG. That decode
+is why a new page stays near 83 ms. A warm resize of cells already in the
+cache is 9.1 ms.
+
+Five production-app memory runs on the typical directory sampled a median
+maximum of 114.2 MiB RSS (range 114.1–114.2) and a median final RSS of 113.7
+MiB (range 113.7–113.8). The previous paint path sampled 86.4 MiB maximum and
+84.5 MiB final. The increase is the retained display-sized thumbnails. The
+500 MiB budget still holds. The memory workload does not wait for video
+thumbnails.
+
+The production `dist` binary, with the debug info that the `dist` profile
+keeps, was 866,176 bytes before this paint change and 886,912 bytes after.
+Rustybench and its dependencies are enabled only by the `benchmark` feature.
+Production build-time impact has not been measured.
