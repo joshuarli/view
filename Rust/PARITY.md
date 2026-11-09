@@ -56,10 +56,18 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
   extension surface, packages, sniffing, scheduler limit/cancel, and a
   TrashService→TrashHistory restore round-trip.
 
+## Ported (close-out round 2)
+
+- PNG decode: the pure-Rust decoder (`decode_png`/`decode_png_bytes`,
+  8-bit colour types 0/2/4/6, non-interlaced) is the default backend;
+  ImageIO remains available as `decode_png_native` for system-backend
+  comparisons. Focused unit tests cover pixels through `decode_png_bytes`.
+- Automated tests: `tests/` integration suite for trash/undo/redo,
+  scheduler execution, and discovery on real temp files
+  (`cargo test --profile dist --test integration`).
+
 ## Partially ported
 
-- PNG decode: ImageIO via FFI in benchmarks; the pure-Rust inflater is
-  kept for reference only.
 - App GUI tests (`viewUITests`) are not ported; the Rust app binary is
   verified by rebuild + bundle launch + screenshot smoke tests.
 

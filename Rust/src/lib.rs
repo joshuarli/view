@@ -427,8 +427,8 @@ impl Scheduler {
 // ---------------------------------------------------------------------------
 
 pub fn decode_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
-    decode_png_native(path)
-        .map(|(w, h)| (w, h, vec![]))
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    decode_png_bytes(&data)
 }
 
 // Decode with the same ImageIO backend as Swift (CGImageSource). This
@@ -1151,6 +1151,36 @@ mod tests {
         scheduler.cancel_all();
         assert!(scheduler.pending().is_empty());
         assert!(scheduler.generation_of(&a).is_none());
+    }
+
+    #[test]
+    fn decode_png_bytes_yields_pixels_for_minimal_rgb_png() {
+        // Construct the PNG through zlib directly to avoid any encoder dep:
+        let raw_scanline = [0u8, 255, 0, 0];
+        let mut zlib = Vec::new();
+        {
+            use flate2::{Compression, write::ZlibEncoder};
+            use std::io::Write;
+            let mut encoder = ZlibEncoder::new(&mut zlib, Compression::default());
+            encoder.write_all(&raw_scanline).unwrap();
+            encoder.finish().unwrap();
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+            let len = (body.len() as u32).to_be_bytes();
+            out.extend_from_slice(&len);
+            out.extend_from_slice(kind);
+            out.extend_from_slice(body);
+            let mut crc = kind.to_vec();
+            crc.extend_from_slice(body);
+            out.extend_from_slice(&0u32.to_be_bytes());
+        }
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        chunk(&mut png, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+        chunk(&mut png, b"IDAT", &zlib);
+        chunk(&mut png, b"IEND", &[]);
+        let (w, h, pixels) = decode_png_bytes(&png).unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(pixels, vec![255, 0, 0]);
     }
 
     #[test]
