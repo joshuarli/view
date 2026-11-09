@@ -1260,7 +1260,7 @@ mod tests {
         let (w, h, pixels) = decode_png_native(&path).unwrap();
         assert!(w > 0 && h > 0);
         assert_eq!(pixels.len(), w as usize * h as usize * 4);
-        assert_eq!(pixels.len(), w as usize * h as usize * 4);
+        assert!(pixels.iter().any(|b| *b != 0), "native pixels must be non-zero");
         drop(pool);
         let (pw, ph, pure_pixels) = decode_png(&path).unwrap();
         assert_eq!((pw, ph), (w, h));
@@ -1268,7 +1268,6 @@ mod tests {
         // bitmap is bottom-up: source row 0 (top-left) lands on the last
         // buffer row. Sample top-left through both decoders.
         let row = (h as usize) - 1;
-        }
         let offset = row * (w as usize) * 4;
         let native_top_left = [
             pixels[offset],
