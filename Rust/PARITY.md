@@ -14,6 +14,27 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
 - TrashService move/restore errors + TrashHistory stack
 - Bounded ThumbnailCache (cost + FIFO eviction)
 
+## Ported (GUI, `src/bin/app.rs`, `objc2-app-kit`)
+
+- Window + scroll view + custom grid view (grid + carousel modes, full-path
+  title, view-mode persistence in NSUserDefaults, autosaved frame
+  `ViewWindow`).
+- Carousel strip with preview region; edge-follow scroll-into-view on
+  keyboard/mouse selection.
+- Keyboard map: arrows (row-step), Shift+Left/Right history, Backspace
+  (up a level), Cmd+Backspace (trash), Cmd+Z / Cmd+Shift+Z (undo/redo),
+  Space (Quick Look via `qlmanage -p`), Return/double-click (enter dirs).
+- Right-click context menu: Open, Show in Finder, Copy Path, Move to
+  Trash, Undo, Redo.
+- Edit menu (Undo/Redo/Move to Trash with key equivalents) + View menu
+  (Carousel/Grid) + app menu (Quit).
+- Drag-out via `NSDraggingSession` (pasteboard file URL item).
+- Trash via `NSWorkspace recycleURLs:`, undo/redo restore through
+  `TrashHistory`, no play badges.
+- SIGINT/SIGTERM handlers exit 0 (direct-binary Ctrl-C parity).
+- App bundle: `scripts/package-app.sh` builds `dist`-profile binary into
+  `View.app` with the repo `Info.plist`, signed ad-hoc.
+
 ## Partially ported
 
 - Scheduler: demand deduplication/preemption bookkeeping only; the Swift
@@ -24,41 +45,32 @@ Tests (`Tests/viewCoreTests`, `Tests/viewUITests`).
 - Discovery: package/hidden via extension/dot heuristics (Swift uses
   `URLResourceValues` flags and UTType conformance incl. content-type
   sniffing).
-- Undo/redo: core history + service exist; end-to-end restore observes
-  the AppKit layer that wires file transactions to the catalog.
-
-## Not ported (GUI, next phase)
-
-- Window/grid/carousel views, scroll-follow, loading spinner, full-path
-  title, view-mode and frame persistence.
-- Keyboard map (row-step arrows, Space, Backspace/Return/Delete families),
-  history, drag-out, context menu, hover/selection polish.
-- Quick Look panel (Space) and video preview.
-- Menus, focus restoration, Trash window integration (trash sound, sheets).
+- Preview thumbnails: images decode via `NSImage`; movies show the film
+  symbol. `qlmanage -p` covers full Quick Look, but grid movie thumbnails
+  are not generated (Swift uses Quick Look thumbnail generation).
+- Trash end-to-end tested manually only (recycle/restore path);
+  automated UI tests are not ported.
 
 ## GUI design
 
-Two candidates were compared:
+Native AppKit via `objc2-app-kit` was chosen over custom windowing
+(winit/egui/Metal): it keeps `NSCollectionView`-equivalent grid behavior,
+menus/key equivalents, drag sessions, and focus behavior identical to
+Swift, at the cost of unsafe interop and a larger dependency surface.
 
-1. **Native AppKit via `objc2-app-kit`** — keeps `NSCollectionView`,
-   `QLPreviewPanel`, menus/key equivalents, drag sessions, and focus
-   behavior identical to Swift. Cost: unsafe interop, ~10 crate
-   dependency surface, dev speed.
-2. **Custom windowing (winit/egui/Metal, like `~/d/play`)** — avoids
-   AppKit but reimplements grid virtualization, text, scroll, menus,
-   Quick Look, accessibility, and window integration from scratch.
+## Milestones — complete
 
-The AppKit option wins on behavior fidelity and long-term parity; the
-custom host wins on dependency weight only. Next phase builds a second
-binary (`src/bin/app.rs`) on the AppKit path, wired to the core above,
-behind the same `dist` profile as the benchmark.
-
-## Milestones to close the gap
-
-1. Window + `NSCollectionView` grid/carousel on `objc2-app-kit`,
-   backing-scale aware, backed by `Catalog`/scheduler state.
-2. Keyboard + scroll-follow + focus/loading/empty states + title.
+1. Window + grid/carousel on `objc2-app-kit`, backed by `Catalog` state.
+2. Keyboard + scroll-follow + title + view-mode/frame persistence.
 3. History, menus (Edit/View), context menu, drag-out.
-4. TrashController wiring (recycle/restore + undo/redo) and
-   `QLPreviewPanel` Quick Look.
-5. View-mode/window-frame persistence + release `View.app` bundle.
+4. Trash wiring (recycle/restore + undo/redo) and Space Quick Look.
+5. Release `View.app` bundle + SIGINT/SIGTERM Ctrl-C parity.
+
+## Verify
+
+```
+cargo test --profile dist --lib
+cargo build --profile dist --bin app --features app
+sh scripts/package-app.sh
+./View.app/Contents/MacOS/view <dir>
+```

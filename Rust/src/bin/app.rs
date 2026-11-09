@@ -11,11 +11,16 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSFont, NSImage,
-    NSImageView, NSMenu, NSMenuItem, NSScrollView, NSView, NSWindow, NSWindowStyleMask,
+    NSImageView, NSMenu, NSMenuItem, NSScrollView, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSData, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSData, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+};
 
-use view_core::{list_browser, scan_recursive, BrowserMode, MediaKind, MediaItem};
+use view_core::{
+    list_browser, scan_recursive, BrowserMode, MediaKind, MediaItem, TrashHistory, TrashService,
+    TrashTransaction,
+};
 
 const CELL_W: f64 = 160.0;
 const CELL_H: f64 = 180.0;
@@ -37,6 +42,8 @@ struct AppState {
     selected: Option<usize>,
     back: Vec<(PathBuf, Option<PathBuf>)>,
     forward: Vec<(PathBuf, Option<PathBuf>)>,
+    trash_service: TrashService,
+    trash_history: TrashHistory,
 }
 
 struct SyncCell(std::cell::UnsafeCell<AppState>);
@@ -140,7 +147,7 @@ fn apply_view_mode_layout() {
     }
 }
 
-fn install_main_menu(_delegate: &AppDelegate, _carousel: bool) {
+fn install_main_menu(_delegate: &AppDelegate, _carousel: bool, grid: &GridView) {
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let main_menu = NSMenu::new(mtm);
     let app_menu = NSMenu::new(mtm);
@@ -175,7 +182,241 @@ fn install_main_menu(_delegate: &AppDelegate, _carousel: bool) {
     view_item.setTitle(&NSString::from_str("View"));
     view_item.setSubmenu(Some(&view_menu));
     main_menu.addItem(&view_item);
+
+    let edit_menu = NSMenu::new(mtm);
+    edit_menu.addItem(&menu_item(grid, "Undo", objc2::sel!(undoTrash:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
+    edit_menu.addItem(&menu_item(grid, "Redo", objc2::sel!(redoTrash:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
+    edit_menu.addItem(&menu_item(grid, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::Command));
+    let edit_item = NSMenuItem::new(mtm);
+    edit_item.setTitle(&NSString::from_str("Edit"));
+    edit_item.setSubmenu(Some(&edit_menu));
+    main_menu.addItem(&edit_item);
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu));
+}
+
+fn url_from_path(path: &std::path::Path) -> Retained<NSURL> {
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let string = NSString::from_str(&path.display().to_string());
+    unsafe { NSURL::fileURLWithPath(&*string) }
+}
+
+fn path_from_url(url: &NSURL) -> PathBuf {
+    let path = url.path().map(|s| s.to_string()).unwrap_or_default();
+    PathBuf::from(path)
+}
+
+fn trash_selected(grid: &GridView) {
+    let (items, indexes) = {
+        let state = unsafe { &mut *app_state() };
+        let Some(index) = state.selected else { return };
+        let Some(item) = state.items.get(index) else { return };
+        (vec![item.clone()], vec![index])
+    };
+    let workspace = NSWorkspace::sharedWorkspace();
+    let urls: Vec<Retained<NSURL>> = items.iter().map(|i| url_from_path(&i.path)).collect();
+    let ns_urls = NSArray::from_retained_slice(&urls);
+    let handler = unsafe {
+        block2::RcBlock::new(move |mapping: core::ptr::NonNull<NSDictionary<NSURL, NSURL>>, error: *mut objc2_foundation::NSError| {
+            let mapping = unsafe { mapping.as_ref() };
+            let trashed_map: Vec<(PathBuf, PathBuf)> = mapping.allKeys()
+                .iter()
+                .filter_map(|key| {
+                    let key_url = unsafe { key.downcast_ref::<NSURL>()? };
+                    let value = unsafe { mapping.objectForKey(key_url) };
+                    let value_url = value.as_ref().map(|u| unsafe { u.downcast_ref::<NSURL>() }).flatten();
+                    let trashed = value_url.map(|u| path_from_url(u));
+                    let original = path_from_url(key_url);
+                    trashed.map(|trashed| (original, trashed))
+                })
+                .collect();
+            let had_error = !error.is_null();
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                if had_error {
+                    return;
+                }
+                let state = unsafe { &mut *app_state() };
+                let mut files = Vec::new();
+                for (original, trashed) in trashed_map.iter() {
+                    if let Some(pos) = state.items.iter().position(|i| &i.path == original) {
+                        files.push(view_core::TrashedFile {
+                            item: state.items[pos].clone(),
+                            trashed_path: trashed.clone(),
+                            index: pos,
+                        });
+                    }
+                }
+                for file in files.iter().rev() {
+                    if let Some(pos) = state.items.iter().position(|i| i.path == file.item.path) {
+                        state.items.remove(pos);
+                    }
+                }
+                state.selected = state.items.first().map(|_| 0);
+                state.trash_history.record_trash(view_core::TrashTransaction {
+                    files,
+                    selection_before_op: vec![],
+                });
+                if let Some(refs) = window_refs().as_ref() {
+                    let grid = unsafe { &*refs.grid };
+                    grid.setNeedsDisplay(true);
+                }
+            });
+        })
+    };
+    workspace.recycleURLs_completionHandler(&ns_urls, Some(&handler));
+}
+
+fn undo_trash(grid: &GridView) {
+    let transaction = unsafe { (&mut *app_state()).trash_history.pop_undo() };
+    let Some(transaction) = transaction else { return };
+    let mut succeeded = Vec::new();
+    let mut residual = Vec::new();
+    for file in transaction.files {
+        let exists = std::path::Path::new(&file.trashed_path).exists();
+        let dest_exists = std::path::Path::new(&file.item.path).exists();
+        match (exists, dest_exists) {
+            (true, false) => {
+                let _ = std::fs::copy(&file.trashed_path, &file.item.path).and_then(|_| std::fs::remove_file(&file.trashed_path));
+                succeeded.push(file);
+            }
+            _ => residual.push(file),
+        }
+    }
+    {
+        let state = unsafe { &mut *app_state() };
+        if !succeeded.is_empty() {
+            let selection_before_op = transaction.selection_before_op.clone();
+            for file in succeeded.iter().rev() {
+                let at = file.index.min(state.items.len());
+                state.items.insert(at, file.item.clone());
+            }
+            state.trash_history.push_redo(TrashTransaction { files: succeeded, selection_before_op });
+        }
+        if !residual.is_empty() {
+            state.trash_history.push_undo(TrashTransaction { files: residual, selection_before_op: transaction.selection_before_op });
+        }
+    }
+    grid.setNeedsDisplay(true);
+}
+
+fn redo_trash(grid: &GridView) {
+    let transaction = unsafe { (&mut *app_state()).trash_history.pop_redo() };
+    let Some(transaction) = transaction else { return };
+    let mut succeeded = Vec::new();
+    let mut residual = Vec::new();
+    for file in transaction.files {
+        let present = std::path::Path::new(&file.item.path).exists();
+        match present {
+            true => {
+                let _ = std::fs::copy(&file.item.path, &file.trashed_path).and_then(|_| std::fs::remove_file(&file.item.path));
+                succeeded.push(file);
+            }
+            false => residual.push(file),
+        }
+    }
+    {
+        let state = unsafe { &mut *app_state() };
+        let selection_before_op = transaction.selection_before_op.clone();
+        for file in succeeded.iter().rev() {
+            if let Some(pos) = state.items.iter().position(|i| i.path == file.item.path) {
+                state.items.remove(pos);
+            }
+        }
+        state.selected = state.items.first().map(|_| 0);
+        if !succeeded.is_empty() {
+            state.trash_history.push_undo(TrashTransaction { files: succeeded, selection_before_op });
+        }
+        if !residual.is_empty() {
+            state.trash_history.push_redo(TrashTransaction { files: residual, selection_before_op: transaction.selection_before_op });
+        }
+    }
+    grid.setNeedsDisplay(true);
+}
+
+fn quicklook_selected() {
+    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    let _ = std::process::Command::new("qlmanage")
+        .arg("-p")
+        .arg(&item.path)
+        .spawn();
+}
+
+fn make_context_action_item(target: &GridView, title: &str, action: objc2::runtime::Sel, key: Option<&str>, modifier_mask: objc2_app_kit::NSEventModifierFlags) -> Retained<NSMenuItem> {
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    unsafe { item.setTarget(Some(target as _)) };
+    unsafe { let _: () = objc2::msg_send![&*item, setAction: action]; };
+    if let Some(key) = key {
+        item.setKeyEquivalent(&NSString::from_str(key));
+        unsafe { item.setKeyEquivalentModifierMask(modifier_mask) };
+    }
+    item
+}
+
+fn build_context_menu(target: &GridView) -> Retained<NSMenu> {
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let menu = NSMenu::new(mtm);
+    menu.addItem(&make_context_action_item(target, "Open", objc2::sel!(openSelected:), None, objc2_app_kit::NSEventModifierFlags::empty()));
+    menu.addItem(&make_context_action_item(target, "Show in Finder", objc2::sel!(showSelectedInFinder:), None, objc2_app_kit::NSEventModifierFlags::empty()));
+    menu.addItem(&make_context_action_item(target, "Copy Path", objc2::sel!(copySelectedPath:), None, objc2_app_kit::NSEventModifierFlags::empty()));
+    menu.addItem(&make_context_action_item(target, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::Command));
+    menu.addItem(&make_context_action_item(target, "Undo", objc2::sel!(undoTrash:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
+    menu.addItem(&make_context_action_item(target, "Redo", objc2::sel!(redoTrash:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
+    menu
+}
+
+fn menu_item(target: &GridView, title: &str, action: objc2::runtime::Sel, key: Option<&str>, modifier_mask: objc2_app_kit::NSEventModifierFlags) -> Retained<NSMenuItem> {
+    make_context_action_item(target, title, action, key, modifier_mask)
+}
+
+fn place_context_menu(target: &GridView, event: &objc2_app_kit::NSEvent) {
+    let menu = build_context_menu(target);
+    NSMenu::popUpContextMenu_withEvent_forView(&menu, event, target);
+}
+
+fn open_selected() {
+    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    if item.kind == MediaKind::Directory {
+        let current = unsafe { (*app_state()).root.clone() };
+        unsafe { &mut *app_state() }.back.push((current, unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i) }).map(|x| x.path.clone())));
+        unsafe { &mut *app_state() }.forward.clear();
+        unsafe { &mut *app_state() }.root = item.path.clone();
+        unsafe { &mut *app_state() }.items = load_listing(&item.path, unsafe { (*app_state()).mode });
+        unsafe { &mut *app_state() }.selected = if unsafe { (*app_state()).items.is_empty() } { None } else { Some(0) };
+        if let Some(refs) = window_refs().as_ref() {
+            unsafe { &*refs.grid }.setNeedsDisplay(true);
+        }
+    } else {
+        let ws = NSWorkspace::sharedWorkspace();
+        ws.openFile(&NSString::from_str(&item.path.display().to_string()));
+    }
+}
+
+fn show_selected_in_finder() {
+    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    let _ = std::process::Command::new("open").arg("-R").arg(&item.path).spawn();
+}
+
+fn copy_selected_path() {
+    let Some(item) = unsafe { (*app_state()).selected }.and_then(|i| unsafe { (&*app_state()).items.get(i).cloned() }) else { return };
+    let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    unsafe { pasteboard.setString_forType(&NSString::from_str(&item.path.display().to_string()), &objc2_app_kit::NSPasteboardTypeString) };
+}
+
+fn begin_drag_session(view: &GridView, path: &PathBuf, event: &objc2_app_kit::NSEvent) {
+    let item = objc2_app_kit::NSPasteboardItem::new();
+    let url = url_from_path(path);
+    let file_text = url.path().map(|s| s.to_string()).unwrap_or_else(|| path.display().to_string());
+    unsafe { item.setString_forType(&NSString::from_str(&file_text), &objc2_app_kit::NSPasteboardTypeString) };
+    let dragging_item: Retained<objc2_app_kit::NSDraggingItem> = unsafe {
+        let ptr: *mut objc2_app_kit::NSDraggingItem =
+            objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), initWithPasteboardWriter: &*item];
+        Retained::from_raw(ptr).unwrap()
+    };
+    let items = NSArray::from_retained_slice(&[dragging_item]);
+    let source = objc2::runtime::ProtocolObject::from_ref(view);
+    view.beginDraggingSessionWithItems_event_source(&items, event, source);
 }
 
 fn load_listing(root: &PathBuf, mode: BrowserMode) -> Vec<MediaItem> {
@@ -301,6 +542,28 @@ define_class!(
             let mods = event.modifierFlags();
             let shift = mods.contains(objc2_app_kit::NSEventModifierFlags::Shift);
             let command = mods.contains(objc2_app_kit::NSEventModifierFlags::Command);
+            let control = mods.contains(objc2_app_kit::NSEventModifierFlags::Control);
+            if code == 51 && (command || control || (!shift && !command)) {
+                if state.mode == BrowserMode::Browser && code == 51 && !command && !control {
+                    // Backspace: up one level (handled below via navigateToParent
+                    // in the Return branch pattern); fallthrough to parent nav.
+                } else {
+                    trash_selected(self);
+                    return;
+                }
+            }
+            if code == 49 && !command && !control && !shift {
+                quicklook_selected();
+                return;
+            }
+            if code == 6 && command {
+                if shift {
+                    redo_trash(self);
+                } else {
+                    undo_trash(self);
+                }
+                return;
+            }
             // History (shift arrows) — browser mode only.
             if code == 123 && shift {
                 if let Some((url, sel)) = state.back.pop() {
@@ -322,6 +585,23 @@ define_class!(
                     state.selected = sel.and_then(|s| state.items.iter().position(|i| i.path == s));
                 }
                 self.setNeedsDisplay(true);
+                return;
+            }
+            if code == 51 && !command && !control {
+                if state.mode == BrowserMode::Browser {
+                    let parent = state.root.parent().map(|p| p.to_path_buf());
+                    if let Some(parent_url) = parent {
+                        if parent_url != state.root {
+                            let current = state.root.clone();
+                            state.back.push((current, state.selected.and_then(|i| state.items.get(i)).map(|x| x.path.clone())));
+                            state.forward.clear();
+                            state.root = parent_url;
+                            state.items = load_listing(&state.root, state.mode);
+                            state.selected = if state.items.is_empty() { None } else { Some(0) };
+                            self.setNeedsDisplay(true);
+                        }
+                    }
+                }
                 return;
             }
             if state.items.is_empty() {
@@ -356,6 +636,65 @@ define_class!(
             self.scroll_selection_into_view();
             self.setNeedsDisplay(true);
             let _ = command;
+        }
+
+        #[unsafe(method(openSelected:))]
+        fn open_selected_action(&self, _sender: &NSObject) {
+            open_selected();
+        }
+
+        #[unsafe(method(showSelectedInFinder:))]
+        fn show_selected_action(&self, _sender: &NSObject) {
+            show_selected_in_finder();
+        }
+
+        #[unsafe(method(copySelectedPath:))]
+        fn copy_selected_action(&self, _sender: &NSObject) {
+            copy_selected_path();
+        }
+
+        #[unsafe(method(moveSelectedToTrash:))]
+        fn move_selected_action(&self, _sender: &NSObject) {
+            trash_selected(self);
+        }
+
+        #[unsafe(method(undoTrash:))]
+        fn undo_trash_action(&self, _sender: &NSObject) {
+            undo_trash(self);
+        }
+
+        #[unsafe(method(redoTrash:))]
+        fn redo_trash_action(&self, _sender: &NSObject) {
+            redo_trash(self);
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            let location = event.locationInWindow();
+            let view_location = self.convertPoint_fromView(location, None);
+            let state = unsafe { &mut *app_state() };
+            if !state.items.is_empty() {
+                let (x, y) = if state.view_mode == ViewMode::Carousel {
+                    (view_location.x - 12.0, view_location.y - 8.0)
+                } else {
+                    (view_location.x - 16.0, view_location.y - 16.0)
+                };
+                if x >= 0.0 && y >= 0.0 {
+                    let index = if state.view_mode == ViewMode::Carousel {
+                        (x / (120.0 + 8.0)).floor() as usize
+                    } else {
+                        let cols = columns_for(self.bounds().size.width).max(1);
+                        let col = (x / (CELL_W + SPACING)).floor() as usize;
+                        let row = (y / (CELL_H + SPACING)).floor() as usize;
+                        if col >= cols { 0 } else { row * cols + col }
+                    };
+                    if index < state.items.len() {
+                        state.selected = Some(index);
+                        self.setNeedsDisplay(true);
+                    }
+                }
+            }
+            place_context_menu(self, event);
         }
 
         #[unsafe(method(mouseDown:))]
@@ -402,9 +741,18 @@ define_class!(
             }
             self.scroll_selection_into_view();
             self.setNeedsDisplay(true);
+            if event.clickCount() == 1 {
+                if let Some(item) = unsafe { (&*app_state()).items.get(index).cloned() } {
+                    let path = item.path.clone();
+                    begin_drag_session(self, &path, event);
+                }
+            }
         }
     }
 );
+
+unsafe impl objc2_foundation::NSObjectProtocol for GridView {}
+unsafe impl objc2_app_kit::NSDraggingSource for GridView {}
 
 impl GridView {
     fn cell_rect(&self, index: usize) -> NSRect {
@@ -555,7 +903,7 @@ define_class!(
                 divider: Retained::into_raw(divider.clone()) as *mut NSBox,
                 preview_image: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
             });
-            install_main_menu(self, view_mode_carousel);
+            install_main_menu(self, view_mode_carousel, &grid);
             window.setTitle(&NSString::from_str(&title));
             window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
             window.center();
@@ -589,6 +937,14 @@ fn main() {
         };
         state.items = load_listing(&root, mode);
         state.selected = if state.items.is_empty() { None } else { Some(0) };
+    }
+
+    unsafe {
+        extern "C" fn handle_signal(_signal: libc::c_int) {
+            std::process::exit(0);
+        }
+        libc::signal(libc::SIGINT, handle_signal as usize as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_signal as usize as libc::sighandler_t);
     }
 
     let mtm = objc2::MainThreadMarker::new().unwrap();
