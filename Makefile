@@ -1,4 +1,4 @@
-.PHONY: build test package install bench swift visual
+.PHONY: build test package install bench
 
 APP := View.app
 INSTALL_DIR ?= /Applications
@@ -6,14 +6,8 @@ INSTALL_DIR ?= /Applications
 build:
 	cargo build --profile dist --bin app --features app
 
-swift:
-	sh swift/scripts/build-app.sh
-
 test:
 	cargo test --profile dist
-
-visual:
-	sh scripts/visual-compare.sh
 
 package:
 	sh scripts/package-app.sh

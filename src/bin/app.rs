@@ -1292,11 +1292,7 @@ define_class!(
             if *SELF_TEST.get_or_init(|| false) {
                 start_self_test();
             }
-            if let Some(Some(dir)) = DUMP_VISUAL.get() {
-                start_visual_dump(dir.clone());
-            } else {
-                window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
-            }
+            window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
             window.setTitle(&NSString::from_str(&title));
             window.center();
             window.makeKeyAndOrderFront(None);
@@ -1524,108 +1520,6 @@ fn start_self_test() {
 
 static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static DUMP_VISUAL: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-static VISUAL_DUMP_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn capture_screenshot(window: &NSWindow, path: &std::path::Path) {
-    let Some(content) = (unsafe { window.contentView() }) else { return };
-    unsafe {
-        window.layoutIfNeeded();
-        content.layoutSubtreeIfNeeded();
-    }
-    let bounds = content.bounds();
-    let rep: Option<Retained<objc2_app_kit::NSBitmapImageRep>> = unsafe {
-        let ptr: *mut objc2_app_kit::NSBitmapImageRep =
-            objc2::msg_send![&*content, bitmapImageRepForCachingDisplayInRect: bounds];
-        Retained::retain(ptr)
-    };
-    let Some(rep) = rep else { return };
-    unsafe {
-        let _: () = objc2::msg_send![&*content, cacheDisplayInRect: bounds, toBitmapImageRep: &*rep];
-        let empty_dict = objc2_foundation::NSDictionary::<objc2_foundation::NSString, objc2::runtime::NSObject>::new();
-        let data: Option<Retained<objc2_foundation::NSData>> = {
-            let ptr: *mut objc2_foundation::NSData = objc2::msg_send![
-                &*rep,
-                representationUsingType: 4usize,
-                properties: &*empty_dict
-            ];
-            Retained::retain(ptr)
-        };
-        if let Some(data) = data {
-            let bytes = unsafe { data.as_bytes_unchecked() };
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(path, bytes);
-        }
-    }
-}
-
-fn start_visual_dump(out_dir: PathBuf) {
-    let mtm = objc2::MainThreadMarker::new().unwrap();
-    let app = NSApplication::sharedApplication(mtm);
-    let block = unsafe {
-        block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
-            let (window_ptr, grid_ptr) = {
-                let refs = window_refs();
-                let Some(refs) = refs.as_ref() else { return };
-                (refs.window, refs.grid)
-            };
-            let window = unsafe { &*window_ptr };
-            let grid = unsafe { &*grid_ptr };
-            let step = VISUAL_DUMP_STEP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match step {
-                0 => {
-                    unsafe { (*app_state()).view_mode = ViewMode::Carousel };
-                    apply_view_mode_layout();
-                    capture_screenshot(window, &out_dir.join("step_0_carousel_initial.png"));
-                    send_key_via_app(&app, 124, false);
-                }
-                1 => {
-                    capture_screenshot(window, &out_dir.join("step_1_carousel_right.png"));
-                    send_key_via_app(&app, 124, false);
-                }
-                2 => {
-                    capture_screenshot(window, &out_dir.join("step_2_carousel_red.png"));
-                    unsafe { (*app_state()).view_mode = ViewMode::Grid };
-                    apply_view_mode_layout();
-                }
-                3 => {
-                    capture_screenshot(window, &out_dir.join("step_3_grid_mode.png"));
-                    send_key_via_app(&app, 125, false);
-                }
-                4 => {
-                    capture_screenshot(window, &out_dir.join("step_4_grid_down.png"));
-                    send_key_via_app(&app, 123, false);
-                }
-                5 => {
-                    capture_screenshot(window, &out_dir.join("step_5_grid_left.png"));
-                    unsafe { (*app_state()).view_mode = ViewMode::Carousel };
-                    apply_view_mode_layout();
-                }
-                6 => {
-                    capture_screenshot(window, &out_dir.join("step_6_back_to_carousel.png"));
-                    send_key_via_app(&app, 123, false);
-                    send_key_via_app(&app, 123, false);
-                    send_key_via_app(&app, 123, false);
-                }
-                7 => {
-                    send_key_via_app(&app, 36, false);
-                }
-                8 => {
-                    capture_screenshot(window, &out_dir.join("step_7_entered_subdir.png"));
-                    send_key_via_app(&app, 123, true);
-                }
-                9 => {
-                    capture_screenshot(window, &out_dir.join("step_8_history_back.png"));
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
-        })
-    };
-    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.2, true, &block) };
-}
 
 fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -1633,26 +1527,12 @@ fn main() {
         eprintln!("view: panic: {info}\n{backtrace}");
         std::process::abort();
     }));
-    let mut dump_visual: Option<PathBuf> = None;
-    let mut args: Vec<String> = Vec::new();
-    let mut i = 1;
-    let raw_args: Vec<String> = std::env::args().collect();
-    while i < raw_args.len() {
-        if raw_args[i] == "--dump-visual" && i + 1 < raw_args.len() {
-            dump_visual = Some(PathBuf::from(&raw_args[i + 1]));
-            i += 2;
-        } else if raw_args[i] == "--self-test" {
-            SELF_TEST.set(true).ok();
-            i += 1;
-        } else if raw_args[i] == "--debug-enter" {
-            DEBUG_ENTER.set(true).ok();
-            i += 1;
-        } else {
-            args.push(raw_args[i].clone());
-            i += 1;
-        }
-    }
-    DUMP_VISUAL.set(dump_visual.clone()).ok();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let self_test = args.iter().any(|a| a == "--self-test");
+    let debug_enter = args.iter().any(|a| a == "--debug-enter");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter").collect();
+    SELF_TEST.set(self_test).ok();
+    DEBUG_ENTER.set(debug_enter).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,
@@ -1665,17 +1545,13 @@ fn main() {
         let state = unsafe { &mut *app_state() };
         state.root = root.clone();
         state.mode = mode;
-        if dump_visual.is_none() {
-            let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-            let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode"))
-                .map(|s| s.to_string());
-            state.view_mode = match saved.as_deref() {
-                Some("grid") => ViewMode::Grid,
-                _ => ViewMode::Carousel,
-            };
-        } else {
-            state.view_mode = ViewMode::Carousel;
-        }
+        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode"))
+            .map(|s| s.to_string());
+        state.view_mode = match saved.as_deref() {
+            Some("grid") => ViewMode::Grid,
+            _ => ViewMode::Carousel,
+        };
         state.items = load_listing(&root, mode);
         state.selected = if state.items.is_empty() { None } else { Some(0) };
     }

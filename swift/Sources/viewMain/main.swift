@@ -1,3 +1,0 @@
-import viewUI
-
-ViewApp.main()
