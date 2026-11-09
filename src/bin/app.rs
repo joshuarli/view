@@ -45,6 +45,8 @@ struct AppState {
     view_mode: ViewMode,
     items: Vec<MediaItem>,
     selected: Option<usize>,
+    selection_anchor: Option<usize>,
+    selection_range: (usize, usize),
     back: Vec<(PathBuf, Option<PathBuf>)>,
     forward: Vec<(PathBuf, Option<PathBuf>)>,
     trash_service: TrashService,
@@ -565,6 +567,8 @@ define_class!(
             let width = self.bounds().size.width;
             let cols = if state.view_mode == ViewMode::Carousel { state.items.len().max(1) } else { columns_for(width).max(1) };
             let selected = state.selected;
+            let range_start = state.selection_range.0;
+            let range_end = state.selection_range.1;
             let mtm = objc2::MainThreadMarker::new().unwrap();
             for (i, item) in state.items.iter().enumerate() {
                 let (x, y, cw, ch) = if state.view_mode == ViewMode::Carousel {
@@ -585,7 +589,7 @@ define_class!(
                     )
                 };
                 let cell = NSRect::new(NSPoint::new(x, y), NSSize::new(cw, ch));
-                if selected == Some(i) {
+                if selected == Some(i) || (i >= range_start && i <= range_end && state.selection_anchor.is_some()) {
                     unsafe {
                         NSColor::selectedContentBackgroundColor().setFill();
                         objc2_app_kit::NSRectFill(cell);
@@ -626,7 +630,7 @@ define_class!(
                         }
                         let name = match item.kind {
                             MediaKind::Directory => "folder",
-                            MediaKind::Image => "photo",
+                            MediaKind::Image => "exclamationmark.triangle",
                             MediaKind::Movie => "film",
                         };
                         if item.kind == MediaKind::Image {
@@ -694,6 +698,9 @@ define_class!(
                     state.root = url;
                     state.items = load_listing(&state.root, state.mode);
                     state.selected = sel.and_then(|s| state.items.iter().position(|i| i.path == s));
+                    let idx = state.selected.unwrap_or(0);
+                    state.selection_anchor = state.selected;
+                    state.selection_range = (idx, idx);
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -705,6 +712,9 @@ define_class!(
                     state.root = url;
                     state.items = load_listing(&state.root, state.mode);
                     state.selected = sel.and_then(|s| state.items.iter().position(|i| i.path == s));
+                    let idx = state.selected.unwrap_or(0);
+                    state.selection_anchor = state.selected;
+                    state.selection_range = (idx, idx);
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -755,6 +765,8 @@ define_class!(
             let n = state.items.len() as isize;
             let wrapped = ((next % n) + n) % n;
             state.selected = Some(wrapped as usize);
+            state.selection_anchor = Some(wrapped as usize);
+            state.selection_range = (wrapped as usize, wrapped as usize);
             self.scroll_selection_into_view();
             self.setNeedsDisplay(true);
             let _ = command;
@@ -856,10 +868,25 @@ define_class!(
                         state.root = item.path.clone();
                         state.items = load_listing(&state.root, state.mode);
                         state.selected = if state.items.is_empty() { None } else { Some(0) };
+                        state.selection_anchor = None;
+                        state.selection_range = (0, 0);
                     }
                 }
             } else if index < state.items.len() {
-                state.selected = Some(index);
+                let shift = event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+                if shift {
+                    if let Some(anchor) = state.selection_anchor {
+                        state.selection_range = (anchor.min(index), anchor.max(index));
+                    } else {
+                        state.selection_anchor = Some(index);
+                        state.selection_range = (index, index);
+                    }
+                    state.selected = Some(index);
+                } else {
+                    state.selection_anchor = Some(index);
+                    state.selection_range = (index, index);
+                    state.selected = Some(index);
+                }
             }
             self.scroll_selection_into_view();
             self.setNeedsDisplay(true);
