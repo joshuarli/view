@@ -51,6 +51,41 @@ fn entering_directory_selects_first_item() {
 }
 
 #[test]
+fn drag_item_initialization_does_not_crash() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::ClassType;
+        use objc2_foundation::{NSRect, NSSize, NSString, NSURL};
+        use objc2::rc::Retained;
+
+        unsafe {
+            let pool = objc2_foundation::NSAutoreleasePool::new();
+            let item = objc2_app_kit::NSPasteboardItem::new();
+            let string = NSString::from_str("/tmp/test.png");
+            item.setString_forType(&string, &objc2_app_kit::NSPasteboardTypeString);
+
+            let alloc: *mut objc2_app_kit::NSDraggingItem =
+                objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), alloc];
+            assert!(!alloc.is_null(), "NSDraggingItem alloc must succeed");
+
+            let ptr: *mut objc2_app_kit::NSDraggingItem =
+                objc2::msg_send![alloc, initWithPasteboardWriter: &*item];
+            assert!(!ptr.is_null(), "NSDraggingItem init must not return null");
+
+            let dragging_item = Retained::from_raw(ptr).expect("valid Retained NSDraggingItem");
+            let frame = NSRect::new(objc2_foundation::NSPoint::ZERO, NSSize::new(100.0, 100.0));
+            let _: () = objc2::msg_send![
+                &*dragging_item,
+                setDraggingFrame: frame,
+                contents: core::ptr::null::<objc2::runtime::NSObject>()
+            ];
+            drop(dragging_item);
+            drop(pool);
+        }
+    }
+}
+
+#[test]
 fn back_restores_parent_cursor_position_via_history_stack() {
     let root = temp_subdir("back");
     let sub = root.join("sub");

@@ -22,7 +22,7 @@ app = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 libc = "0.2"
 objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSGridView", "NSStackView", "NSCell"] }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSGridView", "NSStackView", "NSCell", "NSBitmapImageRep", "NSImageRep", "NSBezierPath", "NSParagraphStyle", "NSText"] }
 objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification", "NSUserDefaults", "NSValue", "NSProcessInfo"] }
 objc2-core-graphics = { version = "0.3", optional = true }
 block2 = { version = "0.6", optional = true }
@@ -49,6 +49,7 @@ strip = false
 [dev-dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSDraggingItem", "NSPasteboardItem", "NSPasteboard"] }
 objc2-quick-look-thumbnailing = "0.3"
 block2 = "0.6"
 
@@ -56,4 +57,5 @@ block2 = "0.6"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
-strip = true
+debug = true
+strip = false

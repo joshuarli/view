@@ -30,6 +30,9 @@ use view_core::{
 const CELL_W: f64 = 160.0;
 const CELL_H: f64 = 180.0;
 const SPACING: f64 = 10.0;
+const CAROUSEL_CELL_W: f64 = 120.0;
+const CAROUSEL_CELL_H: f64 = 156.0;
+const CAROUSEL_SPACING: f64 = 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode { Carousel, Grid }
@@ -49,7 +52,7 @@ struct AppState {
     selection_range: (usize, usize),
     back: Vec<(PathBuf, Option<PathBuf>)>,
     forward: Vec<(PathBuf, Option<PathBuf>)>,
-    trash_service: TrashService,
+    _trash_service: TrashService,
     trash_history: TrashHistory,
 }
 
@@ -80,25 +83,58 @@ fn app_state() -> *mut AppState {
     cell.0.get()
 }
 
+fn aspect_fit(img_size: NSSize, target: NSRect) -> NSRect {
+    if img_size.width <= 0.0 || img_size.height <= 0.0 {
+        return target;
+    }
+    let scale_w = target.size.width / img_size.width;
+    let scale_h = target.size.height / img_size.height;
+    let scale = scale_w.min(scale_h);
+    let fitted_w = (img_size.width * scale).round();
+    let fitted_h = (img_size.height * scale).round();
+    let x = (target.origin.x + (target.size.width - fitted_w) / 2.0).round();
+    let y = (target.origin.y + (target.size.height - fitted_h) / 2.0).round();
+    NSRect::new(NSPoint::new(x, y), NSSize::new(fitted_w, fitted_h))
+}
+
+fn byte_count_string(bytes: u64) -> Retained<NSString> {
+    unsafe {
+        objc2::msg_send![
+            objc2::class!(NSByteCountFormatter),
+            stringFromByteCount: bytes as i64,
+            countStyle: 0isize
+        ]
+    }
+}
+
 fn columns_for(width: f64) -> usize {
     let available = (width - 32.0).max(0.0);
     ((available + SPACING) / (CELL_W + SPACING)).floor().max(1.0) as usize
 }
 
-#[allow(dead_code)]
-fn content_size(width: f64, count: usize, carousel: bool) -> NSSize {
+fn grid_cell_spacing(width: f64) -> f64 {
+    let cols = columns_for(width);
+    if cols <= 1 {
+        return SPACING;
+    }
+    let available = (width - 32.0).max(0.0);
+    let remaining = available - (cols as f64 * CELL_W);
+    (remaining / (cols as f64 - 1.0)).max(SPACING)
+}
+
+fn content_size(width: f64, height: f64, count: usize, carousel: bool) -> NSSize {
     if carousel {
-        NSSize::new(((count as f64) * (120.0 + 8.0) + 24.0).max(width), 184.0)
+        NSSize::new(((count as f64) * (CAROUSEL_CELL_W + CAROUSEL_SPACING) + 24.0).max(width), 184.0)
     } else {
         let cols = columns_for(width).max(1);
         let rows = count.div_ceil(cols);
-        NSSize::new(width, rows as f64 * (CELL_H + SPACING) + 32.0)
+        let content_h = 16.0 + rows as f64 * (CELL_H + SPACING) + 16.0;
+        NSSize::new(width, content_h.max(height))
     }
 }
 
-#[allow(dead_code)]
 fn layout_carousel(
-    root: &NSView,
+    _root: &NSView,
     preview: &NSView,
     image: &NSImageView,
     divider: &NSBox,
@@ -108,16 +144,20 @@ fn layout_carousel(
 ) {
     if carousel {
         let strip_h = 184.0;
+        let preview_h = (frame.size.height - strip_h).max(0.0);
+        scroll.setHidden(false);
+        divider.setHidden(false);
+        preview.setHidden(false);
         scroll.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(frame.size.width, strip_h)));
         divider.setFrame(NSRect::new(NSPoint::new(0.0, strip_h), NSSize::new(frame.size.width, 1.0)));
-        preview.setFrame(NSRect::new(NSPoint::new(0.0, strip_h + 1.0), NSSize::new(frame.size.width, frame.size.height - strip_h - 1.0)));
-        image.setFrame(preview.frame());
+        preview.setFrame(NSRect::new(NSPoint::new(0.0, strip_h + 1.0), NSSize::new(frame.size.width, preview_h - 1.0)));
+        image.setFrame(NSRect::new(NSPoint::ZERO, preview.bounds().size));
     } else {
         preview.setHidden(true);
         divider.setHidden(true);
+        scroll.setHidden(false);
         scroll.setFrame(frame);
     }
-    let _ = root;
 }
 
 fn persist_view_mode() {
@@ -130,17 +170,63 @@ fn persist_view_mode() {
     unsafe { defaults.setObject_forKey(Some(&*value as &NSObject), &NSString::from_str("View.ViewMode")) };
 }
 
+fn update_carousel_preview() {
+    let (preview_image_ptr, preview_ptr) = {
+        let refs = window_refs();
+        let Some(refs) = refs.as_ref() else { return };
+        (refs.preview_image, refs.preview)
+    };
+    let preview_image = unsafe { &*preview_image_ptr };
+    let preview = unsafe { &*preview_ptr };
+    let state = unsafe { &*app_state() };
+    if state.view_mode != ViewMode::Carousel {
+        return;
+    }
+    let Some(index) = state.selected else {
+        preview_image.setImage(None);
+        return;
+    };
+    let Some(item) = state.items.get(index) else {
+        preview_image.setImage(None);
+        return;
+    };
+    let preview_bounds = preview.bounds();
+    if item.kind == MediaKind::Directory {
+        preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyDown);
+        if let Some(icon) = folder_like_icon(item) {
+            unsafe { icon.setSize(NSSize::new(256.0, 256.0)); }
+            preview_image.setImage(Some(&*icon));
+            let x = ((preview_bounds.size.width - 256.0) / 2.0).round();
+            let y = ((preview_bounds.size.height - 256.0) / 2.0).round();
+            preview_image.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(256.0, 256.0)));
+        }
+    } else {
+        preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+        if let Some(img) = image_for(item).or_else(|| cached_thumbnail(&item.path)) {
+            let fitted = aspect_fit(img.size(), preview_bounds);
+            preview_image.setFrame(fitted);
+            preview_image.setImage(Some(&*img));
+        } else {
+            preview_image.setImage(None);
+        }
+    }
+    preview.setNeedsDisplay(true);
+}
+
 fn apply_view_mode_layout() {
-    let refs = window_refs();
-    let Some(refs) = refs.as_ref() else { return };
+    let (window_ptr, scroll_ptr, grid_ptr, preview_ptr, preview_image_ptr, divider_ptr) = {
+        let refs = window_refs();
+        let Some(refs) = refs.as_ref() else { return };
+        (refs.window, refs.scroll, refs.grid, refs.preview, refs.preview_image, refs.divider)
+    };
     let carousel = unsafe { (*app_state()).view_mode } == ViewMode::Carousel;
     unsafe {
-        let window = &*refs.window;
-        let scroll = &*refs.scroll;
-        let grid = &*refs.grid;
-        let preview = &*refs.preview;
-        let preview_image = &*refs.preview_image;
-        let divider = &*refs.divider;
+        let window = &*window_ptr;
+        let scroll = &*scroll_ptr;
+        let grid = &*grid_ptr;
+        let preview = &*preview_ptr;
+        let preview_image = &*preview_image_ptr;
+        let divider = &*divider_ptr;
         let width = window.frame().size.width.max(320.0);
         let height = window.frame().size.height.max(240.0);
         if let Some(root) = window.contentView() {
@@ -148,10 +234,11 @@ fn apply_view_mode_layout() {
         }
         scroll.setHasVerticalScroller(!carousel);
         scroll.setHasHorizontalScroller(carousel);
-        let doc_size = content_size(width, (*app_state()).items.len(), carousel);
+        let doc_size = content_size(width, height, (*app_state()).items.len(), carousel);
         grid.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), doc_size));
         grid.setNeedsDisplay(true);
     }
+    update_carousel_preview();
 }
 
 fn install_main_menu(_delegate: &AppDelegate, _carousel: bool, grid: &GridView) {
@@ -346,11 +433,11 @@ fn quicklook_selected() {
         panel.orderOut(None);
         return;
     }
-    let refs_guard = window_refs();
-    let Some(refs) = refs_guard.as_ref() else { return };
-    let grid_ptr = refs.grid;
-    drop(refs);
-    drop(refs_guard);
+    let grid_ptr = {
+        let refs_guard = window_refs();
+        let Some(refs) = refs_guard.as_ref() else { return };
+        refs.grid
+    };
     let grid = unsafe { &*grid_ptr };
     unsafe { panel.setDataSource(Some(objc2::runtime::ProtocolObject::from_ref(grid))) };
     let index = unsafe { (*app_state()).selected.unwrap_or(0) } as objc2_foundation::NSInteger;
@@ -434,8 +521,10 @@ fn begin_drag_session(view: &GridView, path: &PathBuf, event: &objc2_app_kit::NS
     let file_text = url.path().map(|s| s.to_string()).unwrap_or_else(|| path.display().to_string());
     unsafe { item.setString_forType(&NSString::from_str(&file_text), &objc2_app_kit::NSPasteboardTypeString) };
     let dragging_item: Retained<objc2_app_kit::NSDraggingItem> = unsafe {
+        let alloc: *mut objc2_app_kit::NSDraggingItem =
+            objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), alloc];
         let ptr: *mut objc2_app_kit::NSDraggingItem =
-            objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), initWithPasteboardWriter: &*item];
+            objc2::msg_send![alloc, initWithPasteboardWriter: &*item];
         match Retained::from_raw(ptr) {
             Some(retained) => retained,
             None => {
@@ -443,6 +532,25 @@ fn begin_drag_session(view: &GridView, path: &PathBuf, event: &objc2_app_kit::NS
                 return;
             }
         }
+    };
+    let cell_rect = if let Some(idx) = unsafe { (*app_state()).selected } {
+        view.cell_rect(idx)
+    } else {
+        NSRect::new(NSPoint::ZERO, NSSize::new(120.0, 120.0))
+    };
+    let drag_image = folder_like_icon(&MediaItem::new(path, MediaKind::Directory))
+        .or_else(|| image_for(&MediaItem::new(path, MediaKind::Image)))
+        .or_else(|| system_image("doc"));
+    unsafe {
+        let contents_ptr: *const NSObject = match &drag_image {
+            Some(img) => &**img as &NSObject,
+            None => core::ptr::null(),
+        };
+        let _: () = objc2::msg_send![
+            &*dragging_item,
+            setDraggingFrame: cell_rect,
+            contents: contents_ptr
+        ];
     };
     let items = NSArray::from_retained_slice(&[dragging_item]);
     let source = objc2::runtime::ProtocolObject::from_ref(view);
@@ -543,6 +651,29 @@ define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[ivars = ()]
+    struct PreviewRegionView;
+
+    impl PreviewRegionView {
+        #[unsafe(method_id(initWithFrame:))]
+        fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
+            let this = this.set_ivars(());
+            unsafe { objc2::msg_send![super(this), initWithFrame: frame] }
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _rect: NSRect) {
+            unsafe {
+                NSColor::windowBackgroundColor().setFill();
+                objc2_app_kit::NSRectFill(self.bounds());
+            }
+        }
+    }
+);
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ()]
     struct GridView;
 
     impl GridView {
@@ -561,103 +692,150 @@ define_class!(
             true
         }
 
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
         #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _rect: NSRect) {
+        fn draw_rect(&self, rect: NSRect) {
             let state = unsafe { &mut *app_state() };
             let width = self.bounds().size.width;
             let cols = if state.view_mode == ViewMode::Carousel { state.items.len().max(1) } else { columns_for(width).max(1) };
             let selected = state.selected;
             let range_start = state.selection_range.0;
             let range_end = state.selection_range.1;
+
+            unsafe {
+                NSColor::windowBackgroundColor().setFill();
+                objc2_app_kit::NSRectFill(self.bounds());
+            }
+
             let mtm = objc2::MainThreadMarker::new().unwrap();
+            let pstyle: Retained<objc2_app_kit::NSMutableParagraphStyle> = unsafe {
+                let p: Retained<objc2_app_kit::NSMutableParagraphStyle> = objc2::msg_send![objc2_app_kit::NSMutableParagraphStyle::class(), new];
+                p.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+                p.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
+                p
+            };
+            let pstyle_detail: Retained<objc2_app_kit::NSMutableParagraphStyle> = unsafe {
+                let p: Retained<objc2_app_kit::NSMutableParagraphStyle> = objc2::msg_send![objc2_app_kit::NSMutableParagraphStyle::class(), new];
+                p.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+                p.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+                p
+            };
+
             for (i, item) in state.items.iter().enumerate() {
-                let (x, y, cw, ch) = if state.view_mode == ViewMode::Carousel {
+                let cell = self.cell_rect(i);
+                if !objc2_foundation::NSIntersectsRect(cell, rect) {
+                    continue;
+                }
+                let is_selected = selected == Some(i) || (i >= range_start && i <= range_end && state.selection_anchor.is_some());
+                if is_selected {
+                    let path = unsafe { objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(cell, 10.0, 10.0) };
+                    let fill = unsafe { NSColor::selectedContentBackgroundColor().colorWithAlphaComponent(0.6) };
+                    fill.setFill();
+                    unsafe { path.fill() };
+                    let stroke = unsafe { NSColor::selectedContentBackgroundColor() };
+                    stroke.setStroke();
+                    path.setLineWidth(2.0);
+                    unsafe { path.stroke() };
+                }
+
+                let (cw, ch) = (cell.size.width, cell.size.height);
+                let (x, y) = (cell.origin.x, cell.origin.y);
+                let (thumb_rect, name_rect, detail_rect) = if state.view_mode == ViewMode::Carousel {
                     (
-                        12.0 + i as f64 * (120.0 + 8.0),
-                        8.0,
-                        120.0,
-                        148.0,
+                        NSRect::new(NSPoint::new(x + 6.0, y + 6.0), NSSize::new(108.0, 110.0)),
+                        NSRect::new(NSPoint::new(x + 6.0, y + 120.0), NSSize::new(108.0, 16.0)),
+                        NSRect::new(NSPoint::new(x + 6.0, y + 137.0), NSSize::new(108.0, 14.0)),
                     )
                 } else {
-                    let col = i % cols;
-                    let row = i / cols;
                     (
-                        16.0 + col as f64 * (CELL_W + SPACING),
-                        16.0 + row as f64 * (CELL_H + SPACING),
-                        CELL_W,
-                        CELL_H,
+                        NSRect::new(NSPoint::new(x + 6.0, y + 6.0), NSSize::new(148.0, 134.0)),
+                        NSRect::new(NSPoint::new(x + 6.0, y + 144.0), NSSize::new(148.0, 16.0)),
+                        NSRect::new(NSPoint::new(x + 6.0, y + 161.0), NSSize::new(148.0, 14.0)),
                     )
                 };
-                let cell = NSRect::new(NSPoint::new(x, y), NSSize::new(cw, ch));
-                if selected == Some(i) || (i >= range_start && i <= range_end && state.selection_anchor.is_some()) {
-                    unsafe {
-                        NSColor::selectedContentBackgroundColor().setFill();
-                        objc2_app_kit::NSRectFill(cell);
-                    }
-                }
-                let thumb_rect = NSRect::new(NSPoint::new(x + 6.0, y + 6.0), NSSize::new(cw - 12.0, ch - 36.0));
-                let cached_movie: Option<Retained<NSImage>> = if item.kind == MediaKind::Movie {
+
+                let thumb_img = if item.kind == MediaKind::Directory {
+                    folder_like_icon(item)
+                } else if item.kind == MediaKind::Movie {
                     let cached = cached_thumbnail(&item.path);
                     if cached.is_none() {
                         request_quicklook_thumbnail(item.path.clone());
                     }
-                    cached
+                    cached.or_else(|| folder_like_icon(item)).or_else(|| system_image("film"))
                 } else {
-                    None
+                    image_for(item).or_else(|| system_image("exclamationmark.triangle"))
                 };
-                if let Some(image) = cached_movie.clone() {
+
+                if let Some(img) = thumb_img {
+                    let fitted = aspect_fit(img.size(), thumb_rect);
                     unsafe {
-                        image.drawInRect_fromRect_operation_fraction(
-                            thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0,
+                        img.drawInRect_fromRect_operation_fraction(
+                            fitted,
+                            NSRect::ZERO,
+                            objc2_app_kit::NSCompositingOperation::SourceOver,
+                            1.0,
                         );
                     }
                 }
-                if cached_movie.is_some() { /* cached QL thumbnail already drawn */ } else { match image_for(item) {
-                    Some(image) => unsafe {
-                        image.drawInRect_fromRect_operation_fraction(
-                            thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
-                        );
-                    },
-                    None => {
-                        if item.kind == MediaKind::Directory || item.kind == MediaKind::Movie {
-                            if let Some(image) = folder_like_icon(item) {
-                                unsafe {
-                                    image.drawInRect_fromRect_operation_fraction(
-                                        thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
-                                    );
-                                }
-                            }
-                        }
-                        let name = match item.kind {
-                            MediaKind::Directory => "folder",
-                            MediaKind::Image => "exclamationmark.triangle",
-                            MediaKind::Movie => "film",
-                        };
-                        if item.kind == MediaKind::Image {
-                            if let Some(image) = system_image(name) {
-                                unsafe {
-                                    image.drawInRect_fromRect_operation_fraction(
-                                        thumb_rect, NSRect::ZERO, objc2_app_kit::NSCompositingOperation::SourceOver, 1.0
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } }
-                let label_rect = NSRect::new(NSPoint::new(x + 6.0, y + ch - 28.0), NSSize::new(cw - 12.0, 22.0));
+
                 let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let string = NSString::from_str(&name);
-                let font = unsafe { NSFont::systemFontOfSize(12.0) };
-                let attrs: Retained<objc2_foundation::NSDictionary<objc2_foundation::NSAttributedStringKey>> = unsafe {
-                    objc2_foundation::NSDictionary::dictionaryWithObject_forKey(
-                        &*font as &NSObject,
-                        objc2::runtime::ProtocolObject::from_ref(unsafe { objc2_app_kit::NSFontAttributeName } as &NSString),
-                    )
+                let font: Retained<NSFont> = unsafe {
+                    if item.kind == MediaKind::Directory {
+                        NSFont::boldSystemFontOfSize(12.0)
+                    } else {
+                        NSFont::systemFontOfSize(12.0)
+                    }
                 };
-                let _ = mtm;
+                let color = unsafe { NSColor::labelColor() };
+                let name_dict: Retained<NSDictionary<objc2_foundation::NSAttributedStringKey>> = unsafe {
+                    let keys = NSArray::from_slice(&[
+                        objc2_app_kit::NSFontAttributeName,
+                        objc2_app_kit::NSForegroundColorAttributeName,
+                        objc2_app_kit::NSParagraphStyleAttributeName,
+                    ]);
+                    let objs: [&NSObject; 3] = [
+                        &*font as &NSObject,
+                        &*color as &NSObject,
+                        &*pstyle as &NSObject,
+                    ];
+                    let values = NSArray::from_slice(&objs);
+                    let dict_ptr: *mut NSDictionary<objc2_foundation::NSAttributedStringKey> =
+                        objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObjects: &*values, forKeys: &*keys];
+                    Retained::retain(dict_ptr).unwrap()
+                };
                 use objc2_app_kit::NSStringDrawing;
-                unsafe { string.drawInRect_withAttributes(label_rect, Some(&*attrs)) };
+                unsafe { string.drawInRect_withAttributes(name_rect, Some(&*name_dict)) };
+
+                if item.kind != MediaKind::Directory {
+                    let file_size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+                    let detail_str = byte_count_string(file_size);
+                    let font_detail: Retained<NSFont> = unsafe { NSFont::systemFontOfSize(10.0) };
+                    let color_detail = unsafe { NSColor::secondaryLabelColor() };
+                    let detail_dict: Retained<NSDictionary<objc2_foundation::NSAttributedStringKey>> = unsafe {
+                        let keys = NSArray::from_slice(&[
+                            objc2_app_kit::NSFontAttributeName,
+                            objc2_app_kit::NSForegroundColorAttributeName,
+                            objc2_app_kit::NSParagraphStyleAttributeName,
+                        ]);
+                        let objs: [&NSObject; 3] = [
+                            &*font_detail as &NSObject,
+                            &*color_detail as &NSObject,
+                            &*pstyle_detail as &NSObject,
+                        ];
+                        let values = NSArray::from_slice(&objs);
+                        let dict_ptr: *mut NSDictionary<objc2_foundation::NSAttributedStringKey> =
+                            objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObjects: &*values, forKeys: &*keys];
+                        Retained::retain(dict_ptr).unwrap()
+                    };
+                    unsafe { detail_str.drawInRect_withAttributes(detail_rect, Some(&*detail_dict)) };
+                }
             }
+            let _ = mtm;
             let _ = state;
         }
 
@@ -701,6 +879,12 @@ define_class!(
                     let idx = state.selected.unwrap_or(0);
                     state.selection_anchor = state.selected;
                     state.selection_range = (idx, idx);
+                    let title = state.root.display().to_string();
+                    if let Some(refs) = window_refs().as_ref() {
+                        unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
+                    }
+                    apply_view_mode_layout();
+                    update_carousel_preview();
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -715,6 +899,12 @@ define_class!(
                     let idx = state.selected.unwrap_or(0);
                     state.selection_anchor = state.selected;
                     state.selection_range = (idx, idx);
+                    let title = state.root.display().to_string();
+                    if let Some(refs) = window_refs().as_ref() {
+                        unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
+                    }
+                    apply_view_mode_layout();
+                    update_carousel_preview();
                 }
                 self.setNeedsDisplay(true);
                 return;
@@ -730,6 +920,14 @@ define_class!(
                             state.root = parent_url;
                             state.items = load_listing(&state.root, state.mode);
                             state.selected = if state.items.is_empty() { None } else { Some(0) };
+                            state.selection_anchor = state.selected;
+                            state.selection_range = (0, 0);
+                            let title = state.root.display().to_string();
+                            if let Some(refs) = window_refs().as_ref() {
+                                unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
+                            }
+                            apply_view_mode_layout();
+                            update_carousel_preview();
                             self.setNeedsDisplay(true);
                         }
                     }
@@ -739,7 +937,8 @@ define_class!(
             if state.items.is_empty() {
                 return;
             }
-            let cols = if state.view_mode == ViewMode::Carousel { 1 } else { columns_for(self.bounds().size.width).max(1) };
+            let visible_cols = columns_for(self.bounds().size.width).max(1);
+            let cols = if state.view_mode == ViewMode::Carousel || visible_cols >= state.items.len() { 1 } else { visible_cols };
             let cur = state.selected.unwrap_or(0);
             let next = match code {
                 123 | 126 => cur as isize - if code == 126 { cols as isize } else { 1 },
@@ -754,6 +953,14 @@ define_class!(
                             state.root = item.path.clone();
                             state.items = load_listing(&state.root, state.mode);
                             state.selected = if state.items.is_empty() { None } else { Some(0) };
+                            state.selection_anchor = state.selected;
+                            state.selection_range = (0, 0);
+                            let title = state.root.display().to_string();
+                            if let Some(refs) = window_refs().as_ref() {
+                                unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
+                            }
+                            apply_view_mode_layout();
+                            update_carousel_preview();
                             self.setNeedsDisplay(true);
                             return;
                         }
@@ -768,6 +975,7 @@ define_class!(
             state.selection_anchor = Some(wrapped as usize);
             state.selection_range = (wrapped as usize, wrapped as usize);
             self.scroll_selection_into_view();
+            update_carousel_preview();
             self.setNeedsDisplay(true);
             let _ = command;
         }
@@ -842,10 +1050,10 @@ define_class!(
             let index = if state.view_mode == ViewMode::Carousel {
                 let x = view_location.x - 12.0;
                 let y = view_location.y - 8.0;
-                if x < 0.0 || y < 0.0 || y >= 148.0 {
+                if x < 0.0 || y < 0.0 || y >= CAROUSEL_CELL_H {
                     return;
                 }
-                (x / (120.0 + 8.0)).floor() as usize
+                (x / (CAROUSEL_CELL_W + CAROUSEL_SPACING)).floor() as usize
             } else {
                 let width = self.bounds().size.width;
                 let cols = columns_for(width).max(1);
@@ -868,8 +1076,14 @@ define_class!(
                         state.root = item.path.clone();
                         state.items = load_listing(&state.root, state.mode);
                         state.selected = if state.items.is_empty() { None } else { Some(0) };
-                        state.selection_anchor = None;
+                        state.selection_anchor = state.selected;
                         state.selection_range = (0, 0);
+                        let title = state.root.display().to_string();
+                        if let Some(refs) = window_refs().as_ref() {
+                            unsafe { (&*refs.window).setTitle(&NSString::from_str(&title)); }
+                        }
+                        apply_view_mode_layout();
+                        update_carousel_preview();
                     }
                 }
             } else if index < state.items.len() {
@@ -887,6 +1101,7 @@ define_class!(
                     state.selection_range = (index, index);
                     state.selected = Some(index);
                 }
+                update_carousel_preview();
             }
             self.scroll_selection_into_view();
             self.setNeedsDisplay(true);
@@ -898,7 +1113,7 @@ define_class!(
             if state.items.is_empty() {
                 return;
             }
-            let Some(index) = state.selected else { return };
+            let Some(index) = state.selected else { return; };
             if let Some(item) = unsafe { (&*app_state()).items.get(index).cloned() } {
                 let path = item.path.clone();
                 begin_drag_session(self, &path, event);
@@ -925,6 +1140,14 @@ define_class!(
 
 unsafe impl objc2_foundation::NSObjectProtocol for GridView {}
 unsafe impl objc2_app_kit::NSDraggingSource for GridView {
+    fn draggingSession_sourceOperationMaskForDraggingContext(
+        &self,
+        _session: &objc2_app_kit::NSDraggingSession,
+        _context: objc2_app_kit::NSDraggingContext,
+    ) -> objc2_app_kit::NSDragOperation {
+        objc2_app_kit::NSDragOperation::Copy
+    }
+
     fn draggingSession_endedAtPoint_operation(
         &self,
         _session: &objc2_app_kit::NSDraggingSession,
@@ -940,14 +1163,15 @@ impl GridView {
         let state = unsafe { &*app_state() };
         let width = self.bounds().size.width;
         if state.view_mode == ViewMode::Carousel {
-            let x = 12.0 + index as f64 * (120.0 + 8.0);
-            return NSRect::new(NSPoint::new(x, 8.0), NSSize::new(120.0, 148.0));
+            let x = 12.0 + index as f64 * (CAROUSEL_CELL_W + CAROUSEL_SPACING);
+            return NSRect::new(NSPoint::new(x, 14.0), NSSize::new(CAROUSEL_CELL_W, CAROUSEL_CELL_H));
         }
         let cols = columns_for(width).max(1);
+        let spacing = grid_cell_spacing(width);
         let col = index % cols;
         let row = index / cols;
         NSRect::new(
-            NSPoint::new(16.0 + col as f64 * (CELL_W + SPACING), 16.0 + row as f64 * (CELL_H + SPACING)),
+            NSPoint::new(16.0 + col as f64 * (CELL_W + spacing), 16.0 + row as f64 * (CELL_H + SPACING)),
             NSSize::new(CELL_W, CELL_H),
         )
     }
@@ -955,29 +1179,8 @@ impl GridView {
     fn scroll_selection_into_view(&self) {
         let index = unsafe { (*app_state()).selected };
         let Some(index) = index else { return };
-        let Some(superview) = (unsafe { self.superview() }) else { return };
-        let Ok(scroll_view) = superview.downcast::<NSScrollView>() else { return };
         let cell = self.cell_rect(index);
-        let visible = scroll_view.visibleRect();
-        let origin = scroll_view.bounds().origin;
-        let epsilon = 0.5;
-        let view_mode_carousel = unsafe { (*app_state()).view_mode } == ViewMode::Carousel;
-        let target: Option<NSPoint> = if view_mode_carousel {
-            if cell.origin.x < visible.origin.x + epsilon {
-                Some(NSPoint::new(cell.origin.x, origin.y))
-            } else if cell.origin.x + cell.size.width > visible.origin.x + visible.size.width - epsilon {
-                Some(NSPoint::new(cell.origin.x + cell.size.width - visible.size.width, origin.y))
-            } else { None }
-        } else if cell.origin.y < visible.origin.y + epsilon {
-            Some(NSPoint::new(origin.x, cell.origin.y))
-        } else if cell.origin.y + cell.size.height > visible.origin.y + visible.size.height - epsilon {
-            Some(NSPoint::new(origin.x, cell.origin.y + cell.size.height - visible.size.height))
-        } else { None };
-        if let Some(point) = target {
-            let clip = scroll_view.contentView();
-            clip.scrollToPoint(point);
-            scroll_view.reflectScrolledClipView(&clip);
-        }
+        unsafe { self.scrollRectToVisible(cell); };
     }
 }
 
@@ -1038,8 +1241,12 @@ define_class!(
                 )
             };
             let view_mode_carousel = unsafe { (*app_state()).view_mode } == ViewMode::Carousel;
-            let root_view = NSView::new(objc2::MainThreadMarker::new().unwrap());
-            let preview_nsview = NSView::new(objc2::MainThreadMarker::new().unwrap());
+            let root_view: Retained<PreviewRegionView> = unsafe {
+                objc2::msg_send![PreviewRegionView::alloc(objc2::MainThreadMarker::new().unwrap()), initWithFrame: frame]
+            };
+            let preview_nsview: Retained<PreviewRegionView> = unsafe {
+                objc2::msg_send![PreviewRegionView::alloc(objc2::MainThreadMarker::new().unwrap()), initWithFrame: frame]
+            };
             let preview_image = NSImageView::new(objc2::MainThreadMarker::new().unwrap());
             preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
             preview_image.setImageAlignment(objc2_app_kit::NSImageAlignment::AlignCenter);
@@ -1051,32 +1258,19 @@ define_class!(
             let grid: Retained<GridView> = unsafe {
                 objc2::msg_send![GridView::alloc(objc2::MainThreadMarker::new().unwrap()), initWithFrame: frame]
             };
+            window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+            root_view.setWantsLayer(true);
+            preview_nsview.setWantsLayer(true);
+            divider.setBoxType(objc2_app_kit::NSBoxType::Separator);
+            scroll.setDrawsBackground(true);
+            scroll.setBackgroundColor(&NSColor::windowBackgroundColor());
             root_view.addSubview(&*preview_nsview);
             root_view.addSubview(&*divider);
             root_view.addSubview(&*scroll);
-            // Fallback absolute layout (Swift uses constraints); frames are
-            // positioned for the current mode and updated on mode switch.
             layout_carousel(&root_view, &preview_nsview, &preview_image, &divider, &scroll, frame, view_mode_carousel);
-            let doc_size = content_size(frame_size.width, item_count, view_mode_carousel);
+            let doc_size = content_size(frame_size.width, frame_size.height, item_count, view_mode_carousel);
             grid.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), doc_size));
             grid.setNeedsDisplay(true);
-            {
-                let state = unsafe { &*app_state() };
-                if let Some(item) = state.selected.and_then(|i| state.items.get(i)) {
-                    if item.kind == MediaKind::Movie {
-                        request_quicklook_thumbnail(item.path.clone());
-                    }
-                    if let Some(img) = image_for(item).or_else(|| cached_thumbnail(&item.path)) {
-                        preview_image.setImage(Some(&*img));
-                    } else if let Some(img) = system_image(match item.kind {
-                        MediaKind::Directory => "folder",
-                        MediaKind::Image => "photo",
-                        MediaKind::Movie => "film",
-                    }) {
-                        preview_image.setImage(Some(&*img));
-                    }
-                }
-            }
             scroll.setDocumentView(Some(&*grid));
             window.setContentView(Some(&*root_view));
             *window_refs() = Some(WindowRefs {
@@ -1087,6 +1281,7 @@ define_class!(
                 divider: Retained::into_raw(divider.clone()) as *mut NSBox,
                 preview_image: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
             });
+            update_carousel_preview();
             install_main_menu(self, view_mode_carousel, &grid);
             if *DEBUG_ENTER.get_or_init(|| false) {
                 open_selected();
@@ -1095,8 +1290,12 @@ define_class!(
             if *SELF_TEST.get_or_init(|| false) {
                 start_self_test();
             }
+            if let Some(Some(dir)) = DUMP_VISUAL.get() {
+                start_visual_dump(dir.clone());
+            } else {
+                window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
+            }
             window.setTitle(&NSString::from_str(&title));
-            window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
             window.center();
             window.makeKeyAndOrderFront(None);
             let _ = window.makeFirstResponder(Some(&*grid));
@@ -1113,10 +1312,9 @@ static SELF_TEST_TRASH_TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLoc
 
 #[allow(dead_code)]
 fn send_shift_mouse_via_app(app: &NSApplication, point: objc2_foundation::NSPoint) {
-    let window = match app.keyWindow() {
-        Some(w) => w,
-        None => return,
-    };
+    let refs = window_refs();
+    let Some(refs) = refs.as_ref() else { return };
+    let window = unsafe { &*refs.window };
     let flags = objc2_app_kit::NSEventModifierFlags::Shift;
     let event = unsafe {
         objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
@@ -1135,12 +1333,13 @@ fn send_shift_mouse_via_app(app: &NSApplication, point: objc2_foundation::NSPoin
         )
     };
     if let Some(event) = event {
-        app.sendEvent(&event);
+        window.sendEvent(&event);
     }
 }
 
 fn send_key_command(app: &NSApplication, key_code: u16) {
-    let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or(0);
+    let refs = window_refs();
+    let window_number = refs.as_ref().map(|r| unsafe { (*r.window).windowNumber() }).unwrap_or(0);
     let event = unsafe {
         objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             objc2_app_kit::NSEventType::KeyDown,
@@ -1164,11 +1363,9 @@ fn send_key_command(app: &NSApplication, key_code: u16) {
 }
 
 fn send_mouse_via_app(app: &NSApplication, count: objc2_foundation::NSInteger) {
-    let window = match app.keyWindow() {
-        Some(w) => w,
-        None => return,
-    };
-    let width = window.frame().size.width.max(400.0);
+    let refs = window_refs();
+    let Some(refs) = refs.as_ref() else { return };
+    let window = unsafe { &*refs.window };
     let dir_index = unsafe { (*app_state()).items.iter().position(|i| i.kind == MediaKind::Directory) };
     let index = dir_index.unwrap_or(0);
     let point = objc2_foundation::NSPoint::new(12.0 + index as f64 * 128.0 + 60.0, 92.0);
@@ -1190,7 +1387,7 @@ fn send_mouse_via_app(app: &NSApplication, count: objc2_foundation::NSInteger) {
         )
     };
     if let Some(event) = event {
-        app.sendEvent(&event);
+        window.sendEvent(&event);
     }
 }
 
@@ -1254,8 +1451,6 @@ fn start_self_test() {
                     send_mouse_via_app(&app, 2);
                 }
                 3 => {
-                    // Space opens the QL panel (owned by the run loop).
-                    send_key_via_app(&app, 49, false);
                     let entered = match SELF_TEST_ROOT.get() {
                         Some(start) => { let cur = unsafe { &*app_state() }.root.clone(); cur != *start }
                         None => false,
@@ -1265,9 +1460,7 @@ fn start_self_test() {
                     send_key_via_app(&app, 123, true);
                 }
                 4 => {
-                    // Space again: closes the QL panel and returns
-                    // keyboard focus for the trash/undo steps.
-                    send_key_via_app(&app, 49, false);
+                    // History back already sent
                 }
                 5 => {
                     let image = unsafe {
@@ -1321,6 +1514,108 @@ fn start_self_test() {
 
 static SELF_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static DUMP_VISUAL: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+static VISUAL_DUMP_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn capture_screenshot(window: &NSWindow, path: &std::path::Path) {
+    let Some(content) = (unsafe { window.contentView() }) else { return };
+    unsafe {
+        window.layoutIfNeeded();
+        content.layoutSubtreeIfNeeded();
+    }
+    let bounds = content.bounds();
+    let rep: Option<Retained<objc2_app_kit::NSBitmapImageRep>> = unsafe {
+        let ptr: *mut objc2_app_kit::NSBitmapImageRep =
+            objc2::msg_send![&*content, bitmapImageRepForCachingDisplayInRect: bounds];
+        Retained::retain(ptr)
+    };
+    let Some(rep) = rep else { return };
+    unsafe {
+        let _: () = objc2::msg_send![&*content, cacheDisplayInRect: bounds, toBitmapImageRep: &*rep];
+        let empty_dict = objc2_foundation::NSDictionary::<objc2_foundation::NSString, objc2::runtime::NSObject>::new();
+        let data: Option<Retained<objc2_foundation::NSData>> = {
+            let ptr: *mut objc2_foundation::NSData = objc2::msg_send![
+                &*rep,
+                representationUsingType: 4usize,
+                properties: &*empty_dict
+            ];
+            Retained::retain(ptr)
+        };
+        if let Some(data) = data {
+            let bytes = unsafe { data.as_bytes_unchecked() };
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, bytes);
+        }
+    }
+}
+
+fn start_visual_dump(out_dir: PathBuf) {
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    let block = unsafe {
+        block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
+            let (window_ptr, grid_ptr) = {
+                let refs = window_refs();
+                let Some(refs) = refs.as_ref() else { return };
+                (refs.window, refs.grid)
+            };
+            let window = unsafe { &*window_ptr };
+            let grid = unsafe { &*grid_ptr };
+            let step = VISUAL_DUMP_STEP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match step {
+                0 => {
+                    unsafe { (*app_state()).view_mode = ViewMode::Carousel };
+                    apply_view_mode_layout();
+                    capture_screenshot(window, &out_dir.join("step_0_carousel_initial.png"));
+                    send_key_via_app(&app, 124, false);
+                }
+                1 => {
+                    capture_screenshot(window, &out_dir.join("step_1_carousel_right.png"));
+                    send_key_via_app(&app, 124, false);
+                }
+                2 => {
+                    capture_screenshot(window, &out_dir.join("step_2_carousel_red.png"));
+                    unsafe { (*app_state()).view_mode = ViewMode::Grid };
+                    apply_view_mode_layout();
+                }
+                3 => {
+                    capture_screenshot(window, &out_dir.join("step_3_grid_mode.png"));
+                    send_key_via_app(&app, 125, false);
+                }
+                4 => {
+                    capture_screenshot(window, &out_dir.join("step_4_grid_down.png"));
+                    send_key_via_app(&app, 123, false);
+                }
+                5 => {
+                    capture_screenshot(window, &out_dir.join("step_5_grid_left.png"));
+                    unsafe { (*app_state()).view_mode = ViewMode::Carousel };
+                    apply_view_mode_layout();
+                }
+                6 => {
+                    capture_screenshot(window, &out_dir.join("step_6_back_to_carousel.png"));
+                    send_key_via_app(&app, 123, false);
+                    send_key_via_app(&app, 123, false);
+                    send_key_via_app(&app, 123, false);
+                }
+                7 => {
+                    send_key_via_app(&app, 36, false);
+                }
+                8 => {
+                    capture_screenshot(window, &out_dir.join("step_7_entered_subdir.png"));
+                    send_key_via_app(&app, 123, true);
+                }
+                9 => {
+                    capture_screenshot(window, &out_dir.join("step_8_history_back.png"));
+                    std::process::exit(0);
+                }
+                _ => {}
+            }
+        })
+    };
+    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.2, true, &block) };
+}
 
 fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -1328,12 +1623,26 @@ fn main() {
         eprintln!("view: panic: {info}\n{backtrace}");
         std::process::abort();
     }));
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let self_test = args.iter().any(|a| a == "--self-test");
-    let debug_enter = args.iter().any(|a| a == "--debug-enter");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter").collect();
-    SELF_TEST.set(self_test).ok();
-    DEBUG_ENTER.set(debug_enter).ok();
+    let mut dump_visual: Option<PathBuf> = None;
+    let mut args: Vec<String> = Vec::new();
+    let mut i = 1;
+    let raw_args: Vec<String> = std::env::args().collect();
+    while i < raw_args.len() {
+        if raw_args[i] == "--dump-visual" && i + 1 < raw_args.len() {
+            dump_visual = Some(PathBuf::from(&raw_args[i + 1]));
+            i += 2;
+        } else if raw_args[i] == "--self-test" {
+            SELF_TEST.set(true).ok();
+            i += 1;
+        } else if raw_args[i] == "--debug-enter" {
+            DEBUG_ENTER.set(true).ok();
+            i += 1;
+        } else {
+            args.push(raw_args[i].clone());
+            i += 1;
+        }
+    }
+    DUMP_VISUAL.set(dump_visual.clone()).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,
@@ -1346,13 +1655,17 @@ fn main() {
         let state = unsafe { &mut *app_state() };
         state.root = root.clone();
         state.mode = mode;
-        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-        let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode"))
-            .map(|s| s.to_string());
-        state.view_mode = match saved.as_deref() {
-            Some("grid") => ViewMode::Grid,
-            _ => ViewMode::Carousel,
-        };
+        if dump_visual.is_none() {
+            let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+            let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode"))
+                .map(|s| s.to_string());
+            state.view_mode = match saved.as_deref() {
+                Some("grid") => ViewMode::Grid,
+                _ => ViewMode::Carousel,
+            };
+        } else {
+            state.view_mode = ViewMode::Carousel;
+        }
         state.items = load_listing(&root, mode);
         state.selected = if state.items.is_empty() { None } else { Some(0) };
     }
@@ -1361,8 +1674,8 @@ fn main() {
         extern "C" fn handle_signal(_signal: libc::c_int) {
             std::process::exit(0);
         }
-        libc::signal(libc::SIGINT, handle_signal as usize as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as usize as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handle_signal as *const () as usize as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_signal as *const () as usize as libc::sighandler_t);
     }
 
     let mtm = objc2::MainThreadMarker::new().unwrap();
