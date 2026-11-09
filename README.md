@@ -1,6 +1,6 @@
 # view
 
-A native macOS browser for images and videos. By default it opens one folder at a time: subfolders and supported images and videos in a thumbnail grid, with folders first and files ordered by descending size. Double-click or press Return on a folder to enter it, and Backspace or Cmd+Up to go back up. `--recursive` instead flattens an entire tree into a single grid.
+A native macOS browser for images and videos, written in Rust on AppKit. It opens one folder at a time: subfolders and supported images and videos in a thumbnail grid, folders first, then files by descending size. Double-click or press Return on a folder to enter it; Backspace goes up. `--recursive` flattens a whole tree into one grid.
 
 ```sh
 cargo build --profile dist --bin app --features app
@@ -12,38 +12,38 @@ cargo build --profile dist --bin app --features app
 
 | Interaction | Behavior |
 | --- | --- |
-| Launch with directory | Browse that folder's subfolders and media |
-| Double-click or Return on a folder | Enter the folder (browse mode) |
-| Double-click or Return on media | Toggle native macOS Quick Look |
-| Backspace or Cmd+Up | Go to the enclosing folder (browse mode) |
+| Launch with a directory | Browse that folder |
+| Double-click or Return | Enter a folder (browse mode) |
 | Click thumbnail | Select item |
-| Shift+Click | Select a range of items |
-| Arrow keys | Navigate the grid |
-| Cmd+Delete or Ctrl+Delete | Move the selection to Trash |
-| Delete (in `--recursive` mode) | Move the selection to Trash |
-| Cmd+Z | Undo Move to Trash (restore the files) |
-| Cmd+Shift+Z | Redo Move to Trash (trash them again) |
-| Space | Toggle native macOS Quick Look |
-| Escape | Close Quick Look, when open |
+| Drag a thumbnail | Drag the file out of the app |
+| Right-click | Context menu (Open, Show in Finder, Copy Path, Move to Trash, Undo, Redo) |
+| Arrow keys | Move selection; grid/carousel window keeps the selection visible |
+| Space | Toggle Quick Look preview |
+| Backspace | Up one folder (browse mode) |
+| Cmd+Backspace or Ctrl+Backspace | Trash the selection |
+| Cmd+Z / Cmd+Shift+Z | Undo / redo Move to Trash |
+| Shift+Left / Shift+Right | Back / forward through history |
 | Cmd+Q | Quit |
 
-Folders sort first by natural name. Files sort by descending size, with files of unknown size and equal size falling back to natural name order. `--recursive` restores the flattened grid: every image and video beneath the root, in natural relative-path order, where Delete trashes the selection as in earlier versions.
+Folders sort first by natural name. Files sort by descending size; unknown or equal sizes fall back to natural name order. `--recursive` lists every image and video beneath the root in natural relative-path order.
 
-Normal trackpad and mouse scrolling and window resizing work. Quick Look handles image display and video playback, zooming, and adjacent-item navigation. If a folder has no images or videos, an empty state shows the folder path and how to go up. In browse mode, Backspace closes Quick Look while the panel is key.
+Quick Look handles image display and video playback, with adjacent-item navigation. Without a directory the launcher opens the current directory, and an unknown option exits with a one-line `view: ...` error. `View.app` can be rebuilt with `scripts/package-app.sh`; set `VIEW_APP` to point the launcher at another bundle.
 
-Without a directory, the launcher opens the current directory. It expects `View.app` in the repository; set `VIEW_APP` to use another app bundle. Trashing plays the system trash sound. `view --help` prints usage.
+## Scope
 
-## Non-goals
-
-Search, tagging, libraries, editing, custom video playback, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope. The only destructive operation is moving a file or folder to Trash, which follows Finder semantics and is recoverable.
+Search, tagging, libraries, editing, custom video playback, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope.
 
 ## Layout
 
 - `src/lib.rs`: discovery, catalog, thumbnails, trash, preview session, launch options. See [docs/architecture.md](docs/architecture.md).
-- `src/bin/app.rs`: AppKit window, grid, Quick Look panel.
-- `src/bin/bench.rs`: benchmark harness (release-profile baselines). See [docs/performance.md](docs/performance.md).
-- `tests/`: integration + UI-parity suites. See `PARITY.md`.
+- `src/bin/app.rs`: the AppKit window, grid, Quick Look panel, menus, drag-out.
+- `src/bin/bench.rs`: benchmark harness. See [docs/performance.md](docs/performance.md).
+- `tests/`: integration and UI-parity suites.
 - `scripts/package-app.sh`: packages `View.app` from a dist build.
 - `Info.plist`: bundle metadata.
 
 Build with `cargo build --profile dist --bin app --features app`, test with `cargo test --profile dist`, package with `sh scripts/package-app.sh`.
+
+## Licensing
+
+See `LICENSE` if present; otherwise this personal project is provided as-is.
