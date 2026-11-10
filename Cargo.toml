@@ -12,7 +12,7 @@ path = "src/bin/app.rs"
 required-features = ["app"]
 
 [features]
-app = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-graphics", "dep:block2", "dep:dispatch2", "dep:objc2-quick-look-thumbnailing", "dep:objc2-quick-look-ui", "dep:objc2-quick-look", "dep:objc2-uniform-type-identifiers"]
+app = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:objc2-core-graphics", "dep:objc2-av-kit", "dep:objc2-av-foundation", "dep:block2", "dep:dispatch2", "dep:objc2-quick-look-thumbnailing", "dep:objc2-quick-look-ui", "dep:objc2-quick-look", "dep:objc2-uniform-type-identifiers"]
 benchmark = ["app", "dep:rustybench"]
 
 [dependencies]
@@ -20,8 +20,10 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 libc = "0.2"
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSGridView", "NSStackView", "NSCell", "NSBezierPath", "NSParagraphStyle", "NSText"] }
-objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification", "NSUserDefaults", "NSValue", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification", "NSUserDefaults", "NSValue", "NSProcessInfo", "NSKeyValueObserving"] }
 objc2-core-graphics = { version = "0.3", optional = true }
+objc2-av-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "AVPlayerView", "objc2-app-kit", "objc2-av-foundation"] }
+objc2-av-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "AVAsset", "AVPlayer", "AVPlayerItem"] }
 block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "0.3", optional = true }
 objc2-quick-look-thumbnailing = { version = "0.3", optional = true }

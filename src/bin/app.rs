@@ -9,14 +9,17 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::NSObject;
+use objc2::runtime::{AnyObject, NSObject};
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont, NSImage,
     NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
+use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer, AVPlayerItem, AVPlayerItemStatus};
+use objc2_av_kit::AVPlayerView;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSArray, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSArray, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
@@ -109,6 +112,7 @@ struct WindowRefs {
     divider: *mut NSBox,
     preview_image: *mut NSImageView,
     preview_label: *mut NSTextField,
+    player: *mut AVPlayerView,
 }
 unsafe impl Send for WindowRefs {}
 unsafe impl Sync for WindowRefs {}
@@ -117,6 +121,208 @@ static WINDOW_REFS: std::sync::OnceLock<std::sync::Mutex<Option<WindowRefs>>> = 
 
 fn window_refs() -> std::sync::MutexGuard<'static, Option<WindowRefs>> {
     WINDOW_REFS.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlayerStatus {
+    Loading,
+    Ready,
+    Failed,
+}
+
+struct PlayerStore {
+    view: Retained<PreviewPlayerView>,
+    player: Retained<AVPlayer>,
+    observer: Retained<PlayerItemObserver>,
+    poster: *mut NSImageView,
+    item: Option<Retained<AVPlayerItem>>,
+    item_path: Option<PathBuf>,
+    status: PlayerStatus,
+    autoplay: bool,
+}
+
+static PLAYER_STORE: std::sync::OnceLock<SyncMutex<Option<PlayerStore>>> = std::sync::OnceLock::new();
+
+struct SyncMutex<T>(std::cell::UnsafeCell<std::sync::Mutex<T>>);
+
+unsafe impl<T> Send for SyncMutex<T> {}
+unsafe impl<T> Sync for SyncMutex<T> {}
+
+fn player_store() -> std::sync::MutexGuard<'static, Option<PlayerStore>> {
+    let cell = PLAYER_STORE.get_or_init(|| SyncMutex(std::cell::UnsafeCell::new(std::sync::Mutex::new(None))));
+    // SAFETY: player state is created and used only on the main thread.
+    unsafe { &*cell.0.get() }.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ()]
+    struct PlayerItemObserver;
+
+    impl PlayerItemObserver {
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            object: Option<&AnyObject>,
+            _change: Option<&NSDictionary>,
+            _context: *mut core::ffi::c_void,
+        ) {
+            let object = object.map(|observed| observed as *const AnyObject);
+            player_item_status_changed(object);
+        }
+    }
+);
+
+unsafe impl NSObjectProtocol for PlayerItemObserver {}
+
+fn update_player_visibility(store: &mut PlayerStore) {
+    let visible = store.item_path.is_some() && store.status == PlayerStatus::Ready;
+    store.view.setHidden(!visible);
+    unsafe { (*store.poster).setHidden(visible) };
+}
+
+fn player_item_status_changed(object: Option<*const AnyObject>) {
+    if objc2::MainThreadMarker::new().is_none() {
+        let object = object.map(|observed| observed as usize);
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            player_item_status_changed(object.map(|observed| observed as *const AnyObject));
+        });
+        return;
+    }
+    let mut store = player_store();
+    let Some(store) = store.as_mut() else { return };
+    let Some(item) = store.item.as_ref() else { return };
+    if object != Some(Retained::as_ptr(item) as *const AnyObject) {
+        return;
+    }
+    store.status = match unsafe { item.status() } {
+        AVPlayerItemStatus::Unknown => PlayerStatus::Loading,
+        AVPlayerItemStatus::ReadyToPlay => PlayerStatus::Ready,
+        AVPlayerItemStatus::Failed => PlayerStatus::Failed,
+        _ => PlayerStatus::Loading,
+    };
+    update_player_visibility(store);
+    if store.status == PlayerStatus::Ready && store.autoplay {
+        store.autoplay = false;
+        unsafe { store.player.play() };
+    }
+}
+
+fn release_player() {
+    let (player, observer, old_item) = {
+        let mut store = player_store();
+        let Some(store) = store.as_mut() else { return };
+        store.item_path = None;
+        store.status = PlayerStatus::Loading;
+        store.autoplay = false;
+        (store.player.clone(), store.observer.clone(), store.item.take())
+    };
+    if let Some(old_item) = old_item {
+        unsafe {
+            let key = NSString::from_str("status");
+            old_item.as_super().removeObserver_forKeyPath_context(observer.as_super(), &key, core::ptr::null_mut());
+        }
+    }
+    unsafe { player.replaceCurrentItemWithPlayerItem(None) };
+    let mut store = player_store();
+    if let Some(store) = store.as_mut() {
+        update_player_visibility(store);
+    }
+}
+
+fn load_player_item(path: &std::path::Path) {
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    let (player, observer, old_item) = {
+        let mut store = player_store();
+        let Some(store) = store.as_mut() else { return };
+        if store.item_path.as_deref() == Some(path) {
+            return;
+        }
+        (store.player.clone(), store.observer.clone(), store.item.take())
+    };
+    if let Some(old_item) = old_item {
+        unsafe {
+            let key = NSString::from_str("status");
+            old_item.as_super().removeObserver_forKeyPath_context(observer.as_super(), &key, core::ptr::null_mut());
+        }
+    }
+    let url = url_from_path(path);
+    let item = unsafe { AVPlayerItem::playerItemWithURL(&url, mtm) };
+    unsafe {
+        let key = NSString::from_str("status");
+        item.as_super().addObserver_forKeyPath_options_context(
+            observer.as_super(),
+            &key,
+            NSKeyValueObservingOptions::New,
+            core::ptr::null_mut(),
+        );
+    }
+    unsafe { player.replaceCurrentItemWithPlayerItem(Some(&item)) };
+    let mut store = player_store();
+    let Some(store) = store.as_mut() else { return };
+    store.item = Some(item);
+    store.item_path = Some(path.to_path_buf());
+    store.autoplay = false;
+    store.status = match unsafe { store.item.as_ref().unwrap().status() } {
+        AVPlayerItemStatus::Unknown => PlayerStatus::Loading,
+        AVPlayerItemStatus::ReadyToPlay => PlayerStatus::Ready,
+        AVPlayerItemStatus::Failed => PlayerStatus::Failed,
+        _ => PlayerStatus::Loading,
+    };
+    update_player_visibility(store);
+}
+
+fn start_playback() {
+    let mut store = player_store();
+    let Some(store) = store.as_mut() else { return };
+    if store.item_path.is_none() {
+        return;
+    }
+    if store.status == PlayerStatus::Ready {
+        unsafe { store.player.play() };
+    } else {
+        store.autoplay = true;
+    }
+}
+
+fn toggle_inline_playback() {
+    let mut store = player_store();
+    let Some(store) = store.as_mut() else { return };
+    match store.status {
+        PlayerStatus::Ready => {
+            if unsafe { store.player.rate() } == 0.0 {
+                unsafe { store.player.play() };
+            } else {
+                unsafe { store.player.pause() };
+            }
+        }
+        PlayerStatus::Failed => {
+            let _ = store;
+            quicklook_selected();
+        }
+        PlayerStatus::Loading => store.autoplay = true,
+    }
+}
+
+fn space_pressed() {
+    let (view_mode, item) = {
+        let state = unsafe { &*app_state() };
+        (state.view_mode, focused_item(state))
+    };
+    let Some(item) = item else { return };
+    if item.kind != MediaKind::Movie {
+        quicklook_selected();
+        return;
+    }
+    if view_mode == ViewMode::Grid {
+        unsafe { &mut *app_state() }.view_mode = ViewMode::Carousel;
+        apply_view_mode_layout();
+        start_playback();
+        return;
+    }
+    toggle_inline_playback();
 }
 
 fn app_state() -> *mut AppState {
@@ -216,6 +422,7 @@ fn layout_carousel(
     _root: &NSView,
     preview: &NSView,
     image: &NSImageView,
+    player: &AVPlayerView,
     divider: &NSBox,
     scroll: &NSScrollView,
     frame: NSRect,
@@ -230,7 +437,9 @@ fn layout_carousel(
         scroll.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(frame.size.width, strip_h)));
         divider.setFrame(NSRect::new(NSPoint::new(0.0, strip_h), NSSize::new(frame.size.width, 1.0)));
         preview.setFrame(NSRect::new(NSPoint::new(0.0, strip_h + 1.0), NSSize::new(frame.size.width, (preview_h - 1.0).max(0.0))));
-        image.setFrame(NSRect::new(NSPoint::ZERO, preview.bounds().size));
+        let preview_size = preview.bounds().size;
+        image.setFrame(NSRect::new(NSPoint::ZERO, preview_size));
+        player.setFrame(NSRect::new(NSPoint::ZERO, preview_size));
     } else {
         preview.setHidden(true);
         divider.setHidden(true);
@@ -265,15 +474,18 @@ fn update_carousel_preview() {
     let Some(index) = state.selected() else {
         preview_image.setImage(None);
         preview_label.setHidden(true);
+        release_player();
         return;
     };
     let Some(item) = state.items().get(index) else {
         preview_image.setImage(None);
         preview_label.setHidden(true);
+        release_player();
         return;
     };
     let preview_bounds = preview.bounds();
     if item.kind == MediaKind::Directory {
+        release_player();
         let items = view_core::list_browser(&item.path).unwrap_or_default();
         let count = items.len();
         let size: u64 = items.iter().filter_map(|i| i.file_size).map(|s| s.max(0) as u64).sum();
@@ -294,36 +506,47 @@ fn update_carousel_preview() {
             preview_image.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(icon_size, icon_size)));
         }
         preview_label.setFrame(NSRect::new(NSPoint::new(16.0, 8.0), NSSize::new((preview_bounds.size.width - 32.0).max(0.0), label_h)));
-    } else {
+    } else if item.kind == MediaKind::Movie {
         preview_label.setHidden(true);
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
         let pixels = pixel_limit(preview, preview_bounds);
-        let image = if item.kind == MediaKind::Movie {
-            cached_sized(&item.path, pixels, None, None)
-        } else {
-            display_image(&item.path, pixels, item.file_size, item.modification)
-        };
+        let image = cached_sized(&item.path, pixels, None, None);
         if let Some(img) = image {
             let fitted = aspect_fit(img.size(), preview_bounds);
             preview_image.setFrame(fitted);
             preview_image.setImage(Some(&*img));
         } else {
             preview_image.setImage(None);
-            if item.kind == MediaKind::Movie {
-                request_quicklook_thumbnail_sized(item.path.clone(), pixels);
-            }
+            request_quicklook_thumbnail_sized(item.path.clone(), pixels);
+        }
+        load_player_item(&item.path);
+    } else {
+        release_player();
+        preview_label.setHidden(true);
+        preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+        let pixels = pixel_limit(preview, preview_bounds);
+        let image = display_image(&item.path, pixels, item.file_size, item.modification);
+        if let Some(img) = image {
+            let fitted = aspect_fit(img.size(), preview_bounds);
+            preview_image.setFrame(fitted);
+            preview_image.setImage(Some(&*img));
+        } else {
+            preview_image.setImage(None);
         }
     }
     preview.setNeedsDisplay(true);
 }
 
 fn apply_view_mode_layout() {
-    let (window_ptr, scroll_ptr, grid_ptr, preview_ptr, preview_image_ptr, divider_ptr) = {
+    let (window_ptr, scroll_ptr, grid_ptr, preview_ptr, preview_image_ptr, divider_ptr, player_ptr) = {
         let refs = window_refs();
         let Some(refs) = refs.as_ref() else { return };
-        (refs.window, refs.scroll, refs.grid, refs.preview, refs.preview_image, refs.divider)
+        (refs.window, refs.scroll, refs.grid, refs.preview, refs.preview_image, refs.divider, refs.player)
     };
     let carousel = unsafe { (*app_state()).view_mode } == ViewMode::Carousel;
+    if !carousel {
+        release_player();
+    }
     unsafe {
         let window = &*window_ptr;
         let scroll = &*scroll_ptr;
@@ -331,9 +554,10 @@ fn apply_view_mode_layout() {
         let preview = &*preview_ptr;
         let preview_image = &*preview_image_ptr;
         let divider = &*divider_ptr;
+        let player = &*player_ptr;
         let Some(root) = window.contentView() else { return };
         let bounds = root.bounds();
-        layout_carousel(&root, preview, preview_image, divider, scroll, bounds, carousel);
+        layout_carousel(&root, preview, preview_image, player, divider, scroll, bounds, carousel);
         scroll.setHasVerticalScroller(!carousel);
         scroll.setHasHorizontalScroller(carousel);
         let viewport = scroll.contentView().bounds().size;
@@ -1191,6 +1415,28 @@ define_class!(
     }
 );
 
+define_class!(
+    #[unsafe(super(AVPlayerView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ()]
+    struct PreviewPlayerView;
+
+    impl PreviewPlayerView {
+        #[unsafe(method_id(initWithFrame:))]
+        fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
+            let this = this.set_ivars(());
+            unsafe { objc2::msg_send![super(this), initWithFrame: frame] }
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            false
+        }
+    }
+);
+
+unsafe impl NSObjectProtocol for PreviewPlayerView {}
+
 #[derive(Default)]
 struct GridInteraction {
     deferred_click: std::cell::Cell<Option<usize>>,
@@ -1367,7 +1613,7 @@ define_class!(
                 return;
             }
             if code == 49 && !command && !control && !shift {
-                quicklook_selected();
+                space_pressed();
                 return;
             }
             if code == 6 && command {
@@ -1829,6 +2075,27 @@ define_class!(
             unsafe { let _: () = objc2::msg_send![&*preview_label, setUsesSingleLineMode: false]; }
             unsafe { let _: () = objc2::msg_send![&*preview_label, setMaximumNumberOfLines: 0i64]; }
             preview_nsview.addSubview(&*preview_label);
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let player_view: Retained<PreviewPlayerView> = unsafe {
+                objc2::msg_send![PreviewPlayerView::alloc(mtm), initWithFrame: NSRect::new(NSPoint::ZERO, NSSize::ZERO)]
+            };
+            let player = unsafe { AVPlayer::playerWithPlayerItem(None, mtm) };
+            unsafe {
+                player_view.setVideoGravity(AVLayerVideoGravityResizeAspect.unwrap());
+                player_view.setPlayer(Some(&player));
+            }
+            let player_observer: Retained<PlayerItemObserver> = unsafe { objc2::msg_send![PlayerItemObserver::class(), new] };
+            *player_store() = Some(PlayerStore {
+                view: player_view.clone(),
+                player,
+                observer: player_observer,
+                poster: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
+                item: None,
+                item_path: None,
+                status: PlayerStatus::Loading,
+                autoplay: false,
+            });
+            preview_nsview.addSubview(&*player_view);
             let divider = NSBox::new(objc2::MainThreadMarker::new().unwrap());
             let scroll = NSScrollView::new(objc2::MainThreadMarker::new().unwrap());
             scroll.setHasVerticalScroller(!view_mode_carousel);
@@ -1845,7 +2112,7 @@ define_class!(
             root_view.addSubview(&*preview_nsview);
             root_view.addSubview(&*divider);
             root_view.addSubview(&*scroll);
-            layout_carousel(&root_view, &preview_nsview, &preview_image, &divider, &scroll, frame, view_mode_carousel);
+            layout_carousel(&root_view, &preview_nsview, &preview_image, &player_view, &divider, &scroll, frame, view_mode_carousel);
             let doc_size = content_size(frame_size.width, frame_size.height, item_count, view_mode_carousel);
             grid.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), doc_size));
             grid.setNeedsDisplay(true);
@@ -1860,6 +2127,7 @@ define_class!(
                 divider: Retained::into_raw(divider.clone()) as *mut NSBox,
                 preview_image: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
                 preview_label: Retained::into_raw(preview_label.clone()) as *mut NSTextField,
+                player: Retained::into_raw(player_view.clone()) as *mut AVPlayerView,
             });
             update_carousel_preview();
             install_main_menu(self, view_mode_carousel, &grid);
@@ -1869,6 +2137,9 @@ define_class!(
             }
             if *SELF_TEST.get_or_init(|| false) {
                 start_self_test();
+            }
+            if *PLAYER_TEST.get_or_init(|| false) {
+                start_player_test();
             }
             if !*REGRESSION_TEST.get_or_init(|| false) && !*BENCHMARK_STARTUP.get_or_init(|| false) && !*BENCHMARK_MEMORY.get_or_init(|| false) && !benchmark_mode() {
                 window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
@@ -2345,6 +2616,95 @@ fn start_self_test() {
     unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.25, true, &block) };
 }
 
+fn start_player_test() {
+    PLAYER_TEST_START.set(std::time::Instant::now()).ok();
+    let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
+        run_player_test();
+    });
+    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &block) };
+}
+
+fn run_player_test() {
+    let started = PLAYER_TEST_START.get().copied().unwrap_or_else(std::time::Instant::now);
+    match PLAYER_TEST_STEP.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => {
+            let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
+            if item.kind != MediaKind::Movie {
+                assert!(started.elapsed().as_secs() < 10, "player test corpus must begin with a movie");
+                return;
+            }
+            let (ready, visible, rate) = {
+                let store = player_store();
+                let Some(store) = store.as_ref() else { return };
+                (store.status == PlayerStatus::Ready, !store.view.isHidden(), unsafe { store.player.rate() })
+            };
+            if !ready {
+                assert!(started.elapsed().as_secs() < 10, "inline player item did not become ready");
+                return;
+            }
+            assert!(visible, "inline player view is visible once the item is ready");
+            assert_eq!(rate, 0.0, "inline player starts paused");
+            let attached = {
+                let store = player_store();
+                let store = store.as_ref().expect("player store");
+                store.view.window().is_some() && unsafe { store.view.superview().is_some() }
+            };
+            assert!(attached, "inline player view is attached to the preview");
+            let focus = {
+                let store = player_store();
+                let store = store.as_ref().expect("player store");
+                store.view.acceptsFirstResponder()
+            };
+            assert!(!focus, "inline player view must not take keyboard focus");
+            PLAYER_TEST_STEP.store(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        1 => {
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(refs) = window_refs().as_ref() {
+                let window = unsafe { &*refs.window };
+                window.makeKeyAndOrderFront(None);
+                let _ = window.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 49, false);
+            let rate = {
+                let store = player_store();
+                unsafe { store.as_ref().expect("player store").player.rate() }
+            };
+            assert!(rate > 0.0, "space plays the inline video");
+            send_key_via_app(&app, 49, false);
+            let rate = {
+                let store = player_store();
+                unsafe { store.as_ref().expect("player store").player.rate() }
+            };
+            assert_eq!(rate, 0.0, "space pauses the inline video");
+            unsafe { &mut *app_state() }.view_mode = ViewMode::Grid;
+            apply_view_mode_layout();
+            let hidden = {
+                let store = player_store();
+                store.as_ref().expect("player store").view.isHidden()
+            };
+            assert!(hidden, "grid mode releases the inline player");
+            send_key_via_app(&app, 49, false);
+            PLAYER_TEST_STEP.store(2, std::sync::atomic::Ordering::SeqCst);
+        }
+        _ => {
+            let carousel = unsafe { (*app_state()).view_mode == ViewMode::Carousel };
+            assert!(carousel, "space in grid mode returns to carousel");
+            let rate = {
+                let store = player_store();
+                unsafe { store.as_ref().expect("player store").player.rate() }
+            };
+            if rate <= 0.0 {
+                assert!(started.elapsed().as_secs() < 10, "space in grid mode did not begin playback");
+                return;
+            }
+            eprintln!("player test: PASS");
+            std::process::exit(0);
+        }
+    }
+}
+
 fn resident_memory() -> std::io::Result<u64> {
     unsafe extern "C" {
         static mach_task_self_: u32;
@@ -2398,6 +2758,9 @@ static BENCHMARK_MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static BENCHMARK_STARTUP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static REGRESSION_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static PLAYER_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static PLAYER_TEST_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static PLAYER_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -2411,12 +2774,14 @@ fn main() {
     let benchmark_startup = args.iter().any(|a| a == "--benchmark-startup");
     let regression_test = args.iter().any(|a| a == "--regression-test");
     let debug_enter = args.iter().any(|a| a == "--debug-enter");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter" && a != "--regression-test" && a != "--benchmark-startup" && a != "--benchmark-memory").collect();
+    let player_test = args.iter().any(|a| a == "--player-test");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter" && a != "--regression-test" && a != "--benchmark-startup" && a != "--benchmark-memory" && a != "--player-test").collect();
     SELF_TEST.set(self_test).ok();
     DEBUG_ENTER.set(debug_enter).ok();
     REGRESSION_TEST.set(regression_test).ok();
     BENCHMARK_STARTUP.set(benchmark_startup).ok();
     BENCHMARK_MEMORY.set(benchmark_memory).ok();
+    PLAYER_TEST.set(player_test).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,

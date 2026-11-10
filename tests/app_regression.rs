@@ -36,3 +36,22 @@ fn app_interactions() {
     let stderr = std::fs::read_to_string(stderr_path).unwrap();
     assert!(status.success(), "app failed: {stderr}");
 }
+
+#[test]
+fn inline_video_playback() {
+    let root = support::TestDirectory::new("player");
+    std::fs::write(root.join("clip.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
+    let stderr_path = root.join(".stderr");
+    let stderr = std::fs::File::create(&stderr_path).unwrap();
+    let mut child = TestProcess(std::process::Command::new(env!("CARGO_BIN_EXE_app"))
+        .arg("--player-test").arg(&*root)
+        .stdout(std::process::Stdio::null()).stderr(stderr).spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() { break status; }
+        assert!(std::time::Instant::now() < deadline, "player test timed out");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(status.success(), "player test failed: {stderr}");
+}
