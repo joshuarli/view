@@ -9,17 +9,16 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyObject, NSObject};
+use objc2::runtime::NSObject;
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont, NSImage,
     NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer, AVPlayerItem, AVPlayerItemStatus};
+use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer};
 use objc2_av_kit::AVPlayerView;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSArray, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSArray, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
@@ -31,6 +30,9 @@ use view_core::{
     list_browser, scan_recursive, BrowserMode, Catalog, MediaKind, MediaItem, PreviewSession, TrashHistory,
     TrashService, TrashTransaction,
 };
+
+#[path = "app/player.rs"]
+mod player;
 
 const CELL_W: f64 = 160.0;
 const CELL_H: f64 = 180.0;
@@ -123,189 +125,6 @@ fn window_refs() -> std::sync::MutexGuard<'static, Option<WindowRefs>> {
     WINDOW_REFS.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PlayerStatus {
-    Loading,
-    Ready,
-    Failed,
-}
-
-struct PlayerStore {
-    view: Retained<PreviewPlayerView>,
-    player: Retained<AVPlayer>,
-    observer: Retained<PlayerItemObserver>,
-    poster: *mut NSImageView,
-    item: Option<Retained<AVPlayerItem>>,
-    item_path: Option<PathBuf>,
-    status: PlayerStatus,
-    autoplay: bool,
-}
-
-static PLAYER_STORE: std::sync::OnceLock<SyncMutex<Option<PlayerStore>>> = std::sync::OnceLock::new();
-
-struct SyncMutex<T>(std::cell::UnsafeCell<std::sync::Mutex<T>>);
-
-unsafe impl<T> Send for SyncMutex<T> {}
-unsafe impl<T> Sync for SyncMutex<T> {}
-
-fn player_store() -> std::sync::MutexGuard<'static, Option<PlayerStore>> {
-    let cell = PLAYER_STORE.get_or_init(|| SyncMutex(std::cell::UnsafeCell::new(std::sync::Mutex::new(None))));
-    // SAFETY: player state is created and used only on the main thread.
-    unsafe { &*cell.0.get() }.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = ()]
-    struct PlayerItemObserver;
-
-    impl PlayerItemObserver {
-        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
-        fn observe_value(
-            &self,
-            _key_path: Option<&NSString>,
-            object: Option<&AnyObject>,
-            _change: Option<&NSDictionary>,
-            _context: *mut core::ffi::c_void,
-        ) {
-            let object = object.map(|observed| observed as *const AnyObject);
-            player_item_status_changed(object);
-        }
-    }
-);
-
-unsafe impl NSObjectProtocol for PlayerItemObserver {}
-
-fn update_player_visibility(store: &mut PlayerStore) {
-    let visible = store.item_path.is_some() && store.status == PlayerStatus::Ready;
-    store.view.setHidden(!visible);
-    unsafe { (*store.poster).setHidden(visible) };
-}
-
-fn player_item_status_changed(object: Option<*const AnyObject>) {
-    if objc2::MainThreadMarker::new().is_none() {
-        let object = object.map(|observed| observed as usize);
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            player_item_status_changed(object.map(|observed| observed as *const AnyObject));
-        });
-        return;
-    }
-    let mut store = player_store();
-    let Some(store) = store.as_mut() else { return };
-    let Some(item) = store.item.as_ref() else { return };
-    if object != Some(Retained::as_ptr(item) as *const AnyObject) {
-        return;
-    }
-    store.status = match unsafe { item.status() } {
-        AVPlayerItemStatus::Unknown => PlayerStatus::Loading,
-        AVPlayerItemStatus::ReadyToPlay => PlayerStatus::Ready,
-        AVPlayerItemStatus::Failed => PlayerStatus::Failed,
-        _ => PlayerStatus::Loading,
-    };
-    update_player_visibility(store);
-    if store.status == PlayerStatus::Ready && store.autoplay {
-        store.autoplay = false;
-        unsafe { store.player.play() };
-    }
-}
-
-fn release_player() {
-    let (player, observer, old_item) = {
-        let mut store = player_store();
-        let Some(store) = store.as_mut() else { return };
-        store.item_path = None;
-        store.status = PlayerStatus::Loading;
-        store.autoplay = false;
-        (store.player.clone(), store.observer.clone(), store.item.take())
-    };
-    if let Some(old_item) = old_item {
-        unsafe {
-            let key = NSString::from_str("status");
-            old_item.as_super().removeObserver_forKeyPath_context(observer.as_super(), &key, core::ptr::null_mut());
-        }
-    }
-    unsafe { player.replaceCurrentItemWithPlayerItem(None) };
-    let mut store = player_store();
-    if let Some(store) = store.as_mut() {
-        update_player_visibility(store);
-    }
-}
-
-fn load_player_item(path: &std::path::Path) {
-    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
-    let (player, observer, old_item) = {
-        let mut store = player_store();
-        let Some(store) = store.as_mut() else { return };
-        if store.item_path.as_deref() == Some(path) {
-            return;
-        }
-        (store.player.clone(), store.observer.clone(), store.item.take())
-    };
-    if let Some(old_item) = old_item {
-        unsafe {
-            let key = NSString::from_str("status");
-            old_item.as_super().removeObserver_forKeyPath_context(observer.as_super(), &key, core::ptr::null_mut());
-        }
-    }
-    let url = url_from_path(path);
-    let item = unsafe { AVPlayerItem::playerItemWithURL(&url, mtm) };
-    unsafe {
-        let key = NSString::from_str("status");
-        item.as_super().addObserver_forKeyPath_options_context(
-            observer.as_super(),
-            &key,
-            NSKeyValueObservingOptions::New,
-            core::ptr::null_mut(),
-        );
-    }
-    unsafe { player.replaceCurrentItemWithPlayerItem(Some(&item)) };
-    let mut store = player_store();
-    let Some(store) = store.as_mut() else { return };
-    store.item = Some(item);
-    store.item_path = Some(path.to_path_buf());
-    store.autoplay = false;
-    store.status = match unsafe { store.item.as_ref().unwrap().status() } {
-        AVPlayerItemStatus::Unknown => PlayerStatus::Loading,
-        AVPlayerItemStatus::ReadyToPlay => PlayerStatus::Ready,
-        AVPlayerItemStatus::Failed => PlayerStatus::Failed,
-        _ => PlayerStatus::Loading,
-    };
-    update_player_visibility(store);
-}
-
-fn start_playback() {
-    let mut store = player_store();
-    let Some(store) = store.as_mut() else { return };
-    if store.item_path.is_none() {
-        return;
-    }
-    if store.status == PlayerStatus::Ready {
-        unsafe { store.player.play() };
-    } else {
-        store.autoplay = true;
-    }
-}
-
-fn toggle_inline_playback() {
-    let mut store = player_store();
-    let Some(store) = store.as_mut() else { return };
-    match store.status {
-        PlayerStatus::Ready => {
-            if unsafe { store.player.rate() } == 0.0 {
-                unsafe { store.player.play() };
-            } else {
-                unsafe { store.player.pause() };
-            }
-        }
-        PlayerStatus::Failed => {
-            let _ = store;
-            quicklook_selected();
-        }
-        PlayerStatus::Loading => store.autoplay = true,
-    }
-}
-
 fn space_pressed() {
     let (view_mode, item) = {
         let state = unsafe { &*app_state() };
@@ -319,10 +138,10 @@ fn space_pressed() {
     if view_mode == ViewMode::Grid {
         unsafe { &mut *app_state() }.view_mode = ViewMode::Carousel;
         apply_view_mode_layout();
-        start_playback();
+        player::start();
         return;
     }
-    toggle_inline_playback();
+    player::toggle();
 }
 
 fn app_state() -> *mut AppState {
@@ -474,18 +293,18 @@ fn update_carousel_preview() {
     let Some(index) = state.selected() else {
         preview_image.setImage(None);
         preview_label.setHidden(true);
-        release_player();
+        player::release();
         return;
     };
     let Some(item) = state.items().get(index) else {
         preview_image.setImage(None);
         preview_label.setHidden(true);
-        release_player();
+        player::release();
         return;
     };
     let preview_bounds = preview.bounds();
     if item.kind == MediaKind::Directory {
-        release_player();
+        player::release();
         let items = view_core::list_browser(&item.path).unwrap_or_default();
         let count = items.len();
         let size: u64 = items.iter().filter_map(|i| i.file_size).map(|s| s.max(0) as u64).sum();
@@ -519,9 +338,9 @@ fn update_carousel_preview() {
             preview_image.setImage(None);
             request_quicklook_thumbnail_sized(item.path.clone(), pixels);
         }
-        load_player_item(&item.path);
+        player::load(&item.path);
     } else {
-        release_player();
+        player::release();
         preview_label.setHidden(true);
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
         let pixels = pixel_limit(preview, preview_bounds);
@@ -545,7 +364,7 @@ fn apply_view_mode_layout() {
     };
     let carousel = unsafe { (*app_state()).view_mode } == ViewMode::Carousel;
     if !carousel {
-        release_player();
+        player::release();
     }
     unsafe {
         let window = &*window_ptr;
@@ -615,7 +434,7 @@ fn install_main_menu(_delegate: &AppDelegate, _carousel: bool, grid: &GridView) 
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu));
 }
 
-fn url_from_path(path: &std::path::Path) -> Retained<NSURL> {
+pub(crate) fn url_from_path(path: &std::path::Path) -> Retained<NSURL> {
     let bytes = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("filesystem path contains no NUL");
     let pointer = std::ptr::NonNull::new(bytes.as_ptr() as *mut std::ffi::c_char).unwrap();
     unsafe { NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(pointer, path.is_dir(), None) }
@@ -757,7 +576,7 @@ fn redo_trash(grid: &GridView) {
     grid.setNeedsDisplay(true);
 }
 
-fn quicklook_selected() {
+pub(crate) fn quicklook_selected() {
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
     if panel.isVisible() {
@@ -1419,7 +1238,7 @@ define_class!(
     #[unsafe(super(AVPlayerView))]
     #[thread_kind = MainThreadOnly]
     #[ivars = ()]
-    struct PreviewPlayerView;
+    pub(crate) struct PreviewPlayerView;
 
     impl PreviewPlayerView {
         #[unsafe(method_id(initWithFrame:))]
@@ -2084,15 +1903,14 @@ define_class!(
                 player_view.setVideoGravity(AVLayerVideoGravityResizeAspect.unwrap());
                 player_view.setPlayer(Some(&player));
             }
-            let player_observer: Retained<PlayerItemObserver> = unsafe { objc2::msg_send![PlayerItemObserver::class(), new] };
-            *player_store() = Some(PlayerStore {
+            player::install(player::PlayerStore {
                 view: player_view.clone(),
                 player,
-                observer: player_observer,
+                observer: player::new_observer(),
                 poster: Retained::into_raw(preview_image.clone()) as *mut NSImageView,
                 item: None,
                 item_path: None,
-                status: PlayerStatus::Loading,
+                status: player::PlayerStatus::Loading,
                 autoplay: false,
             });
             preview_nsview.addSubview(&*player_view);
@@ -2633,10 +2451,16 @@ fn run_player_test() {
                 assert!(started.elapsed().as_secs() < 10, "player test corpus must begin with a movie");
                 return;
             }
-            let (ready, visible, rate) = {
-                let store = player_store();
-                let Some(store) = store.as_ref() else { return };
-                (store.status == PlayerStatus::Ready, !store.view.isHidden(), unsafe { store.player.rate() })
+            let Some((ready, visible, rate, attached, focus)) = player::with_store(|store| {
+                (
+                    store.status == player::PlayerStatus::Ready,
+                    !store.view.isHidden(),
+                    unsafe { store.player.rate() },
+                    store.view.window().is_some() && unsafe { store.view.superview().is_some() },
+                    store.view.acceptsFirstResponder(),
+                )
+            }) else {
+                return;
             };
             if !ready {
                 assert!(started.elapsed().as_secs() < 10, "inline player item did not become ready");
@@ -2644,17 +2468,7 @@ fn run_player_test() {
             }
             assert!(visible, "inline player view is visible once the item is ready");
             assert_eq!(rate, 0.0, "inline player starts paused");
-            let attached = {
-                let store = player_store();
-                let store = store.as_ref().expect("player store");
-                store.view.window().is_some() && unsafe { store.view.superview().is_some() }
-            };
             assert!(attached, "inline player view is attached to the preview");
-            let focus = {
-                let store = player_store();
-                let store = store.as_ref().expect("player store");
-                store.view.acceptsFirstResponder()
-            };
             assert!(!focus, "inline player view must not take keyboard focus");
             PLAYER_TEST_STEP.store(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -2667,23 +2481,14 @@ fn run_player_test() {
                 let _ = window.makeFirstResponder(Some(unsafe { &*refs.grid }));
             }
             send_key_via_app(&app, 49, false);
-            let rate = {
-                let store = player_store();
-                unsafe { store.as_ref().expect("player store").player.rate() }
-            };
+            let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             assert!(rate > 0.0, "space plays the inline video");
             send_key_via_app(&app, 49, false);
-            let rate = {
-                let store = player_store();
-                unsafe { store.as_ref().expect("player store").player.rate() }
-            };
+            let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             assert_eq!(rate, 0.0, "space pauses the inline video");
             unsafe { &mut *app_state() }.view_mode = ViewMode::Grid;
             apply_view_mode_layout();
-            let hidden = {
-                let store = player_store();
-                store.as_ref().expect("player store").view.isHidden()
-            };
+            let hidden = player::with_store(|store| store.view.isHidden()).unwrap_or(true);
             assert!(hidden, "grid mode releases the inline player");
             send_key_via_app(&app, 49, false);
             PLAYER_TEST_STEP.store(2, std::sync::atomic::Ordering::SeqCst);
@@ -2691,10 +2496,7 @@ fn run_player_test() {
         _ => {
             let carousel = unsafe { (*app_state()).view_mode == ViewMode::Carousel };
             assert!(carousel, "space in grid mode returns to carousel");
-            let rate = {
-                let store = player_store();
-                unsafe { store.as_ref().expect("player store").player.rate() }
-            };
+            let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             if rate <= 0.0 {
                 assert!(started.elapsed().as_secs() < 10, "space in grid mode did not begin playback");
                 return;

@@ -7,7 +7,7 @@ build:
 	cargo build --profile dist --bin app --features app
 
 test:
-	cargo test --profile dist
+	cargo test --profile dist --features app
 
 lint:
 	cargo clippy --profile dist --lib --all-features --locked -- -D warnings

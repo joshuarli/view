@@ -18,7 +18,7 @@ cargo build --profile dist --bin app --features app
 | Drag a thumbnail | Drag the file out of the app |
 | Right-click | Context menu (Open, Show in Finder, Copy Path, Move to Trash, Undo, Redo) |
 | Arrow keys | Move selection; grid/carousel window keeps the selection visible |
-| Space | Toggle Quick Look preview |
+| Space | Toggle inline video playback in carousel mode; in grid mode, open the carousel and start playback for a video. For still images, or if a video cannot play inline, Space toggles the Quick Look panel. While a video is loading, Space toggles whether playback starts when ready. |
 | Backspace | Up one folder (browse mode) |
 | Cmd+Backspace or Ctrl+Backspace | Trash the selection |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo Move to Trash |
@@ -27,11 +27,11 @@ cargo build --profile dist --bin app --features app
 
 Folders sort first by natural name. Files sort by descending size; unknown or equal sizes fall back to natural name order. `--recursive` lists every image and video beneath the root in natural relative-path order.
 
-Quick Look handles image display and video playback, with adjacent-item navigation. Without a directory the launcher opens the current directory, and an unknown option exits with a one-line `view: ...` error. `View.app` can be rebuilt with `scripts/package-app.sh`; set `VIEW_APP` to point the launcher at another bundle.
+Carousel mode plays supported videos inline with a reusable `AVPlayer`, keeping a thumbnail poster visible until the player item is ready. Quick Look remains available for still-image preview, adjacent-item navigation, and as a fallback when inline playback is unavailable. Without a directory the launcher opens the current directory, and an unknown option exits with a one-line `view: ...` error. `View.app` can be rebuilt with `scripts/package-app.sh`; set `VIEW_APP` to point the launcher at another bundle.
 
 ## Scope
 
-Search, tagging, libraries, editing, custom video playback, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope.
+Search, tagging, libraries, editing, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope. Inline video playback is limited to the carousel preview and relies on system media frameworks.
 
 ## Layout
 
