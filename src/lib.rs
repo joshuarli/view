@@ -846,12 +846,12 @@ pub enum GridCommand {
 pub fn grid_shortcut(command: GridCommand) -> GridShortcut {
     match command {
         GridCommand::TogglePreview => GridShortcut { key_equivalent: " ", modifiers: &[] },
-        GridCommand::TrashSelectedItem => GridShortcut { key_equivalent: "\u{8}", modifiers: &[GridKeyModifier::Control] },
+        GridCommand::TrashSelectedItem => GridShortcut { key_equivalent: "\u{8}", modifiers: &[] },
         GridCommand::Undo => GridShortcut { key_equivalent: "z", modifiers: &[GridKeyModifier::Command] },
         GridCommand::Redo => GridShortcut { key_equivalent: "Z", modifiers: &[GridKeyModifier::Command, GridKeyModifier::Shift] },
         GridCommand::Back => GridShortcut { key_equivalent: "\u{F702}", modifiers: &[GridKeyModifier::Shift] },
         GridCommand::Forward => GridShortcut { key_equivalent: "\u{F703}", modifiers: &[GridKeyModifier::Shift] },
-        GridCommand::UpLevel => GridShortcut { key_equivalent: "\u{8}", modifiers: &[] },
+        GridCommand::UpLevel => GridShortcut { key_equivalent: "\u{F701}", modifiers: &[GridKeyModifier::Command] },
         GridCommand::ActivateDirectory => GridShortcut { key_equivalent: "\r", modifiers: &[] },
     }
 }
@@ -878,8 +878,9 @@ pub fn resolve_command_key(key_code: u16, modifiers: &[GridKeyModifier]) -> Opti
     match key_code {
         123 if modifiers.contains(&GridKeyModifier::Shift) => Some(GridCommand::Back),
         124 if modifiers.contains(&GridKeyModifier::Shift) => Some(GridCommand::Forward),
+        126 if modifiers.contains(&GridKeyModifier::Command) => Some(GridCommand::UpLevel),
         49 => Some(GridCommand::TogglePreview),
-        51 => Some(if modifiers.is_empty() { GridCommand::UpLevel } else { GridCommand::TrashSelectedItem }),
+        51 => Some(GridCommand::TrashSelectedItem),
         36 => Some(GridCommand::ActivateDirectory),
         _ => None,
     }

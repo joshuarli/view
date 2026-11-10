@@ -62,7 +62,11 @@ fn shift_left_and_right_resolve_to_history_commands() {
         view_core::resolve_command_key(49, &[]),
         Some(GridCommand::TogglePreview)
     );
-    assert_eq!(view_core::resolve_command_key(51, &[]), Some(GridCommand::UpLevel));
+    assert_eq!(view_core::resolve_command_key(51, &[]), Some(GridCommand::TrashSelectedItem));
+    assert_eq!(
+        view_core::resolve_command_key(126, &[GridKeyModifier::Command]),
+        Some(GridCommand::UpLevel)
+    );
 }
 
 #[test]
@@ -125,7 +129,7 @@ fn quicklook_thumbnail_generator_produces_video_frame() {
             let pool = objc2_foundation::NSAutoreleasePool::new();
             let generator = QLThumbnailGenerator::sharedGenerator();
             let url = NSURL::fileURLWithPath(&NSString::from_str(&movie_path.display().to_string()));
-            let request: Retained<objc2_quick_look_thumbnailing::QLThumbnailGenerationRequest> = unsafe {
+            let request: Retained<objc2_quick_look_thumbnailing::QLThumbnailGenerationRequest> = {
                 let obj: *mut objc2_quick_look_thumbnailing::QLThumbnailGenerationRequest =
                     objc2::msg_send![objc2_quick_look_thumbnailing::QLThumbnailGenerationRequest::class(), alloc];
                 let req: *mut objc2_quick_look_thumbnailing::QLThumbnailGenerationRequest = objc2::msg_send![
