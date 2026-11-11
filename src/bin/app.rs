@@ -1962,7 +1962,7 @@ define_class!(
                 return;
             }
             if code == 49 && !command && !control && !shift { space_pressed(); return; }
-            if code == 51 { trash_selected(self); return; }
+            if code == 51 || code == 117 { trash_selected(self); return; }
             if code == 126 && command { navigate_to_parent(); return; }
             if code == 6 && command { if shift { redo_trash(self); } else { undo_trash(self); } return; }
             if code == 123 && shift { navigate_back(); return; }

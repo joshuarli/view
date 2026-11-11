@@ -880,7 +880,7 @@ pub fn resolve_command_key(key_code: u16, modifiers: &[GridKeyModifier]) -> Opti
         124 if modifiers.contains(&GridKeyModifier::Shift) => Some(GridCommand::Forward),
         126 if modifiers.contains(&GridKeyModifier::Command) => Some(GridCommand::UpLevel),
         49 => Some(GridCommand::TogglePreview),
-        51 => Some(GridCommand::TrashSelectedItem),
+        51 | 117 => Some(GridCommand::TrashSelectedItem),
         36 => Some(GridCommand::ActivateDirectory),
         _ => None,
     }

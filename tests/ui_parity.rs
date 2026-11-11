@@ -63,6 +63,7 @@ fn shift_left_and_right_resolve_to_history_commands() {
         Some(GridCommand::TogglePreview)
     );
     assert_eq!(view_core::resolve_command_key(51, &[]), Some(GridCommand::TrashSelectedItem));
+    assert_eq!(view_core::resolve_command_key(117, &[]), Some(GridCommand::TrashSelectedItem));
     assert_eq!(
         view_core::resolve_command_key(126, &[GridKeyModifier::Command]),
         Some(GridCommand::UpLevel)
