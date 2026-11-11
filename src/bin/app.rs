@@ -357,7 +357,6 @@ fn update_carousel_preview() {
         if let Some(image) = cached_sized(&item.path, pixels, None, None) {
             preview_image.setImage(Some(&*image));
         } else {
-            preview_image.setImage(None);
             request_quicklook_thumbnail_sized(item.path.clone(), pixels);
         }
         player::load(&item.path);
@@ -2359,6 +2358,18 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     open_selected();
     assert_eq!(unsafe { (*app_state()).selected() }, Some(0));
     assert!(preview.image().is_some(), "first image is visible after entering a folder");
+    let previous_image = preview.image().unwrap();
+    let mut movie_item = unsafe { (*app_state()).items()[0].clone() };
+    movie_item.path = unsafe { (*app_state()).tab().root.parent().unwrap().join(".video.mp4") };
+    movie_item.kind = MediaKind::Movie;
+    let movie_path = movie_item.path.clone();
+    let movie = unsafe { (*app_state()).tab_mut().catalog.append(vec![movie_item]).0 };
+    unsafe { select_index(&mut (*app_state()).tab_mut().catalog, movie); }
+    update_carousel_preview();
+    assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "keep the previous preview while the movie poster loads");
+    unsafe { select_index(&mut (*app_state()).tab_mut().catalog, 0); }
+    update_carousel_preview();
+    unsafe { (*app_state()).tab_mut().catalog.remove(&movie_path); }
     window.displayIfNeeded();
     let bounds = preview.bounds();
     let img = preview.image().unwrap();
@@ -2620,14 +2631,15 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let video = video_dir.join("clip.mp4");
     std::fs::copy(parent.join(".video.mp4"), &video).unwrap();
     unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Carousel; }
+    let previous_image = preview.image().unwrap();
     enter_directory(video_dir);
     assert_eq!(unsafe { (*app_state()).items()[0].kind }, MediaKind::Movie);
-    assert!(preview.image().is_none(), "video preview waits for its thumbnail");
+    assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "video preview retains the previous image while its thumbnail loads");
     let started = std::time::Instant::now();
     let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
-        if cached_thumbnail(&video).is_some() {
+        if let Some(poster) = cached_thumbnail(&video) {
             let image = { let refs = window_refs(); unsafe { (&*refs.as_ref().unwrap().preview_image).image() } };
-            assert!(image.is_some(), "first video preview updates when thumbnail completes");
+            assert!(image.is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&poster)), "video preview updates when thumbnail completes");
             eprintln!("app regression: PASS");
             std::process::exit(0);
         }
