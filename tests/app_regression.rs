@@ -41,6 +41,7 @@ fn app_interactions() {
 fn inline_video_playback() {
     let root = support::TestDirectory::new("player");
     std::fs::write(root.join("clip.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
+    std::fs::write(root.join("next.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
     let stderr_path = root.join(".stderr");
     let stderr = std::fs::File::create(&stderr_path).unwrap();
     let mut child = TestProcess(std::process::Command::new(env!("CARGO_BIN_EXE_app"))

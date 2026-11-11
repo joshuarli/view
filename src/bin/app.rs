@@ -2941,14 +2941,26 @@ fn run_player_test() {
             let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
             if item.kind != MediaKind::Movie { assert!(started.elapsed().as_secs() < 10, "player test corpus must begin with a movie"); return; }
             let Some((ready, visible, rate, attached, focus)) = player::with_store(|store| (store.status == player::PlayerStatus::Ready, !store.view.isHidden(), unsafe { store.player.rate() }, store.view.window().is_some() && unsafe { store.view.superview().is_some() }, store.view.acceptsFirstResponder())) else { return };
-            if !ready { assert!(started.elapsed().as_secs() < 10, "inline player item did not become ready"); return; }
-            assert!(visible, "inline player view is visible once the item is ready");
+            if !ready || !visible { assert!(started.elapsed().as_secs() < 10, "inline player frame did not become ready"); return; }
             assert_eq!(rate, 0.0, "inline player starts paused");
             assert!(attached, "inline player view is attached to the preview");
             assert!(!focus, "inline player view must not take keyboard focus");
+            let preview_ready = { let refs = window_refs(); unsafe { (&*refs.as_ref().unwrap().preview_image).image().is_some() } };
+            if !preview_ready { assert!(started.elapsed().as_secs() < 10, "video poster did not load"); return; }
+            let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+            send_key_via_app(&app, 124, false);
+            assert_eq!(unsafe { (*app_state()).selected() }, Some(1), "right selects the next video");
+            player::with_store(|store| {
+                if store.view.isHidden() {
+                    let poster = unsafe { &*store.poster };
+                    assert!(!poster.isHidden() && poster.image().is_some(), "keep a poster visible while the next frame loads");
+                }
+            });
             PLAYER_TEST_STEP.store(1, std::sync::atomic::Ordering::SeqCst);
         }
         1 => {
+            let visible = player::with_store(|store| !store.view.isHidden()).unwrap_or(false);
+            if !visible { assert!(started.elapsed().as_secs() < 10, "next video frame did not become ready"); return; }
             let mtm = objc2::MainThreadMarker::new().unwrap();
             let app = NSApplication::sharedApplication(mtm);
             if let Some(refs) = window_refs().as_ref() {
