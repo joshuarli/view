@@ -11,7 +11,7 @@ use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont,
+    NSAlert, NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSButton, NSColor, NSDraggingInfo, NSDraggingSource, NSFont,
     NSImage, NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWorkspace,
 };
@@ -405,7 +405,7 @@ fn apply_view_mode_layout() {
             NSPoint::new(0.0, bounds.size.height - TAB_BAR_HEIGHT),
             NSSize::new(bounds.size.width, TAB_BAR_HEIGHT),
         ));
-        tab_bar.setNeedsDisplay(true);
+        tab_bar.sync();
         scroll.setHasVerticalScroller(!carousel);
         scroll.setHasHorizontalScroller(carousel);
         let viewport = scroll.contentView().bounds().size;
@@ -1593,18 +1593,51 @@ fn apply_tab_drop(path: PathBuf, target: TabDropTarget) {
     }
 }
 
+struct TabBarControls {
+    back: Retained<NSButton>,
+    forward: Retained<NSButton>,
+    toggle: Retained<NSButton>,
+    add: Retained<NSButton>,
+}
+
+fn tab_bar_button(symbol: &str, label: &str) -> Retained<NSButton> {
+    let button = NSButton::new(objc2::MainThreadMarker::new().unwrap());
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), Some(&NSString::from_str(label)))
+        .expect("system symbol is available");
+    button.setImage(Some(&image));
+    button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageOnly);
+    button.setBezelStyle(objc2_app_kit::NSBezelStyle::Toolbar);
+    button.setToolTip(Some(&NSString::from_str(label)));
+    button
+}
+
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = ()]
+    #[ivars = TabBarControls]
     struct TabBarView;
 
     impl TabBarView {
         #[unsafe(method_id(initWithFrame:))]
         fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
-            let this = this.set_ivars(());
+            let this = this.set_ivars(TabBarControls {
+                back: tab_bar_button("chevron.left", "Back"),
+                forward: tab_bar_button("chevron.right", "Forward"),
+                toggle: tab_bar_button("square.grid.2x2", "Change view"),
+                add: tab_bar_button("plus", "New Tab"),
+            });
             unsafe {
                 let this: Retained<Self> = objc2::msg_send![super(this), initWithFrame: frame];
+                for (button, action) in [
+                    (&this.ivars().back, objc2::sel!(goBack:)),
+                    (&this.ivars().forward, objc2::sel!(goForward:)),
+                    (&this.ivars().toggle, objc2::sel!(changeView:)),
+                    (&this.ivars().add, objc2::sel!(addTab:)),
+                ] {
+                    button.setTarget(Some(&*this));
+                    button.setAction(Some(action));
+                    this.addSubview(button);
+                }
                 this.registerForDraggedTypes(&NSArray::from_slice(&[&*objc2_app_kit::NSPasteboardTypeFileURL]));
                 this
             }
@@ -1623,7 +1656,7 @@ define_class!(
             objc2_app_kit::NSRectFill(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(self.bounds().size.width, 1.0)));
             let state = unsafe { &*app_state() };
             let width = self.bounds().size.width;
-            let (tab_rects, back, forward, toggle, add) = tab_bar_metrics(width, state.tabs.len());
+            let (tab_rects, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
             let pstyle: Retained<objc2_app_kit::NSMutableParagraphStyle> = {
                 let p: Retained<objc2_app_kit::NSMutableParagraphStyle> = unsafe { objc2::msg_send![objc2_app_kit::NSMutableParagraphStyle::class(), new] };
                 p.setAlignment(objc2_app_kit::NSTextAlignment::Center);
@@ -1634,17 +1667,13 @@ define_class!(
             let label = NSColor::labelColor();
             let attrs = text_attributes(&font, &label, &pstyle);
             use objc2_app_kit::NSStringDrawing;
-            for (rect, title) in [(&back, "◀"), (&forward, "▶"), (&toggle, if state.tab().view_mode == ViewMode::Grid { "▥" } else { "▭" }), (&add, "+")] {
-                let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*rect, 6.0, 6.0);
-                NSColor::controlBackgroundColor().setFill(); path.fill();
-                unsafe { NSString::from_str(title).drawInRect_withAttributes(NSRect::new(NSPoint::new(rect.origin.x, rect.origin.y + 4.0), rect.size), Some(&*attrs)) };
-            }
             for (i, rect) in tab_rects.iter().enumerate() {
                 let active = i == state.active;
-                let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*rect, 6.0, 6.0);
-                let fill = if active { NSColor::selectedContentBackgroundColor().colorWithAlphaComponent(0.35) } else { NSColor::controlBackgroundColor() };
-                fill.setFill();
-                path.fill();
+                if active {
+                    let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*rect, 6.0, 6.0);
+                    NSColor::controlAccentColor().colorWithAlphaComponent(0.14).setFill();
+                    path.fill();
+                }
                 let title = tab_label(&state.tabs[i]);
                 unsafe { NSString::from_str(&title).drawInRect_withAttributes(NSRect::new(NSPoint::new(rect.origin.x + 6.0, rect.origin.y + 5.0), NSSize::new((rect.size.width - 12.0).max(0.0), rect.size.height)), Some(&*attrs)) };
             }
@@ -1655,11 +1684,7 @@ define_class!(
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
             let state = unsafe { &*app_state() };
             let width = self.bounds().size.width;
-            let (tab_rects, back, forward, toggle, add) = tab_bar_metrics(width, state.tabs.len());
-            if objc2_foundation::NSPointInRect(location, back) { navigate_back(); return; }
-            if objc2_foundation::NSPointInRect(location, forward) { navigate_forward(); return; }
-            if objc2_foundation::NSPointInRect(location, toggle) { toggle_view_mode(); return; }
-            if objc2_foundation::NSPointInRect(location, add) { new_tab(); return; }
+            let (tab_rects, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
             for (i, rect) in tab_rects.iter().enumerate() {
                 if objc2_foundation::NSPointInRect(location, *rect) {
                     activate_tab(i);
@@ -1667,6 +1692,15 @@ define_class!(
                 }
             }
         }
+
+        #[unsafe(method(goBack:))]
+        fn go_back(&self, _sender: &NSButton) { navigate_back(); }
+        #[unsafe(method(goForward:))]
+        fn go_forward(&self, _sender: &NSButton) { navigate_forward(); }
+        #[unsafe(method(changeView:))]
+        fn change_view(&self, _sender: &NSButton) { toggle_view_mode(); }
+        #[unsafe(method(addTab:))]
+        fn add_tab(&self, _sender: &NSButton) { new_tab(); }
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
@@ -1729,7 +1763,23 @@ define_class!(
 );
 
 impl TabBarView {
-    fn sync(&self) { self.setNeedsDisplay(true); }
+    fn sync(&self) {
+        let state = unsafe { &*app_state() };
+        let (_, back, forward, toggle, add) = tab_bar_metrics(self.bounds().size.width, state.tabs.len());
+        let controls = self.ivars();
+        controls.back.setFrame(back);
+        controls.forward.setFrame(forward);
+        controls.toggle.setFrame(toggle);
+        controls.add.setFrame(add);
+        controls.back.setEnabled(!state.tab().back.is_empty());
+        controls.forward.setEnabled(!state.tab().forward.is_empty());
+        let (symbol, label) = if state.tab().view_mode == ViewMode::Grid { ("rectangle", "Show Carousel") } else { ("square.grid.2x2", "Show Grid") };
+        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), Some(&NSString::from_str(label)))
+            .expect("system symbol is available");
+        controls.toggle.setImage(Some(&image));
+        controls.toggle.setToolTip(Some(&NSString::from_str(label)));
+        self.setNeedsDisplay(true);
+    }
 }
 
 unsafe impl NSObjectProtocol for TabBarView {}
@@ -2344,6 +2394,7 @@ define_class!(
                 player: Retained::into_raw(player_view.clone()) as *mut AVPlayerView,
                 tab_bar: Retained::into_raw(tab_bar.clone()) as *mut TabBarView,
             });
+            tab_bar.sync();
             update_carousel_preview();
             install_main_menu(self, view_mode_carousel, &grid);
             if *DEBUG_ENTER.get_or_init(|| false) {
@@ -2419,11 +2470,25 @@ fn assert_orientation(bitmap: &objc2_app_kit::NSBitmapImageRep) {
 }
 
 fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView) {
+    let (back_button, forward_button, add_button) = {
+        let refs = window_refs();
+        let bar = unsafe { &*refs.as_ref().unwrap().tab_bar };
+        (bar.ivars().back.clone(), bar.ivars().forward.clone(), bar.ivars().add.clone())
+    };
+    assert!(!back_button.isEnabled() && !forward_button.isEnabled(), "history buttons start disabled");
+    unsafe { add_button.performClick(None); }
+    assert_eq!(unsafe { (*app_state()).tabs.len() }, 2, "new tab button opens a tab");
+    close_tab(1);
     unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Carousel; }
     apply_view_mode_layout();
     assert_eq!(unsafe { (*app_state()).items().len() }, 1);
     open_selected();
     assert_eq!(unsafe { (*app_state()).selected() }, Some(0));
+    assert!(back_button.isEnabled() && !forward_button.isEnabled(), "navigation updates button states");
+    unsafe { back_button.performClick(None); }
+    assert!(forward_button.isEnabled(), "back button enables forward navigation");
+    unsafe { forward_button.performClick(None); }
+    assert_eq!(unsafe { (*app_state()).tab().root.file_name().unwrap() }, "folder", "forward button returns to the folder");
     assert!(preview.image().is_some(), "first image is visible after entering a folder");
     let previous_image = preview.image().unwrap();
     let mut movie_item = unsafe { (*app_state()).items()[0].clone() };
