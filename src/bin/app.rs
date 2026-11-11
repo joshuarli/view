@@ -1087,6 +1087,7 @@ fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<(
         .unwrap_or_else(|e| e.into_inner())
 }
 
+#[cfg(feature = "benchmark")]
 fn cached_thumbnail(path: &PathBuf) -> Option<Retained<NSImage>> {
     thumb_store().images.get(path).and_then(|entries| entries.last().map(|entry| entry.image.0.clone()))
 }
@@ -2626,8 +2627,10 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "video preview retains the previous image while its thumbnail loads");
     let started = std::time::Instant::now();
     let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
-        if let Some(poster) = cached_thumbnail(&video) {
-            let image = { let refs = window_refs(); unsafe { (&*refs.as_ref().unwrap().preview_image).image() } };
+        let (pixels, image) = { let refs = window_refs(); let refs = refs.as_ref().unwrap(); unsafe {
+            (pixel_limit(&*refs.preview, (&*refs.preview).bounds()), (&*refs.preview_image).image())
+        } };
+        if let Some(poster) = cached_sized(&video, pixels, None, None) {
             assert!(image.is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&poster)), "video preview updates when thumbnail completes");
             eprintln!("app regression: PASS");
             std::process::exit(0);
