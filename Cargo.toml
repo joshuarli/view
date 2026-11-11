@@ -19,7 +19,7 @@ benchmark = ["app", "dep:rustybench"]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 libc = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSButton", "NSSound", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSGridView", "NSStackView", "NSCell", "NSBezierPath", "NSParagraphStyle", "NSText"] }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSImageView", "NSButton", "NSScrollView", "NSCollectionView", "NSViewController", "NSProgressIndicator", "NSTextField", "NSBox", "NSColor", "NSFont", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSGridView", "NSStackView", "NSCell", "NSBezierPath", "NSParagraphStyle", "NSText"] }
 objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSArray", "NSDictionary", "NSNotification", "NSUserDefaults", "NSValue", "NSProcessInfo", "NSKeyValueObserving"] }
 objc2-core-graphics = { version = "0.3", optional = true }
 objc2-av-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "AVPlayerView", "objc2-app-kit", "objc2-av-foundation"] }

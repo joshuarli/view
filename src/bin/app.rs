@@ -12,7 +12,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont,
-    NSImage, NSImageView, NSMenu, NSMenuItem, NSScrollView, NSSound, NSTextField, NSView, NSWindow, NSWindowDelegate,
+    NSImage, NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer};
@@ -482,16 +482,6 @@ fn path_from_url(url: &NSURL) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
 }
 
-const TRASH_SOUND_PATH: &str = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/finder/move to trash.aif";
-
-fn play_trash_sound() {
-    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
-    let path = NSString::from_str(TRASH_SOUND_PATH);
-    if let Some(sound) = NSSound::initWithContentsOfFile_byReference(mtm.alloc(), &path, false) {
-        sound.play();
-    }
-}
-
 fn trash_selected(_grid: &GridView) {
     let items: Vec<MediaItem> = {
         let state = unsafe { &*app_state() };
@@ -501,7 +491,6 @@ fn trash_selected(_grid: &GridView) {
         selected.iter().filter_map(|path| tab.catalog.items().iter().find(|item| &item.path == path).cloned()).collect()
     };
     if items.is_empty() { return; }
-    play_trash_sound();
     let selection_before_op = std::sync::Arc::new({
         let state = unsafe { &*app_state() };
         state.tab().catalog.selected_all().to_vec()
