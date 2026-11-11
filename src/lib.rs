@@ -980,6 +980,21 @@ pub struct TrashHistory {
 
 impl TrashHistory {
     pub fn new() -> Self { Self::default() }
+    /// Update original paths in undo and redo entries after an item or ancestor is renamed.
+    pub fn relocate(&mut self, from: &Path, to: &Path) {
+        for transaction in self.undo_stack.iter_mut().chain(&mut self.redo_stack) {
+            for file in &mut transaction.files {
+                if let Ok(suffix) = file.item.path.strip_prefix(from) {
+                    file.item.path = if suffix.as_os_str().is_empty() { to.to_path_buf() } else { to.join(suffix) };
+                }
+            }
+            for path in &mut transaction.selection_before_op {
+                if let Ok(suffix) = path.strip_prefix(from) {
+                    *path = if suffix.as_os_str().is_empty() { to.to_path_buf() } else { to.join(suffix) };
+                }
+            }
+        }
+    }
     pub fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
     pub fn record_trash(&mut self, transaction: TrashTransaction) {
@@ -1266,6 +1281,21 @@ mod tests {
         assert!(history.can_redo());
         history.record_trash(TrashTransaction { files: vec![file], selection_before_op: vec![] });
         assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn trash_history_follows_renamed_directories() {
+        let mut history = TrashHistory::new();
+        let file = TrashedFile { item: MediaItem::new("/x/old/a.png", MediaKind::Image), trashed_path: PathBuf::from("/trash/a.png"), index: 0 };
+        let transaction = TrashTransaction { files: vec![file], selection_before_op: vec![PathBuf::from("/x/old/a.png"), PathBuf::from("/x/other.png")] };
+        history.record_trash(transaction.clone());
+        history.push_redo(transaction);
+        history.relocate(Path::new("/x/old"), Path::new("/x/new"));
+        for transaction in [history.pop_undo().unwrap(), history.pop_redo().unwrap()] {
+            assert_eq!(transaction.files[0].item.path, Path::new("/x/new/a.png"));
+            assert_eq!(transaction.files[0].trashed_path, Path::new("/trash/a.png"));
+            assert_eq!(transaction.selection_before_op, [PathBuf::from("/x/new/a.png"), PathBuf::from("/x/other.png")]);
+        }
     }
 
     #[test]

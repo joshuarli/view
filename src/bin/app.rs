@@ -11,7 +11,7 @@ use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont,
+    NSAlert, NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSColor, NSDraggingInfo, NSDraggingSource, NSFont,
     NSImage, NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWorkspace,
 };
@@ -564,7 +564,7 @@ fn trash_selected(_grid: &GridView) {
     workspace.recycleURLs_completionHandler(&ns_urls, Some(&handler));
 }
 
-fn move_trash_item(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+fn move_item_exclusively(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     let from = std::ffi::CString::new(from.as_os_str().as_bytes())
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let to = std::ffi::CString::new(to.as_os_str().as_bytes())
@@ -579,7 +579,7 @@ fn undo_trash(grid: &GridView) {
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
-        match move_trash_item(&file.trashed_path, &file.item.path) {
+        match move_item_exclusively(&file.trashed_path, &file.item.path) {
             Ok(()) => succeeded.push(file),
             Err(error) => {
                 eprintln!("view: cannot restore {}: {error}", file.item.path.display());
@@ -613,7 +613,7 @@ fn redo_trash(grid: &GridView) {
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
-        match move_trash_item(&file.item.path, &file.trashed_path) {
+        match move_item_exclusively(&file.item.path, &file.trashed_path) {
             Ok(()) => succeeded.push(file),
             Err(error) => {
                 eprintln!("view: cannot redo trash for {}: {error}", file.item.path.display());
@@ -719,6 +719,7 @@ fn build_context_menu(target: &GridView) -> Retained<NSMenu> {
     }
     menu.addItem(&make_context_action_item(target, "Show in Finder", objc2::sel!(showSelectedInFinder:), None, objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Copy Path", objc2::sel!(copySelectedPath:), None, objc2_app_kit::NSEventModifierFlags::empty()));
+    menu.addItem(&make_context_action_item(target, "Rename…", objc2::sel!(renameSelected:), None, objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Undo", objc2::sel!(undoTrash:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
     menu.addItem(&make_context_action_item(target, "Redo", objc2::sel!(redoTrash:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
@@ -732,6 +733,80 @@ fn menu_item(target: &GridView, title: &str, action: objc2::runtime::Sel, key: O
 fn place_context_menu(target: &GridView, event: &objc2_app_kit::NSEvent) {
     let menu = build_context_menu(target);
     NSMenu::popUpContextMenu_withEvent_forView(&menu, event, target);
+}
+
+fn relocated_path(path: &std::path::Path, from: &std::path::Path, to: &std::path::Path) -> PathBuf {
+    match path.strip_prefix(from) {
+        Ok(suffix) if suffix.as_os_str().is_empty() => to.to_path_buf(),
+        Ok(suffix) => to.join(suffix),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+fn rename_item(from: &std::path::Path, name: &str) -> std::io::Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Enter a single file or folder name."));
+    }
+    let to = from.with_file_name(name);
+    if from == to { return Ok(()) }
+    move_item_exclusively(from, &to)?;
+    let state = unsafe { &mut *app_state() };
+    let active = state.active;
+    for (index, tab) in state.tabs.iter_mut().enumerate() {
+        let anchor = tab.catalog.anchor().map(|path| relocated_path(path, from, &to));
+        let selected = if index == active { Some(to.clone()) } else {
+            tab.catalog.selected().map(|path| relocated_path(path, from, &to))
+        };
+        tab.root = relocated_path(&tab.root, from, &to);
+        for (root, selection) in tab.back.iter_mut().chain(&mut tab.forward) {
+            *root = relocated_path(root, from, &to);
+            if let Some(path) = selection { *path = relocated_path(path, from, &to); }
+        }
+        tab.trash_history.relocate(from, &to);
+        show_listing(&mut tab.catalog, load_listing(&tab.root, tab.mode), ListingPick::Restored(selected.clone()));
+        if index != active {
+            if let (Some(anchor), Some(selected)) = (anchor, selected) {
+                if tab.catalog.items().iter().any(|item| item.path == anchor) && tab.catalog.items().iter().any(|item| item.path == selected) {
+                    tab.catalog.select_range(&anchor, &selected).expect("restored selection is in the catalog");
+                }
+            }
+        }
+    }
+    after_navigation(false);
+    Ok(())
+}
+
+fn rename_selected() {
+    let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let Some(name) = item.path.file_name().and_then(|name| name.to_str()) else {
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("Unable to rename"));
+        alert.setInformativeText(&NSString::from_str("The filename cannot be displayed as text."));
+        alert.runModal();
+        return;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Rename"));
+    let field = NSTextField::new(mtm);
+    field.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(320.0, 24.0)));
+    field.setStringValue(&NSString::from_str(name));
+    alert.setAccessoryView(Some(&field));
+    alert.addButtonWithTitle(&NSString::from_str("Rename"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let _ = alert.window().makeFirstResponder(Some(&field));
+    loop {
+        if alert.runModal() != objc2_app_kit::NSAlertFirstButtonReturn { return; }
+        match rename_item(&item.path, &field.stringValue().to_string()) {
+            Ok(()) => return,
+            Err(error) => {
+                let failure = NSAlert::new(mtm);
+                failure.setMessageText(&NSString::from_str("Unable to rename"));
+                failure.setInformativeText(&NSString::from_str(&error.to_string()));
+                failure.runModal();
+            }
+        }
+    }
 }
 
 fn enter_directory(path: PathBuf) {
@@ -1891,6 +1966,8 @@ define_class!(
         fn show_selected_action(&self, _sender: &NSObject) { show_selected_in_finder(); }
         #[unsafe(method(copySelectedPath:))]
         fn copy_selected_action(&self, _sender: &NSObject) { copy_selected_path(); }
+        #[unsafe(method(renameSelected:))]
+        fn rename_selected_action(&self, _sender: &NSObject) { rename_selected(); }
         #[unsafe(method(moveSelectedToTrash:))]
         fn move_selected_action(&self, _sender: &NSObject) { trash_selected(self); }
         #[unsafe(method(undoTrash:))]
@@ -2615,6 +2692,34 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         enter_directory(folder.clone());
         refresh_tab_bar();
     }
+
+    let rename_dir = folder.join("rename-test");
+    std::fs::create_dir(&rename_dir).unwrap();
+    std::fs::write(rename_dir.join("old.png"), include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+    std::fs::write(rename_dir.join("taken.png"), b"keep").unwrap();
+    enter_directory(rename_dir.clone());
+    let old = rename_dir.join("old.png");
+    let renamed = rename_dir.join("new.png");
+    let menu = build_context_menu(grid);
+    assert!(menu.itemWithTitle(&NSString::from_str("Rename…")).is_some(), "context menu offers rename");
+    assert!(rename_item(&old, "taken.png").is_err(), "rename must not replace another file");
+    assert_eq!(std::fs::read(rename_dir.join("taken.png")).unwrap(), b"keep");
+    assert!(rename_item(&old, "../escape.png").is_err(), "rename must stay in the same directory");
+    rename_item(&old, "new.png").unwrap();
+    assert!(renamed.exists() && !old.exists());
+    assert_eq!(unsafe { (*app_state()).tab().catalog.selected() }, Some(renamed.as_path()));
+    rename_item(&renamed, "NEW.png").unwrap();
+    assert_eq!(unsafe { (*app_state()).tab().catalog.selected() }, Some(rename_dir.join("NEW.png").as_path()));
+    navigate_to_parent();
+    let other_tab = unsafe { (*app_state()).new_tab(rename_dir.clone(), BrowserMode::Browser) };
+    let moved_dir = folder.join("renamed-test");
+    rename_item(&rename_dir, "renamed-test").unwrap();
+    assert!(moved_dir.join("NEW.png").exists());
+    assert_eq!(unsafe { (&(*app_state()).tabs)[other_tab].root.clone() }, moved_dir, "open tabs follow renamed directories");
+    close_tab(other_tab);
+    navigate_back();
+    assert_eq!(unsafe { (*app_state()).tab().root.clone() }, moved_dir, "history follows renamed directories");
+    navigate_to_parent();
 
     let video_dir = folder.join("video");
     std::fs::create_dir(&video_dir).unwrap();
