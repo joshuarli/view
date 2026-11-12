@@ -19,6 +19,7 @@ cargo build --profile dist --bin app --features app
 | Right-click | Context menu (Open, Show in Finder, Copy Path, Move to Trash, Undo, Redo) |
 | Arrow keys | Move selection; grid/carousel window keeps the selection visible |
 | Space | Toggle inline video playback in carousel mode; in grid mode, open the carousel and start playback for a video. For still images, or if a video cannot play inline, Space toggles the Quick Look panel. While a video is loading, Space toggles whether playback starts when ready. |
+| E | Open the Quick Look panel for the selection (for a video, Quick Look's editing controls) |
 | Backspace | Up one folder (browse mode) |
 | Cmd+Backspace or Ctrl+Backspace | Trash the selection |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo Move to Trash |

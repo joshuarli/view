@@ -1962,6 +1962,7 @@ define_class!(
                 return;
             }
             if code == 49 && !command && !control && !shift { space_pressed(); return; }
+            if code == 14 && !command && !control && !shift { quicklook_selected(); return; }
             if code == 51 || code == 117 { trash_selected(self); return; }
             if code == 126 && command { navigate_to_parent(); return; }
             if code == 6 && command { if shift { redo_trash(self); } else { undo_trash(self); } return; }
@@ -2564,6 +2565,15 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     unsafe { panel.setCurrentPreviewItemIndex(2); }
     assert_eq!(unsafe { (*app_state()).selected() }, Some(2), "reopened quick look updates selection");
     panel.orderOut(None);
+    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !unsafe { panel.isVisible() }), "quick look panel hides");
+    window.makeKeyAndOrderFront(None);
+    let _ = window.makeFirstResponder(Some(grid));
+    send_key_via_app(&app, 14, false);
+    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || unsafe { panel.isVisible() }), "e opens the quick look panel");
+    window.makeKeyAndOrderFront(None);
+    let _ = window.makeFirstResponder(Some(grid));
+    send_key_via_app(&app, 14, false);
+    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !unsafe { panel.isVisible() }), "e toggles the quick look panel closed");
 
     unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Grid; }
     window.setContentSize(NSSize::new(400.0, 500.0));

@@ -834,6 +834,7 @@ pub struct GridShortcut {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridCommand {
     TogglePreview,
+    EditInQuickLook,
     TrashSelectedItem,
     Undo,
     Redo,
@@ -846,6 +847,7 @@ pub enum GridCommand {
 pub fn grid_shortcut(command: GridCommand) -> GridShortcut {
     match command {
         GridCommand::TogglePreview => GridShortcut { key_equivalent: " ", modifiers: &[] },
+        GridCommand::EditInQuickLook => GridShortcut { key_equivalent: "e", modifiers: &[] },
         GridCommand::TrashSelectedItem => GridShortcut { key_equivalent: "\u{8}", modifiers: &[] },
         GridCommand::Undo => GridShortcut { key_equivalent: "z", modifiers: &[GridKeyModifier::Command] },
         GridCommand::Redo => GridShortcut { key_equivalent: "Z", modifiers: &[GridKeyModifier::Command, GridKeyModifier::Shift] },
@@ -859,6 +861,7 @@ pub fn grid_shortcut(command: GridCommand) -> GridShortcut {
 pub fn resolve_command(key_equivalent: &str, modifiers: &[GridKeyModifier]) -> Option<GridCommand> {
     [
         GridCommand::TogglePreview,
+        GridCommand::EditInQuickLook,
         GridCommand::TrashSelectedItem,
         GridCommand::Undo,
         GridCommand::Redo,
@@ -880,6 +883,7 @@ pub fn resolve_command_key(key_code: u16, modifiers: &[GridKeyModifier]) -> Opti
         124 if modifiers.contains(&GridKeyModifier::Shift) => Some(GridCommand::Forward),
         126 if modifiers.contains(&GridKeyModifier::Command) => Some(GridCommand::UpLevel),
         49 => Some(GridCommand::TogglePreview),
+        14 if modifiers.is_empty() => Some(GridCommand::EditInQuickLook),
         51 | 117 => Some(GridCommand::TrashSelectedItem),
         36 => Some(GridCommand::ActivateDirectory),
         _ => None,
@@ -1325,6 +1329,7 @@ mod tests {
 
     #[test]
     fn grid_commands_resolve() {
+        assert_eq!(resolve_command("e", &[]), Some(GridCommand::EditInQuickLook));
         assert_eq!(resolve_command(" ", &[]), Some(GridCommand::TogglePreview));
         assert_eq!(resolve_command("z", &[GridKeyModifier::Command]), Some(GridCommand::Undo));
         assert_eq!(resolve_command("Z", &[GridKeyModifier::Command, GridKeyModifier::Shift]), Some(GridCommand::Redo));
