@@ -9,7 +9,7 @@ use objc2_foundation::{
     NSString,
 };
 
-use crate::{quicklook_selected, url_from_path, PreviewPlayerView};
+use super::{quicklook_selected, url_from_path, PreviewPlayerView};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlayerStatus {
@@ -91,7 +91,7 @@ fn update_player_visibility(store: &mut PlayerStore) {
     let visible = store.item_path.is_some() && store.status == PlayerStatus::Ready && unsafe { store.view.isReadyForDisplay() };
     store.view.setHidden(!visible);
     unsafe { (*store.poster).setHidden(visible) };
-    if *crate::PLAYER_TEST.get_or_init(|| false) && visible {
+    if *super::PLAYER_TEST.get_or_init(|| false) && visible {
         assert!(unsafe { store.view.isReadyForDisplay() }, "player must not replace the poster before its first frame is ready");
     }
 }

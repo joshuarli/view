@@ -78,10 +78,12 @@ fn prepare_window() -> (&'static NSWindow, &'static GridView) {
     ACTIVE.store(true, Ordering::Relaxed);
     let root = browser_corpus(&bench_corpus::ensure().typical, 100, "typical");
     let state = unsafe { &mut *app_state() };
-    state.root = root.clone();
-    state.mode = BrowserMode::Browser;
-    state.view_mode = ViewMode::Grid;
-    show_listing(&mut state.catalog, list_browser(&root).expect("list browser corpus"), ListingPick::First);
+    let tab = state.tab_mut();
+    tab.root = root.clone();
+    tab.mode = BrowserMode::Browser;
+    tab.view_mode = ViewMode::Grid;
+    let listing = list_browser(&root).expect("list browser corpus");
+    show_listing(&mut tab.catalog, listing, ListingPick::First);
     let mtm = objc2::MainThreadMarker::new().expect("AppKit benchmarks must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     let needs_window = { window_refs().is_none() };
@@ -119,7 +121,7 @@ fn capture(grid: &GridView, bitmap: &objc2_app_kit::NSBitmapImageRep) {
 #[rustybench::bench(sample_size = 1)]
 fn open_directory_and_render_grid(bencher: Bencher) {
     let (_, grid) = prepare_window();
-    let root = unsafe { (*app_state()).root.clone() };
+    let root = unsafe { (*app_state()).tab().root.clone() };
     let expected = unsafe { (*app_state()).items().len() };
     let visible = grid.visibleRect();
     let bitmap = grid.bitmapImageRepForCachingDisplayInRect(visible).expect("viewport bitmap");
@@ -127,7 +129,7 @@ fn open_directory_and_render_grid(bencher: Bencher) {
         let items = list_browser(black_box(&root)).expect("list browser corpus");
         assert_eq!(items.len(), expected, "browser listing changed during measurement");
         let state = unsafe { &mut *app_state() };
-        show_listing(&mut state.catalog, items, ListingPick::First);
+        show_listing(&mut state.tab_mut().catalog, items, ListingPick::First);
         apply_view_mode_layout();
         capture(grid, &bitmap);
     });
@@ -170,7 +172,7 @@ fn resize_and_render_grid(bencher: Bencher) {
 #[rustybench::bench(sample_size = 1)]
 fn advance_carousel_preview(bencher: Bencher) {
     let (window, grid) = prepare_window();
-    unsafe { (*app_state()).view_mode = ViewMode::Carousel; }
+    unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Carousel; }
     apply_view_mode_layout();
     window.makeKeyAndOrderFront(None);
     assert!(window.makeFirstResponder(Some(grid)), "grid must receive keyboard events");
@@ -198,7 +200,7 @@ fn advance_carousel_preview(bencher: Bencher) {
         step += 1;
         {
             let state = unsafe { &mut *app_state() };
-            select_index(&mut state.catalog, current);
+            select_index(&mut state.tab_mut().catalog, current);
         }
         window.sendEvent(&event);
         assert_eq!(unsafe { (*app_state()).selected() }, Some(current + 1), "carousel arrow did not advance");
