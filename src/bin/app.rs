@@ -25,7 +25,7 @@ use objc2_quick_look_ui::{QLPreviewPanel, QLPreviewPanelDataSource};
 
 use view_core::{
     list_browser, scan_recursive, BrowserMode, Catalog, MediaKind, MediaItem, PreviewSession, TrashHistory,
-    TrashService, TrashTransaction,
+    TrashTransaction,
 };
 
 #[path = "app/player.rs"]
@@ -56,7 +56,7 @@ struct Tab {
     preview: PreviewSession,
     back: Vec<(PathBuf, Option<PathBuf>)>,
     forward: Vec<(PathBuf, Option<PathBuf>)>,
-    trash_history: TrashHistory,
+    unavailable: Option<String>,
 }
 
 #[derive(Default)]
@@ -64,7 +64,8 @@ struct AppState {
     tabs: Vec<Tab>,
     active: usize,
     preview_bound: bool,
-    _trash_service: TrashService,
+    trash_history: TrashHistory,
+    pending_trash: std::collections::HashSet<PathBuf>,
 }
 
 impl AppState {
@@ -72,13 +73,13 @@ impl AppState {
     fn tab_mut(&mut self) -> &mut Tab { &mut self.tabs[self.active] }
     fn items(&self) -> &[MediaItem] { self.tab().catalog.items() }
     fn selected(&self) -> Option<usize> { self.tab().catalog.focus_index() }
-    fn new_tab(&mut self, root: PathBuf, mode: BrowserMode) -> usize {
+    fn new_tab(&mut self, root: PathBuf, mode: BrowserMode, items: Vec<MediaItem>) -> usize {
         let mut tab = Tab::default();
         tab.root = root.clone();
         tab.mode = mode;
         tab.view_mode = self.tab().view_mode;
         tab.thumbnail_size_step = self.tab().thumbnail_size_step;
-        show_listing(&mut tab.catalog, load_listing(&root, mode), ListingPick::First);
+        show_listing(&mut tab.catalog, items, ListingPick::First);
         self.tabs.push(tab);
         self.tabs.len() - 1
     }
@@ -305,6 +306,13 @@ fn update_carousel_preview() {
     let preview = unsafe { &*preview_ptr };
     let preview_label = unsafe { &*preview_label_ptr };
     let state = unsafe { &*app_state() };
+    if state.tab().unavailable.is_some() {
+        preview_image.setImage(None);
+        preview_label.setHidden(true);
+        player::release();
+        preview.setNeedsDisplay(true);
+        return;
+    }
     if state.tab().view_mode != ViewMode::Carousel {
         return;
     }
@@ -324,13 +332,19 @@ fn update_carousel_preview() {
     if item.kind == MediaKind::Directory {
         player::release();
         preview_image.setFrame(NSRect::new(NSPoint::ZERO, preview_bounds.size));
-        let items = view_core::list_browser(&item.path).unwrap_or_default();
-        let count = items.len();
-        let size: u64 = items.iter().filter_map(|i| i.file_size).map(|s| s.max(0) as u64).sum();
-        let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let size_str = byte_count_string(size);
-        let detail = format!("{name}\n{count} items, {}", size_str);
-        preview_label.setStringValue(&NSString::from_str(&detail));
+        match view_core::list_browser(&item.path) {
+            Ok(items) => {
+                let count = items.len();
+                let size: u64 = items.iter().filter_map(|i| i.file_size).map(|s| s.max(0) as u64).sum();
+                let name = item.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let size_str = byte_count_string(size);
+                let detail = format!("{name}\n{count} items, {}", size_str);
+                preview_label.setStringValue(&NSString::from_str(&detail));
+            }
+            Err(error) => {
+                preview_label.setStringValue(&NSString::from_str(&format!("Unable to read folder\n{error}")));
+            }
+        }
         preview_label.setHidden(false);
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyDown);
         let label_h = ((preview_bounds.size.height * 0.35).clamp(48.0, 140.0)).min(preview_bounds.size.height - 80.0).max(48.0);
@@ -350,10 +364,10 @@ fn update_carousel_preview() {
         preview_image.setFrame(NSRect::new(NSPoint::ZERO, preview_bounds.size));
         preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
         let pixels = pixel_limit(preview, preview_bounds);
-        if let Some(image) = cached_sized(&item.path, pixels, None, None) {
+        if let Some(image) = cached_sized(&item.path, pixels, item.file_size, item.modification) {
             preview_image.setImage(Some(&*image));
         } else {
-            request_quicklook_thumbnail_sized(item.path.clone(), pixels);
+            request_quicklook_thumbnail_sized(item.path.clone(), pixels, item.file_size, item.modification);
         }
         player::load(&item.path);
     } else {
@@ -478,19 +492,112 @@ fn path_from_url(url: &NSURL) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
 }
 
+fn tab_affected(root: &std::path::Path, mode: BrowserMode, changed: &[PathBuf]) -> bool {
+    changed.iter().any(|path| {
+        if path == root {
+            return true;
+        }
+        match mode {
+            BrowserMode::Browser => path.parent().is_some_and(|parent| parent == root),
+            BrowserMode::Recursive => path.starts_with(root),
+        }
+    })
+}
+
+fn reconcile_tab_after_mutation(tab: &mut Tab, select_after: &[PathBuf]) {
+    match load_listing(&tab.root, tab.mode) {
+        Ok(items) => {
+            let mut catalog = Catalog::new();
+            catalog.append(items);
+            let previous_selection = tab.catalog.selected_all().to_vec();
+            let focus = tab.catalog.selected().map(|path| path.to_path_buf());
+            let present: Vec<PathBuf> = catalog.items().iter().map(|item| item.path.clone()).collect();
+            let mut selection: Vec<PathBuf> = previous_selection.into_iter().filter(|path| present.contains(path)).collect();
+            if selection.is_empty() {
+                for path in select_after {
+                    if present.contains(path) && !selection.contains(path) {
+                        selection.push(path.clone());
+                    }
+                }
+            }
+            catalog.restore_selection(&selection, focus.as_deref());
+            tab.catalog = catalog;
+            tab.unavailable = None;
+        }
+        Err(error) => {
+            tab.unavailable = Some(format!("Unable to read {}: {error}", tab.root.display()));
+        }
+    }
+}
+
+fn reconcile_after_mutation(changed: &[PathBuf], select_after: &[PathBuf]) {
+    {
+        let state = unsafe { &mut *app_state() };
+        for tab in state.tabs.iter_mut() {
+            let affected = tab.unavailable.is_some() || tab_affected(&tab.root, tab.mode, changed);
+            if !affected {
+                continue;
+            }
+            reconcile_tab_after_mutation(tab, select_after);
+        }
+    }
+    if let Some(refs) = window_refs().as_ref() {
+        unsafe { &*refs.grid }.setNeedsDisplay(true);
+    }
+    update_carousel_preview();
+    refresh_tab_bar();
+}
+
+fn complete_trash(
+    items: Vec<MediaItem>,
+    trashed_map: Vec<(PathBuf, PathBuf)>,
+    error_message: Option<String>,
+    selection_before_op: Vec<PathBuf>,
+) -> Option<String> {
+    {
+        let state = unsafe { &mut *app_state() };
+        for item in &items {
+            state.pending_trash.remove(&item.path);
+        }
+    }
+    let files: Vec<view_core::TrashedFile> = items
+        .iter()
+        .filter_map(|item| {
+            let (_, trashed) = trashed_map.iter().find(|(original, _)| original == &item.path)?;
+            Some(view_core::TrashedFile { item: item.clone(), trashed_path: trashed.clone(), index: 0 })
+        })
+        .collect();
+    if files.is_empty() {
+        return error_message;
+    }
+    let changed: Vec<PathBuf> = files.iter().map(|file| file.item.path.clone()).collect();
+    {
+        let state = unsafe { &mut *app_state() };
+        state.trash_history.record_trash(view_core::TrashTransaction { files, selection_before_op });
+    }
+    reconcile_after_mutation(&changed, &[]);
+    error_message
+}
+
 fn trash_selected(_grid: &GridView) {
-    let items: Vec<MediaItem> = {
+    let (items, selection_before_op) = {
         let state = unsafe { &*app_state() };
         let tab = state.tab();
+        if tab.unavailable.is_some() { return; }
         let selected = tab.catalog.selected_all();
         if selected.is_empty() { return; }
-        selected.iter().filter_map(|path| tab.catalog.items().iter().find(|item| &item.path == path).cloned()).collect()
+        let mut items = Vec::new();
+        for path in selected {
+            if state.pending_trash.contains(path) { continue; }
+            if let Some(item) = tab.catalog.items().iter().find(|item| &item.path == path) {
+                items.push(item.clone());
+            }
+        }
+        if items.is_empty() { return; }
+        (items, selected.to_vec())
     };
-    if items.is_empty() { return; }
-    let selection_before_op = std::sync::Arc::new({
-        let state = unsafe { &*app_state() };
-        state.tab().catalog.selected_all().to_vec()
-    });
+    let attempted: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
+    unsafe { &mut *app_state() }.pending_trash.extend(attempted);
     let workspace = NSWorkspace::sharedWorkspace();
     let urls: Vec<Retained<NSURL>> = items.iter().map(|i| url_from_path(&i.path)).collect();
     let ns_urls = NSArray::from_retained_slice(&urls);
@@ -507,54 +614,17 @@ fn trash_selected(_grid: &GridView) {
                     trashed.map(|trashed| (original, trashed))
                 })
                 .collect();
-            let had_error = !error.is_null();
-            let selection_before_op = selection_before_op.clone();
+            let error_message: Option<String> = if error.is_null() {
+                None
+            } else {
+                Some(unsafe { &*error }.localizedDescription().to_string())
+            };
+        let items = items.clone();
+        let selection_before_op = selection_before_op.clone();
             dispatch2::DispatchQueue::main().exec_async(move || {
-                if had_error {
-                    return;
+                if let Some(message) = complete_trash(items, trashed_map, error_message, selection_before_op) {
+                    show_error_alert("Unable to move to Trash", &message);
                 }
-                let active = {
-                    let state = unsafe { &mut *app_state() };
-                    let tab_index = state.tabs.iter().position(|tab| {
-                        tab.catalog.items().iter().any(|item| trashed_map.iter().any(|(original, _)| &item.path == original))
-                    });
-                    let Some(tab_index) = tab_index else { return };
-                    let mut files = Vec::new();
-                    {
-                        let tab = &state.tabs[tab_index];
-                        for (original, trashed) in trashed_map.iter() {
-                            if let Some(pos) = tab.catalog.items().iter().position(|i| &i.path == original) {
-                                files.push(view_core::TrashedFile {
-                                    item: tab.catalog.items()[pos].clone(),
-                                    trashed_path: trashed.clone(),
-                                    index: pos,
-                                });
-                            }
-                        }
-                    }
-                    if files.is_empty() { return; }
-                    files.sort_by_key(|file| file.index);
-                    let mut removal: Vec<usize> = (0..files.len()).collect();
-                    removal.sort_by_key(|&i| std::cmp::Reverse(files[i].index));
-                    for i in removal {
-                        let path = files[i].item.path.clone();
-                        state.tabs[tab_index].catalog.remove(&path);
-                    }
-                    state.tabs[tab_index].trash_history.record_trash(view_core::TrashTransaction {
-                        files,
-                        selection_before_op: (*selection_before_op).clone(),
-                    });
-                    tab_index == state.active
-                };
-                if active {
-                    apply_view_mode_layout();
-                } else {
-                    reconcile_preview();
-                    if let Some(refs) = window_refs().as_ref() {
-                        unsafe { &*refs.grid }.setNeedsDisplay(true);
-                    }
-                }
-                refresh_tab_bar();
             });
         });
     workspace.recycleURLs_completionHandler(&ns_urls, Some(&handler));
@@ -569,9 +639,20 @@ fn move_item_exclusively(from: &std::path::Path, to: &std::path::Path) -> std::i
     if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
-fn undo_trash(grid: &GridView) {
-    let transaction = unsafe { (&mut *app_state()).tab_mut().trash_history.pop_undo() };
+fn undo_trash() {
+    let transaction = unsafe { (&mut *app_state()).trash_history.pop_undo() };
     let Some(transaction) = transaction else { return };
+    let blocked = {
+        let state = unsafe { &*app_state() };
+        transaction.files.iter().any(|file| {
+            state.pending_trash.contains(&file.item.path) || state.pending_trash.contains(&file.trashed_path)
+        })
+    };
+    if blocked {
+        unsafe { &mut *app_state() }.trash_history.push_undo(transaction);
+        show_error_alert("Undo unavailable", "A trash operation is still in progress for these items.");
+        return;
+    }
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
@@ -585,27 +666,32 @@ fn undo_trash(grid: &GridView) {
     }
     {
         let state = unsafe { &mut *app_state() };
-        let tab = state.tab_mut();
+        let selection_before_op = transaction.selection_before_op.clone();
         if !succeeded.is_empty() {
-            let selection_before_op = transaction.selection_before_op.clone();
-            for file in succeeded.iter() {
-                let at = file.index.min(tab.catalog.count());
-                tab.catalog.insert(file.item.clone(), at);
-            }
-            tab.trash_history.push_redo(TrashTransaction { files: succeeded, selection_before_op });
+            state.trash_history.push_redo(TrashTransaction { files: succeeded.clone(), selection_before_op: selection_before_op.clone() });
         }
         if !residual.is_empty() {
-            tab.trash_history.push_undo(TrashTransaction { files: residual, selection_before_op: transaction.selection_before_op });
+            state.trash_history.push_undo(TrashTransaction { files: residual, selection_before_op });
         }
     }
-    reconcile_preview();
-    grid.setNeedsDisplay(true);
-    refresh_tab_bar();
+    let changed: Vec<PathBuf> = succeeded.iter().map(|file| file.item.path.clone()).collect();
+    reconcile_after_mutation(&changed, &changed);
 }
 
-fn redo_trash(grid: &GridView) {
-    let transaction = unsafe { (&mut *app_state()).tab_mut().trash_history.pop_redo() };
+fn redo_trash() {
+    let transaction = unsafe { (&mut *app_state()).trash_history.pop_redo() };
     let Some(transaction) = transaction else { return };
+    let blocked = {
+        let state = unsafe { &*app_state() };
+        transaction.files.iter().any(|file| {
+            state.pending_trash.contains(&file.item.path) || state.pending_trash.contains(&file.trashed_path)
+        })
+    };
+    if blocked {
+        unsafe { &mut *app_state() }.trash_history.push_redo(transaction);
+        show_error_alert("Redo unavailable", "A trash operation is still in progress for these items.");
+        return;
+    }
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
@@ -619,21 +705,16 @@ fn redo_trash(grid: &GridView) {
     }
     {
         let state = unsafe { &mut *app_state() };
-        let tab = state.tab_mut();
         let selection_before_op = transaction.selection_before_op.clone();
-        for file in succeeded.iter().rev() {
-            tab.catalog.remove(&file.item.path);
-        }
         if !succeeded.is_empty() {
-            tab.trash_history.push_undo(TrashTransaction { files: succeeded, selection_before_op });
+            state.trash_history.push_undo(TrashTransaction { files: succeeded.clone(), selection_before_op: selection_before_op.clone() });
         }
         if !residual.is_empty() {
-            tab.trash_history.push_redo(TrashTransaction { files: residual, selection_before_op: transaction.selection_before_op });
+            state.trash_history.push_redo(TrashTransaction { files: residual, selection_before_op });
         }
     }
-    reconcile_preview();
-    grid.setNeedsDisplay(true);
-    refresh_tab_bar();
+    let changed: Vec<PathBuf> = succeeded.iter().map(|file| file.item.path.clone()).collect();
+    reconcile_after_mutation(&changed, &[]);
 }
 
 pub(crate) fn quicklook_selected() {
@@ -641,6 +722,9 @@ pub(crate) fn quicklook_selected() {
     let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
     if panel.isVisible() {
         panel.orderOut(None);
+        return;
+    }
+    if unsafe { (*app_state()).tab().unavailable.is_some() } {
         return;
     }
     if unsafe { (*app_state()).tab().catalog.selected().is_none() } {
@@ -675,7 +759,9 @@ fn reconcile_preview() {
     let index = {
         let state = unsafe { &mut *app_state() };
         let tab = state.tab_mut();
-        if tab.preview.begin(&tab.catalog) {
+        if tab.unavailable.is_some() {
+            None
+        } else if tab.preview.begin(&tab.catalog) {
             tab.preview.current_index()
         } else {
             None
@@ -747,24 +833,27 @@ fn rename_item(from: &std::path::Path, name: &str) -> std::io::Result<()> {
     if from == to { return Ok(()) }
     move_item_exclusively(from, &to)?;
     let state = unsafe { &mut *app_state() };
-    let active = state.active;
-    for (index, tab) in state.tabs.iter_mut().enumerate() {
-        let anchor = tab.catalog.anchor().map(|path| relocated_path(path, from, &to));
-        let selected = if index == active { Some(to.clone()) } else {
-            tab.catalog.selected().map(|path| relocated_path(path, from, &to))
-        };
+    state.trash_history.relocate(from, &to);
+    for tab in state.tabs.iter_mut() {
+        let previous_selection = tab.catalog.selected_all().to_vec();
+        let focus = tab.catalog.selected().map(|path| path.to_path_buf());
+        let relocated_selection: Vec<PathBuf> = previous_selection.iter().map(|path| relocated_path(path, from, &to)).collect();
+        let relocated_focus = focus.as_deref().map(|path| relocated_path(path, from, &to));
         tab.root = relocated_path(&tab.root, from, &to);
         for (root, selection) in tab.back.iter_mut().chain(&mut tab.forward) {
             *root = relocated_path(root, from, &to);
             if let Some(path) = selection { *path = relocated_path(path, from, &to); }
         }
-        tab.trash_history.relocate(from, &to);
-        show_listing(&mut tab.catalog, load_listing(&tab.root, tab.mode), ListingPick::Restored(selected.clone()));
-        if index != active {
-            if let (Some(anchor), Some(selected)) = (anchor, selected) {
-                if tab.catalog.items().iter().any(|item| item.path == anchor) && tab.catalog.items().iter().any(|item| item.path == selected) {
-                    tab.catalog.select_range(&anchor, &selected).expect("restored selection is in the catalog");
-                }
+        match load_listing(&tab.root, tab.mode) {
+            Ok(items) => {
+                let mut catalog = Catalog::new();
+                catalog.append(items);
+                catalog.restore_selection(&relocated_selection, relocated_focus.as_deref());
+                tab.catalog = catalog;
+                tab.unavailable = None;
+            }
+            Err(error) => {
+                tab.unavailable = Some(format!("Unable to read {}: {error}", tab.root.display()));
             }
         }
     }
@@ -773,6 +862,7 @@ fn rename_item(from: &std::path::Path, name: &str) -> std::io::Result<()> {
 }
 
 fn rename_selected() {
+    if unsafe { (*app_state()).tab().unavailable.is_some() } { return; }
     let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let Some(name) = item.path.file_name().and_then(|name| name.to_str()) else {
@@ -809,14 +899,21 @@ fn enter_directory(path: PathBuf) {
     {
         let state = unsafe { &mut *app_state() };
         let tab = state.tab_mut();
-        let current = tab.root.clone();
-        let previous = tab.catalog.selected().map(|path| path.to_path_buf());
-        tab.back.push((current, previous));
-        tab.forward.clear();
-        tab.root = path;
         let mode = tab.mode;
-        let root = tab.root.clone();
-        show_listing(&mut tab.catalog, load_listing(&root, mode), ListingPick::First);
+        match load_listing(&path, mode) {
+            Ok(items) => {
+                let current = tab.root.clone();
+                let previous = tab.catalog.selected().map(|path| path.to_path_buf());
+                tab.back.push((current, previous));
+                tab.forward.clear();
+                tab.root = path;
+                show_listing(&mut tab.catalog, items, ListingPick::First);
+                tab.unavailable = None;
+            }
+            Err(error) => {
+                tab.unavailable = Some(format!("Unable to open {}: {error}", path.display()));
+            }
+        }
     }
     after_navigation(false);
 }
@@ -825,14 +922,22 @@ fn navigate_back() {
     {
         let state = unsafe { &mut *app_state() };
         let tab = state.tab_mut();
-        let Some((url, sel)) = tab.back.pop() else { return };
-        let current = tab.root.clone();
-        let leaving = tab.catalog.selected().map(|path| path.to_path_buf());
-        tab.forward.push((current, leaving));
-        tab.root = url;
+        let Some((url, sel)) = tab.back.last().cloned() else { return };
         let mode = tab.mode;
-        let root = tab.root.clone();
-        show_listing(&mut tab.catalog, load_listing(&root, mode), ListingPick::Restored(sel));
+        match load_listing(&url, mode) {
+            Ok(items) => {
+                tab.back.pop();
+                let current = tab.root.clone();
+                let leaving = tab.catalog.selected().map(|path| path.to_path_buf());
+                tab.forward.push((current, leaving));
+                tab.root = url;
+                show_listing(&mut tab.catalog, items, ListingPick::Restored(sel));
+                tab.unavailable = None;
+            }
+            Err(error) => {
+                tab.unavailable = Some(format!("Unable to open {}: {error}", url.display()));
+            }
+        }
     }
     after_navigation(true);
 }
@@ -841,14 +946,22 @@ fn navigate_forward() {
     {
         let state = unsafe { &mut *app_state() };
         let tab = state.tab_mut();
-        let Some((url, sel)) = tab.forward.pop() else { return };
-        let current = tab.root.clone();
-        let leaving = tab.catalog.selected().map(|path| path.to_path_buf());
-        tab.back.push((current, leaving));
-        tab.root = url;
+        let Some((url, sel)) = tab.forward.last().cloned() else { return };
         let mode = tab.mode;
-        let root = tab.root.clone();
-        show_listing(&mut tab.catalog, load_listing(&root, mode), ListingPick::Restored(sel));
+        match load_listing(&url, mode) {
+            Ok(items) => {
+                tab.forward.pop();
+                let current = tab.root.clone();
+                let leaving = tab.catalog.selected().map(|path| path.to_path_buf());
+                tab.back.push((current, leaving));
+                tab.root = url;
+                show_listing(&mut tab.catalog, items, ListingPick::Restored(sel));
+                tab.unavailable = None;
+            }
+            Err(error) => {
+                tab.unavailable = Some(format!("Unable to open {}: {error}", url.display()));
+            }
+        }
     }
     after_navigation(true);
 }
@@ -860,14 +973,21 @@ fn navigate_to_parent() {
         if tab.mode != BrowserMode::Browser { return; }
         let Some(parent) = tab.root.parent().map(|p| p.to_path_buf()) else { return };
         if parent == tab.root { return; }
+        let mode = tab.mode;
         let came_from = tab.root.clone();
         let leaving = tab.catalog.selected().map(|path| path.to_path_buf());
-        tab.back.push((came_from.clone(), leaving));
-        tab.forward.clear();
-        tab.root = parent;
-        let mode = tab.mode;
-        let root = tab.root.clone();
-        show_listing(&mut tab.catalog, load_listing(&root, mode), ListingPick::Restored(Some(came_from)));
+        match load_listing(&parent, mode) {
+            Ok(items) => {
+                tab.back.push((came_from.clone(), leaving));
+                tab.forward.clear();
+                tab.root = parent;
+                show_listing(&mut tab.catalog, items, ListingPick::Restored(Some(came_from)));
+                tab.unavailable = None;
+            }
+            Err(error) => {
+                tab.unavailable = Some(format!("Unable to open {}: {error}", parent.display()));
+            }
+        }
     }
     after_navigation(true);
 }
@@ -920,13 +1040,22 @@ fn close_other_tabs(index: usize) {
 }
 
 fn new_tab() {
-    let index = {
+    let created = {
         let state = unsafe { &mut *app_state() };
         let root = state.tab().root.clone();
         let mode = state.tab().mode;
-        state.new_tab(root, mode)
+        match load_listing(&root, mode) {
+            Ok(items) => Some(state.new_tab(root, mode, items)),
+            Err(error) => {
+                state.tab_mut().unavailable = Some(format!("Unable to open {}: {error}", root.display()));
+                None
+            }
+        }
     };
-    activate_tab(index);
+    match created {
+        Some(index) => activate_tab(index),
+        None => after_navigation(false),
+    }
 }
 
 fn toggle_view_mode() {
@@ -954,19 +1083,30 @@ fn open_path_in_new_tab(path: PathBuf) {
         let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone());
         (parent, Some(path))
     };
-    let index = {
+    let created = {
         let state = unsafe { &mut *app_state() };
         let mode = state.tab().mode;
-        let index = state.new_tab(root, mode);
-        if let Some(file) = file {
-            let tab = &mut state.tabs[index];
-            if let Some(i) = tab.catalog.items().iter().position(|item| item.path == file) {
-                select_index(&mut tab.catalog, i);
+        match load_listing(&root, mode) {
+            Ok(items) => {
+                let index = state.new_tab(root, mode, items);
+                if let Some(file) = file {
+                    let tab = &mut state.tabs[index];
+                    if let Some(i) = tab.catalog.items().iter().position(|item| item.path == file) {
+                        select_index(&mut tab.catalog, i);
+                    }
+                }
+                Some(index)
+            }
+            Err(error) => {
+                state.tab_mut().unavailable = Some(format!("Unable to open {}: {error}", root.display()));
+                None
             }
         }
-        index
     };
-    activate_tab(index);
+    match created {
+        Some(index) => activate_tab(index),
+        None => after_navigation(false),
+    }
 }
 
 fn navigate_tab_to_path(index: usize, path: PathBuf) {
@@ -979,25 +1119,38 @@ fn navigate_tab_to_path(index: usize, path: PathBuf) {
         } else {
             path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone())
         };
+        let mode = tab.mode;
         if tab.root != target_root {
-            let current = tab.root.clone();
-            let previous = tab.catalog.selected().map(|p| p.to_path_buf());
-            tab.back.push((current, previous));
-            tab.forward.clear();
-            tab.root = target_root.clone();
-            let mode = tab.mode;
-            show_listing(&mut tab.catalog, load_listing(&target_root, mode), ListingPick::First);
+            match load_listing(&target_root, mode) {
+                Ok(items) => {
+                    let current = tab.root.clone();
+                    let previous = tab.catalog.selected().map(|p| p.to_path_buf());
+                    tab.back.push((current, previous));
+                    tab.forward.clear();
+                    tab.root = target_root.clone();
+                    show_listing(&mut tab.catalog, items, ListingPick::First);
+                    tab.unavailable = None;
+                }
+                Err(error) => {
+                    tab.unavailable = Some(format!("Unable to open {}: {error}", target_root.display()));
+                }
+            }
         }
-        if !path.is_dir() {
+        if !path.is_dir() && tab.unavailable.is_none() {
             if let Some(i) = tab.catalog.items().iter().position(|item| item.path == path) {
                 select_index(&mut tab.catalog, i);
             }
         }
     }
-    activate_tab(index);
+    if unsafe { (*app_state()).active } == index {
+        after_navigation(false);
+    } else {
+        activate_tab(index);
+    }
 }
 
 fn open_selected() {
+    if unsafe { (*app_state()).tab().unavailable.is_some() } { return; }
     let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
     if item.kind == MediaKind::Directory {
         enter_directory(item.path);
@@ -1022,11 +1175,17 @@ fn copy_selected_path() {
 static DRAG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn dragging_items(view: &GridView) -> Vec<Retained<objc2_app_kit::NSDraggingItem>> {
+    let selected: std::collections::HashSet<PathBuf> = {
+        let state = unsafe { &*app_state() };
+        let tab = state.tab();
+        if tab.unavailable.is_some() {
+            return Vec::new();
+        }
+        tab.catalog.selected_all().iter().cloned().collect()
+    };
     let state = unsafe { &*app_state() };
     let tab = state.tab();
-    let Some((start, end)) = tab.catalog.selection_bounds() else { return Vec::new() };
-    (start..=end).filter_map(|index| {
-        let item = tab.catalog.items().get(index)?;
+    tab.catalog.items().iter().enumerate().filter(|(_, item)| selected.contains(&item.path)).map(|(index, item)| {
         let url = url_from_path(&item.path);
         let dragging_item: Retained<objc2_app_kit::NSDraggingItem> = unsafe {
             let alloc: *mut objc2_app_kit::NSDraggingItem = objc2::msg_send![objc2_app_kit::NSDraggingItem::class(), alloc];
@@ -1037,7 +1196,7 @@ fn dragging_items(view: &GridView) -> Vec<Retained<objc2_app_kit::NSDraggingItem
         unsafe {
             let _: () = objc2::msg_send![&*dragging_item, setDraggingFrame: view.cell_rect(index), contents: &*image];
         }
-        Some(dragging_item)
+        dragging_item
     }).collect()
 }
 
@@ -1072,7 +1231,10 @@ fn accept_dropped_path(view: &GridView, pasteboard: &objc2_app_kit::NSPasteboard
     if !path.is_file() { return false; }
     let Some(parent) = path.parent() else { return false };
     let mode = unsafe { (*app_state()).tab().mode };
-    if !load_listing(&parent.to_path_buf(), mode).iter().any(|item| item.path == path) { return false; }
+    match load_listing(parent, mode) {
+        Ok(items) if items.iter().any(|item| item.path == path) => {}
+        _ => return false,
+    }
     if unsafe { (*app_state()).tab().root != parent } {
         enter_directory(parent.to_path_buf());
     }
@@ -1089,10 +1251,18 @@ fn accept_dropped_path(view: &GridView, pasteboard: &objc2_app_kit::NSPasteboard
     true
 }
 
-fn load_listing(root: &PathBuf, mode: BrowserMode) -> Vec<MediaItem> {
+fn show_error_alert(title: &str, message: &str) {
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(message));
+    alert.runModal();
+}
+
+fn load_listing(root: &std::path::Path, mode: BrowserMode) -> Result<Vec<MediaItem>, view_core::ListingError> {
     match mode {
-        BrowserMode::Browser => list_browser(root).unwrap_or_default(),
-        BrowserMode::Recursive => scan_recursive(root).unwrap_or_default(),
+        BrowserMode::Browser => list_browser(root),
+        BrowserMode::Recursive => scan_recursive(root),
     }
 }
 
@@ -1132,7 +1302,7 @@ struct ThumbStore {
 }
 
 static THUMB_CACHE: std::sync::OnceLock<std::sync::Mutex<ThumbStore>> = std::sync::OnceLock::new();
-static THUMB_PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(PathBuf, u32)>>> =
+static THUMB_PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<(PathBuf, u32, Option<i64>, Option<u64>)>>> =
     std::sync::OnceLock::new();
 
 #[cfg(feature = "benchmark")]
@@ -1151,7 +1321,7 @@ fn thumb_store() -> std::sync::MutexGuard<'static, ThumbStore> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<(PathBuf, u32)>> {
+fn thumb_pending() -> std::sync::MutexGuard<'static, std::collections::HashSet<(PathBuf, u32, Option<i64>, Option<u64>)>> {
     THUMB_PENDING
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
@@ -1177,6 +1347,19 @@ fn cached_sized(path: &std::path::Path, pixels: u32, file_size: Option<i64>, mod
 
 fn remember_thumbnail(path: PathBuf, pixels: u32, file_size: Option<i64>, modification: Option<u64>, image: SyncImage, cost: usize) {
     let mut store = thumb_store();
+    let removed = match store.images.get_mut(&path) {
+        Some(entries) => {
+            let before: usize = entries.iter().map(|entry| entry.cost).sum();
+            entries.retain(|entry| entry.file_size == file_size && entry.modification == modification);
+            let after: usize = entries.iter().map(|entry| entry.cost).sum();
+            before - after
+        }
+        None => 0,
+    };
+    store.cost = store.cost.saturating_sub(removed);
+    if store.images.get(&path).is_some_and(|entries| entries.is_empty()) {
+        store.images.remove(&path);
+    }
     let replaced = {
         let entries = store.images.entry(path.clone()).or_default();
         if let Some(existing) = entries.iter_mut().find(|entry| entry.pixels == pixels && entry.file_size == file_size && entry.modification == modification) {
@@ -1222,17 +1405,18 @@ fn forget_thumbnail(path: &std::path::Path) {
 
 #[cfg(feature = "benchmark")]
 fn thumbnail_is_pending(path: &std::path::Path) -> bool {
-    thumb_pending().iter().any(|(pending, _)| pending == path)
+    thumb_pending().iter().any(|(pending, _, _, _)| pending == path)
 }
 
 #[cfg(feature = "benchmark")]
 fn request_quicklook_thumbnail(path: PathBuf) {
-    request_quicklook_thumbnail_sized(path, MOVIE_PREVIEW_PIXELS);
+    let item = unsafe { (*app_state()).items().iter().find(|item| item.path == path).cloned() }.expect("benchmark movie is in the catalog");
+    request_quicklook_thumbnail_sized(path, MOVIE_PREVIEW_PIXELS, item.file_size, item.modification);
 }
 
-fn request_quicklook_thumbnail_sized(path: PathBuf, pixels: u32) {
+fn request_quicklook_thumbnail_sized(path: PathBuf, pixels: u32, file_size: Option<i64>, modification: Option<u64>) {
     let pixels = pixels.clamp(1, 4096);
-    if !thumb_pending().insert((path.clone(), pixels)) {
+    if !thumb_pending().insert((path.clone(), pixels, file_size, modification)) {
         return;
     }
     let generator = unsafe { QLThumbnailGenerator::sharedGenerator() };
@@ -1251,7 +1435,7 @@ fn request_quicklook_thumbnail_sized(path: PathBuf, pixels: u32) {
     let path_for_reply = path.clone();
     let handler = block2::RcBlock::new(move |representation: *mut QLThumbnailRepresentation, error: *mut objc2_foundation::NSError| {
         if representation.is_null() {
-            thumb_pending().remove(&(path_for_reply.clone(), pixels));
+            thumb_pending().remove(&(path_for_reply.clone(), pixels, file_size, modification));
             if !error.is_null() {
                 eprintln!("view: thumbnail {}: {:?}", path_for_reply.display(), unsafe { &*error });
             }
@@ -1259,16 +1443,19 @@ fn request_quicklook_thumbnail_sized(path: PathBuf, pixels: u32) {
         }
         let image = SyncImage(unsafe { (*(representation as *const QLThumbnailRepresentation)).NSImage() });
         let path = path_for_reply.clone();
-        dispatch2::DispatchQueue::main().exec_async(move || thumbnail_completed(path, pixels, image));
+        dispatch2::DispatchQueue::main().exec_async(move || thumbnail_completed(path, pixels, file_size, modification, image));
     });
     unsafe { generator.generateBestRepresentationForRequest_completionHandler(&request, &handler) };
 }
 
-fn thumbnail_completed(path: PathBuf, pixels: u32, image: SyncImage) {
-    thumb_pending().remove(&(path.clone(), pixels));
+fn thumbnail_completed(path: PathBuf, pixels: u32, file_size: Option<i64>, modification: Option<u64>, image: SyncImage) {
+    thumb_pending().remove(&(path.clone(), pixels, file_size, modification));
+    if !view_core::file_version_matches(&path, file_size, modification) {
+        return;
+    }
     let size = image.0.size();
     let cost = ((size.width.max(1.0) * size.height.max(1.0) * 4.0) as usize).saturating_mul(4);
-    remember_thumbnail(path, pixels, None, None, image, cost);
+    remember_thumbnail(path, pixels, file_size, modification, image, cost);
     if let Some(refs) = window_refs().as_ref() {
         unsafe { &*refs.grid }.setNeedsDisplay(true);
     }
@@ -1856,11 +2043,31 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, rect: NSRect) {
-            let (items_len, carousel, bounds, items_snapshot) = {
+            let (items_len, carousel, selected_paths, items_snapshot, unavailable) = {
                 let state = unsafe { &*app_state() };
                 let tab = state.tab();
-                (tab.catalog.items().len(), tab.view_mode == ViewMode::Carousel, tab.catalog.selection_bounds(), tab.catalog.items().to_vec())
+                (tab.catalog.items().len(), tab.view_mode == ViewMode::Carousel, tab.catalog.selected_all().to_vec(), tab.catalog.items().to_vec(), tab.unavailable.clone())
             };
+            if let Some(message) = unavailable {
+                NSColor::windowBackgroundColor().setFill();
+                objc2_app_kit::NSRectFill(self.bounds());
+                let font = NSFont::systemFontOfSize(13.0);
+                let color = NSColor::secondaryLabelColor();
+                let pstyle: Retained<objc2_app_kit::NSMutableParagraphStyle> = {
+                    let p: Retained<objc2_app_kit::NSMutableParagraphStyle> = unsafe { objc2::msg_send![objc2_app_kit::NSMutableParagraphStyle::class(), new] };
+                    p.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+                    p.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByWordWrapping);
+                    p
+                };
+                let attrs = text_attributes(&font, &color, &pstyle);
+                use objc2_app_kit::NSStringDrawing;
+                let bounds = self.bounds();
+                let text_rect = NSRect::new(NSPoint::new(24.0, bounds.size.height / 2.0 - 48.0), NSSize::new((bounds.size.width - 48.0).max(0.0), 96.0));
+                unsafe { NSString::from_str(&message).drawInRect_withAttributes(text_rect, Some(&*attrs)) };
+                let _ = items_len;
+                return;
+            }
+            let selected: std::collections::HashSet<&std::path::Path> = selected_paths.iter().map(|path| path.as_path()).collect();
             let scale = thumbnail_scale();
             NSColor::windowBackgroundColor().setFill();
             objc2_app_kit::NSRectFill(self.bounds());
@@ -1897,7 +2104,7 @@ define_class!(
             for (i, item) in items_snapshot.iter().enumerate() {
                 let cell = self.cell_rect(i);
                 if !objc2_foundation::NSIntersectsRect(cell, rect) { continue; }
-                let is_selected = bounds.is_some_and(|(start, end)| i >= start && i <= end);
+                let is_selected = selected.contains(item.path.as_path());
                 if is_selected {
                     let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(cell, 10.0, 10.0);
                     let fill = NSColor::selectedContentBackgroundColor().colorWithAlphaComponent(0.6);
@@ -1913,8 +2120,8 @@ define_class!(
                     folder_like_icon(item)
                 } else if item.kind == MediaKind::Movie {
                     let pixels = pixel_limit(self, thumb_rect);
-                    let cached = cached_sized(&item.path, pixels, None, None);
-                    if cached.is_none() { request_quicklook_thumbnail_sized(item.path.clone(), pixels); }
+                    let cached = cached_sized(&item.path, pixels, item.file_size, item.modification);
+                    if cached.is_none() { request_quicklook_thumbnail_sized(item.path.clone(), pixels, item.file_size, item.modification); }
                     cached.or_else(|| folder_like_icon(item)).or_else(|| system_image("film"))
                 } else {
                     display_image(&item.path, pixel_limit(self, thumb_rect), item.file_size, item.modification).or_else(|| system_image("exclamationmark.triangle"))
@@ -1961,7 +2168,7 @@ define_class!(
             if code == 14 && !command && !control && !shift { quicklook_selected(); return; }
             if code == 51 || code == 117 { trash_selected(self); return; }
             if code == 126 && command { navigate_to_parent(); return; }
-            if code == 6 && command { if shift { redo_trash(self); } else { undo_trash(self); } return; }
+            if code == 6 && command { if shift { redo_trash(); } else { undo_trash(); } return; }
             if code == 123 && shift { navigate_back(); return; }
             if code == 124 && shift { navigate_forward(); return; }
             let items_len = unsafe { (*app_state()).items().len() };
@@ -2018,9 +2225,9 @@ define_class!(
         #[unsafe(method(moveSelectedToTrash:))]
         fn move_selected_action(&self, _sender: &NSObject) { trash_selected(self); }
         #[unsafe(method(undoTrash:))]
-        fn undo_trash_action(&self, _sender: &NSObject) { undo_trash(self); }
+        fn undo_trash_action(&self, _sender: &NSObject) { undo_trash(); }
         #[unsafe(method(redoTrash:))]
-        fn redo_trash_action(&self, _sender: &NSObject) { redo_trash(self); }
+        fn redo_trash_action(&self, _sender: &NSObject) { redo_trash(); }
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
@@ -2067,7 +2274,7 @@ define_class!(
                     } else {
                         tab.catalog.select(&clicked).expect("clicked item is in the catalog");
                     }
-                } else if tab.catalog.anchor().is_some() && tab.catalog.selection_bounds().is_some_and(|(start, end)| (start..=end).contains(&index)) {
+                } else if tab.catalog.is_selected(&clicked) {
                     self.ivars().deferred_click.set(Some(index));
                 } else {
                     tab.catalog.select(&clicked).expect("clicked item is in the catalog");
@@ -2510,6 +2717,106 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let folder = unsafe { (*app_state()).tab().root.clone() };
     let parent = folder.parent().unwrap().to_path_buf();
     assert_eq!(window.title().to_string(), folder.display().to_string(), "directory entry updates the window title");
+    {
+        let mixed_dir = parent.join("mixed-result");
+        std::fs::create_dir(&mixed_dir).unwrap();
+        let keep1 = mixed_dir.join("keep1.png");
+        let keep2 = mixed_dir.join("kept2.png");
+        std::fs::write(&keep1, include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        std::fs::write(&keep2, include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        let mixed_tab = unsafe { (*app_state()).new_tab(mixed_dir.clone(), BrowserMode::Browser, load_listing(&mixed_dir, BrowserMode::Browser).unwrap()) };
+        activate_tab(mixed_tab);
+        let staged = mixed_dir.join(".trashed-kept2.png");
+        std::fs::rename(&keep2, &staged).unwrap();
+        let attempted = vec![
+            MediaItem::new(&keep1, MediaKind::Image),
+            MediaItem::new(&keep2, MediaKind::Image),
+        ];
+        let map = vec![(keep2.clone(), staged.clone())];
+        let alert = complete_trash(attempted, map, Some("keep1.png: Operation not permitted".to_string()), vec![keep1.clone(), keep2.clone()]);
+        assert_eq!(alert.as_deref(), Some("keep1.png: Operation not permitted"), "a mixed result surfaces the failure");
+        {
+            let state = unsafe { &*app_state() };
+            assert!(state.items().iter().any(|i| i.path == keep1), "failed file stays in the catalog");
+            assert!(!state.items().iter().any(|i| i.path == keep2), "moved file leaves the catalog");
+            assert!(state.pending_trash.is_empty(), "attempted paths are released on completion");
+            assert!(state.trash_history.can_undo(), "successful subset is undoable");
+        }
+        undo_trash();
+        let state = unsafe { &*app_state() };
+        assert!(keep2.exists(), "undo restores the successful subset");
+        assert_eq!(std::fs::read(&keep1).unwrap(), include_bytes!("../../tests/fixtures/orientation.png"), "failed file is untouched");
+        assert!(state.items().iter().any(|i| i.path == keep2), "undo restores the catalog item");
+        close_tab(mixed_tab);
+        std::fs::remove_dir_all(&mixed_dir).unwrap();
+    }
+
+    {
+        let sparse_dir = parent.join("sparse-test");
+        std::fs::create_dir(&sparse_dir).unwrap();
+        for name in ["a.png", "b.png", "c.png", "d.png"] { std::fs::write(sparse_dir.join(name), include_bytes!("../../tests/fixtures/orientation.png")).unwrap(); }
+        let sparse_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser).unwrap()) };
+        activate_tab(sparse_tab);
+        let a = sparse_dir.join("a.png");
+        let b = sparse_dir.join("b.png");
+        let c = sparse_dir.join("c.png");
+        {
+            let state = unsafe { &mut *app_state() };
+            let tab = state.tab_mut();
+            tab.catalog.select(&a).unwrap();
+            tab.catalog.select_additional(&c).unwrap();
+        }
+        let staged_b = sparse_dir.join(".trashed-b.png");
+        std::fs::rename(&b, &staged_b).unwrap();
+        {
+            let state = unsafe { &mut *app_state() };
+            let tab = state.tab_mut();
+            let index = tab.catalog.items().iter().position(|item| item.path == b).unwrap();
+            let item = tab.catalog.items()[index].clone();
+            tab.catalog.remove(&b);
+            state.trash_history.record_trash(TrashTransaction {
+                files: vec![view_core::TrashedFile { item, trashed_path: staged_b.clone(), index }],
+                selection_before_op: vec![a.clone(), c.clone()],
+            });
+        }
+        assert!(!unsafe { (*app_state()).items().iter().any(|i| i.path == b) }, "trash removes the file");
+        {
+            let state = unsafe { &mut *app_state() };
+            let tab = state.tab_mut();
+            tab.catalog.select_range(&a, &c).expect("sparse range selection stays in the catalog");
+        }
+        assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "sparse range selects only the surviving paths");
+        undo_trash();
+        assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "undo of a trash inside a sparse selection preserves it");
+        let other_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser).unwrap()) };
+        let d = sparse_dir.join("d.png");
+        rename_item(&d, "d2.png").unwrap();
+        assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "renaming an unrelated file preserves sparse selections");
+        assert!(unsafe { &*app_state() }.tab().catalog.is_selected(&a), "highlighted: a");
+        assert!(unsafe { &*app_state() }.tab().catalog.is_selected(&c), "highlighted: c");
+        assert!(!unsafe { &*app_state() }.tab().catalog.is_selected(&b), "b stays unhighlighted after undo");
+        let drags = dragging_items(grid);
+        let drag_paths: Vec<PathBuf> = drags.iter().map(|item| {
+            let writer = item.item();
+            let url = writer.downcast_ref::<NSURL>().expect("file URL pasteboard writer");
+            path_from_url(url)
+        }).collect();
+        assert_eq!(drag_paths, &[a.clone(), c.clone()], "drag payload carries only the sparse selection");
+        let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+        send_key_via_app(&app, 51, false);
+        let trashed = pump_run_loop_until(std::time::Duration::from_secs(10), || !a.exists() && !c.exists());
+        assert!(trashed, "sparse trash removes exactly the selected files");
+        assert!(b.exists(), "unselected undo-restored file is not trashed");
+        let recorded = pump_run_loop_until(std::time::Duration::from_secs(10), || unsafe { (*app_state()).trash_history.can_undo() });
+        assert!(recorded, "trash completion is recorded before undo");
+        send_key_command(&app, 6);
+        let restored = pump_run_loop_until(std::time::Duration::from_secs(10), || a.exists() && c.exists());
+        assert!(restored, "undo restores the sparse trash");
+        close_tab(other_tab);
+        close_tab(sparse_tab);
+        std::fs::remove_dir_all(&sparse_dir).unwrap();
+    }
+
     let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
@@ -2656,7 +2963,8 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let index = tab.catalog.items().iter().position(|item| item.path == original).unwrap();
         let item = tab.catalog.items()[index].clone();
         tab.catalog.remove(&original);
-        tab.trash_history.record_trash(TrashTransaction {
+        let state = unsafe { &mut *app_state() };
+        state.trash_history.record_trash(TrashTransaction {
             files: vec![view_core::TrashedFile { item, trashed_path: trashed.clone(), index }],
             selection_before_op: vec![original.clone()],
         });
@@ -2682,7 +2990,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     std::fs::create_dir(&album).unwrap();
     std::fs::write(album.join("inside.png"), &content).unwrap();
     std::fs::rename(&album, &trashed_album).unwrap();
-    unsafe { (*app_state()).tab_mut().trash_history.record_trash(TrashTransaction {
+    unsafe { (*app_state()).trash_history.record_trash(TrashTransaction {
         files: vec![view_core::TrashedFile { item: MediaItem::new(&album, MediaKind::Directory), trashed_path: trashed_album.clone(), index: 0 }],
         selection_before_op: vec![album.clone()],
     }); }
@@ -2760,6 +3068,27 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         activate_tab(original_active.min(unsafe { (*app_state()).tabs.len().saturating_sub(1) }));
         enter_directory(folder.clone());
         refresh_tab_bar();
+
+        let active_index = unsafe { (*app_state()).active };
+        apply_tab_drop(parent.to_path_buf(), TabDropTarget::Tab(active_index));
+        assert_eq!(unsafe { (*app_state()).tab().root.clone() }, parent, "drop on the active tab navigates it");
+        assert_eq!(window.title().to_string(), parent.display().to_string(), "active tab drop refreshes the window title");
+        assert!(preview.image().is_some(), "active tab drop refreshes the carousel preview");
+        assert!(grid.frame().size.width > 0.0, "active tab drop refreshes the layout");
+        let drop_file = folder.join("a.png");
+        apply_tab_drop(drop_file.clone(), TabDropTarget::Tab(active_index));
+        assert_eq!(unsafe { (*app_state()).tab().root.clone() }, folder, "dropping a file navigates the active tab to its directory");
+        assert_eq!(unsafe { (*app_state()).items()[(*app_state()).selected().unwrap()].path.clone() }, drop_file, "dropping a file selects it");
+        assert_eq!(window.title().to_string(), folder.display().to_string(), "file drop refreshes the window title");
+        let panel = unsafe { QLPreviewPanel::sharedPreviewPanel(objc2::MainThreadMarker::new().unwrap()) }.unwrap();
+        if !panel.isVisible() {
+            quicklook_selected();
+        }
+        assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || panel.isVisible()), "quick look opens for the drop test");
+        apply_tab_drop(parent.to_path_buf(), TabDropTarget::Tab(active_index));
+        assert_eq!(unsafe { panel.currentPreviewItemIndex() }, 0, "quick look reconciles to the dropped folder");
+        panel.orderOut(None);
+        enter_directory(folder.clone());
     }
 
     let rename_dir = folder.join("rename-test");
@@ -2780,7 +3109,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     rename_item(&renamed, "NEW.png").unwrap();
     assert_eq!(unsafe { (*app_state()).tab().catalog.selected() }, Some(rename_dir.join("NEW.png").as_path()));
     navigate_to_parent();
-    let other_tab = unsafe { (*app_state()).new_tab(rename_dir.clone(), BrowserMode::Browser) };
+    let other_tab = unsafe { (*app_state()).new_tab(rename_dir.clone(), BrowserMode::Browser, load_listing(&rename_dir, BrowserMode::Browser).unwrap()) };
     let moved_dir = folder.join("renamed-test");
     rename_item(&rename_dir, "renamed-test").unwrap();
     assert!(moved_dir.join("NEW.png").exists());
@@ -2796,16 +3125,27 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     std::fs::copy(parent.join(".video.mp4"), &video).unwrap();
     unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Carousel; }
     let previous_image = preview.image().unwrap();
-    enter_directory(video_dir);
+    enter_directory(video_dir.clone());
     assert_eq!(unsafe { (*app_state()).items()[0].kind }, MediaKind::Movie);
     assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "video preview retains the previous image while its thumbnail loads");
+    let version_before = unsafe { (*app_state()).items()[0].clone() };
+    let clip_bytes = std::fs::read(&video).unwrap();
+    let mut replaced = clip_bytes.clone();
+    replaced.extend_from_slice(&clip_bytes);
+    std::fs::write(&video, replaced).unwrap();
+    navigate_to_parent();
+    enter_directory(video_dir);
+    let version_after = unsafe { (*app_state()).items().iter().find(|item| item.path == video).cloned() }.expect("replacement video is listed");
+    assert_ne!(version_before.file_size, version_after.file_size, "same-path replacement changes the file size");
+    let superseded_pixels = pixel_limit(preview, preview.bounds());
+    assert!(cached_sized(&video, superseded_pixels, version_before.file_size, version_before.modification).is_none(), "superseded thumbnail version is not served after a same-path replacement");
     let started = std::time::Instant::now();
     let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
         let (pixels, image) = { let refs = window_refs(); let refs = refs.as_ref().unwrap(); unsafe {
             (pixel_limit(&*refs.preview, (&*refs.preview).bounds()), (&*refs.preview_image).image())
         } };
-        if let Some(poster) = cached_sized(&video, pixels, None, None) {
-            assert!(image.is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&poster)), "video preview updates when thumbnail completes");
+        if let Some(poster) = cached_sized(&video, pixels, version_after.file_size, version_after.modification) {
+            assert!(image.is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&poster)), "video preview updates when the replacement thumbnail completes");
             eprintln!("app regression: PASS");
             std::process::exit(0);
         }
@@ -3080,7 +3420,10 @@ fn main() {
         tab.root = root.clone();
         tab.mode = mode;
         tab.view_mode = view_mode;
-        show_listing(&mut tab.catalog, load_listing(&root, mode), ListingPick::First);
+        match load_listing(&root, mode) {
+            Ok(items) => show_listing(&mut tab.catalog, items, ListingPick::First),
+            Err(error) => tab.unavailable = Some(format!("Unable to read {}: {error}", root.display())),
+        }
         let state = unsafe { &mut *app_state() };
         state.tabs = vec![tab];
         state.active = 0;

@@ -166,6 +166,34 @@ impl fmt::Display for ListingError {
 
 impl std::error::Error for ListingError {}
 
+/// Whether the file at `path` still matches the version (size in bytes,
+/// modification time in whole seconds) captured earlier. A missing or
+/// unreadable file never matches a recorded version.
+pub fn file_version_matches(path: &Path, file_size: Option<i64>, modification: Option<u64>) -> bool {
+    if file_size.is_none() && modification.is_none() {
+        return true;
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if let Some(size) = file_size
+        && metadata.len() as i64 != size
+    {
+        return false;
+    }
+    if let Some(mtime) = modification {
+        let current = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        if current != Some(mtime) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn list_browser(dir: &Path) -> Result<Vec<MediaItem>, ListingError> {
     let mut items = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| ListingError::new(dir, e))? {
@@ -278,7 +306,7 @@ impl Catalog {
         let mut seen = HashSet::new();
         self.selection = paths
             .iter()
-            .filter(|path| seen.insert(path.clone()))
+            .filter(|path| seen.insert((*path).clone()))
             .filter(|path| self.entries.iter().any(|item| &item.path == *path))
             .cloned()
             .collect();
@@ -1200,6 +1228,28 @@ impl ThumbnailCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_version_matches_rejects_stale_and_missing_files() {
+        let dir = std::env::temp_dir().join(format!("view-version-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        std::fs::write(&path, b"first").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let size = Some(metadata.len() as i64);
+        let mtime = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+        assert!(file_version_matches(&path, size, mtime), "an unchanged file matches its recorded version");
+        assert!(file_version_matches(&path, size, None));
+        assert!(file_version_matches(&path, None, mtime));
+        assert!(file_version_matches(&path, None, None), "an unrecorded version always matches");
+        assert!(!file_version_matches(&path, Some(size.unwrap() + 1), mtime), "a size mismatch is stale");
+        assert!(!file_version_matches(&path, size, Some(mtime.unwrap().saturating_add(1))), "an mtime mismatch is stale");
+        std::fs::write(&path, b"second version is longer").unwrap();
+        assert!(!file_version_matches(&path, size, mtime), "a replaced file no longer matches the old version");
+        let missing = dir.join("missing.mp4");
+        assert!(!file_version_matches(&missing, size, mtime), "a missing file never matches");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn restore_selection_keeps_sparse_paths_and_focus() {
