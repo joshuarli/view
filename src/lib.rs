@@ -145,15 +145,36 @@ fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
 }
 
-pub fn list_browser(dir: &Path) -> std::io::Result<Vec<MediaItem>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListingError {
+    pub path: PathBuf,
+    pub kind: std::io::ErrorKind,
+    pub message: String,
+}
+
+impl ListingError {
+    fn new(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self { path: path.into(), kind: source.kind(), message: source.to_string() }
+    }
+}
+
+impl fmt::Display for ListingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.message)
+    }
+}
+
+impl std::error::Error for ListingError {}
+
+pub fn list_browser(dir: &Path) -> Result<Vec<MediaItem>, ListingError> {
     let mut items = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(dir).map_err(|e| ListingError::new(dir, e))? {
+        let entry = entry.map_err(|e| ListingError::new(dir, e))?;
         let path = entry.path();
         if is_symlink(&path) || is_hidden(&path) || is_package(&path) {
             continue;
         }
-        let metadata = entry.metadata()?;
+        let metadata = entry.metadata().map_err(|e| ListingError::new(&path, e))?;
         if metadata.is_dir() {
             items.push(MediaItem::new(path, MediaKind::Directory));
         } else if metadata.is_file()
@@ -172,11 +193,12 @@ pub fn list_browser(dir: &Path) -> std::io::Result<Vec<MediaItem>> {
     Ok(items)
 }
 
-pub fn scan_recursive(root: &Path) -> std::io::Result<Vec<MediaItem>> {
+pub fn scan_recursive(root: &Path) -> Result<Vec<MediaItem>, ListingError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)?
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .map_err(|e| ListingError::new(&dir, e))?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .collect();
         entries.sort_by(|a, b| {
@@ -246,6 +268,24 @@ impl Catalog {
             .and_then(|path| self.entries.iter().position(|item| item.path == path))
             .unwrap_or(focus);
         Some((anchor.min(focus), anchor.max(focus)))
+    }
+
+    pub fn is_selected(&self, path: &Path) -> bool {
+        self.selection.iter().any(|selected| selected.as_path() == path)
+    }
+
+    pub fn restore_selection(&mut self, paths: &[PathBuf], focus: Option<&Path>) {
+        let mut seen = HashSet::new();
+        self.selection = paths
+            .iter()
+            .filter(|path| seen.insert(path.clone()))
+            .filter(|path| self.entries.iter().any(|item| &item.path == *path))
+            .cloned()
+            .collect();
+        self.focus = focus
+            .filter(|candidate| self.selection.iter().any(|selected| selected.as_path() == *candidate))
+            .map(|candidate| candidate.to_path_buf())
+            .or_else(|| self.selection.first().cloned());
     }
 
     fn repair_focus(&mut self) {
@@ -1160,6 +1200,78 @@ impl ThumbnailCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_selection_keeps_sparse_paths_and_focus() {
+        let mut catalog = Catalog::new();
+        let a = MediaItem::new("/x/a.png", MediaKind::Image);
+        let b = MediaItem::new("/x/b.png", MediaKind::Image);
+        let c = MediaItem::new("/x/c.png", MediaKind::Image);
+        catalog.append(vec![a.clone(), b.clone(), c.clone()]);
+        catalog.select(&a.path).unwrap();
+        catalog.select_additional(&c.path).unwrap();
+        assert!(catalog.is_selected(&a.path));
+        assert!(!catalog.is_selected(&b.path));
+        assert!(catalog.is_selected(&c.path));
+        catalog.restore_selection(&[a.path.clone(), c.path.clone()], Some(&c.path));
+        assert_eq!(catalog.selected_all(), [a.path.clone(), c.path.clone()]);
+        assert_eq!(catalog.selected(), Some(c.path.as_path()));
+        catalog.restore_selection(&[b.path.clone()], Some(&a.path));
+        assert_eq!(catalog.selected_all(), [b.path.clone()]);
+        assert_eq!(catalog.selected(), Some(b.path.as_path()), "focus outside the selection falls back to the first selected path");
+        catalog.restore_selection(&[a.path.clone()], Some(Path::new("/x/missing.png")));
+        assert_eq!(catalog.selected(), Some(a.path.as_path()), "unknown focus falls back to the first selected path");
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn list_browser_reports_a_read_failure_with_the_path() {
+        let dir = std::env::temp_dir().join(format!("view-listing-test-{}", std::process::id()));
+        let blocked = dir.join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("a.png"), b"png").unwrap();
+        set_mode(&blocked, 0o000);
+        let readable = fs::read_dir(&blocked).is_ok();
+        let result = list_browser(&blocked);
+        set_mode(&blocked, 0o755);
+        if readable {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let error = result.expect_err("an unreadable directory must not look like an empty listing");
+        assert_eq!(error.path, blocked);
+        assert_eq!(error.kind, std::io::ErrorKind::PermissionDenied);
+        let empty = std::env::temp_dir().join(format!("view-listing-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(list_browser(&empty).unwrap(), Vec::new(), "a readable empty directory still lists as empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn scan_recursive_reports_the_unreadable_child_directory() {
+        let dir = std::env::temp_dir().join(format!("view-scan-test-{}", std::process::id()));
+        let blocked = dir.join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(dir.join("visible.png"), b"png").unwrap();
+        std::fs::write(blocked.join("hidden.png"), b"png").unwrap();
+        set_mode(&blocked, 0o000);
+        let readable = fs::read_dir(&blocked).is_ok();
+        let result = scan_recursive(&dir);
+        set_mode(&blocked, 0o755);
+        if readable {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let error = result.expect_err("an unreadable child must fail discovery, not silently drop its contents");
+        assert_eq!(error.path, blocked);
+        assert_eq!(error.kind, std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn natural_order_numeric_case_insensitive() {
