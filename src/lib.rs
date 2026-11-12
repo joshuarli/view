@@ -1,11 +1,5 @@
-//! Rust port of the `viewCore` discovery/catalog/scheduling subset.
-//!
-//! The Swift app is AppKit (`NSCollectionView`) plus Quick Look; the GUI is
-//! not ported. This crate covers the pure domain logic exercised by the
-//! Swift benchmarks — natural ordering, browser listing, recursive
-//! discovery, catalog selection/removal/insertion, and demand scheduling
-//! bookkeeping — with only the standard library plus `flate2` for PNG
-//! decode. It is the subject of the head-to-head benchmark in `src/bin`.
+//! Directory discovery and path-based state for the native macOS browser.
+//! Includes catalog selection, preview sessions, trash history, and image helpers.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -101,8 +95,6 @@ pub fn browser_order(a: &MediaItem, b: &MediaItem) -> Ordering {
 }
 
 pub fn kind_for_extension(path: &Path) -> Option<MediaKind> {
-    // Mirrors the Swift UTType conformance surface: image and movie types
-    // across the common extensions emitted in the benchmark corpus.
     match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
         Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("tif") | Some("tiff")
         | Some("heic") | Some("heif") | Some("avif") | Some("bmp") | Some("jp2") | Some("j2k") | Some("jp2c")
@@ -192,7 +184,6 @@ pub fn scan_recursive(root: &Path) -> std::io::Result<Vec<MediaItem>> {
             let bn = b.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             natural_cmp(&an, &bn)
         });
-        // Depth-first like the Swift scanner (stable batch order).
         for path in entries.iter().rev() {
             if is_symlink(path) || is_hidden(path) || is_package(path) {
                 continue;
@@ -350,9 +341,6 @@ impl Default for Catalog {
     fn default() -> Self { Self::new() }
 }
 
-// ---------------------------------------------------------------------------
-// Demand scheduler bookkeeping (sync port of ThumbnailScheduler state machine)
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ThumbKey {
@@ -454,19 +442,12 @@ impl Scheduler {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PNG decode (subset: 8-bit colour types 0/2/4/6, non-interlaced) via flate2
-// ---------------------------------------------------------------------------
 
 pub fn decode_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
     decode_png_bytes(&data)
 }
 
-// Decode with the same ImageIO backend as Swift (CGImageSource) —
-// full bitmap render via CGContext so callers get real pixels at
-// system-decoder speed. The pure-Rust path above remains the
-// parallelism fallback and the default for pixel-exact comparisons.
 pub fn decode_png_native(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     unsafe {
         let url = url_for(path);
@@ -725,10 +706,6 @@ fn unfilter_row(filter: u8, bytes: &[u8], prev: &[u8], channels: usize) -> Vec<u
     out
 }
 
-// ---------------------------------------------------------------------------
-// Launch / root / commands / preview / trash history / thumbnail cache
-// (parity with Sources/viewCore)
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[derive(Default)]
@@ -1096,10 +1073,6 @@ impl Default for TrashService {
     fn default() -> Self { Self::new() }
 }
 
-// ---------------------------------------------------------------------------
-// Bounded FIFO-evicting thumbnail cache. Image buffers are owned by the
-// caller for decoding; the cache stores byte-costed buckets to cap memory.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ThumbCacheKey {
@@ -1444,7 +1417,6 @@ mod tests {
 
     #[test]
     fn decode_png_bytes_yields_pixels_for_minimal_rgb_png() {
-        // Construct the PNG through zlib directly to avoid any encoder dep:
         let raw_scanline = [0u8, 255, 0, 0];
         let mut zlib = Vec::new();
         {

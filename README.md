@@ -1,53 +1,44 @@
 # view
 
-A native macOS browser for images and videos, written in Rust on AppKit. It opens one folder at a time: subfolders and supported images and videos in a thumbnail grid, folders first, then files by descending size. Double-click or press Return on a folder to enter it; Backspace goes up. `--recursive` flattens a whole tree into one grid.
+A native macOS image and video browser with folder tabs, a thumbnail grid, and a carousel preview. Folders sort first by natural name. Files follow by descending size, then natural name.
+
+## Install and launch
+
+Download the Apple Silicon binary from [Releases](https://github.com/joshuarli/view/releases), unzip it, and make it executable:
 
 ```sh
-cargo build --profile dist --bin app --features app
-./target/dist/app ~/Pictures
-./target/dist/app --recursive ~/Pictures
+chmod +x view-aarch64-apple-darwin
+./view-aarch64-apple-darwin ~/Pictures
+./view-aarch64-apple-darwin --recursive ~/Pictures
 ```
 
-## Interaction model
+For a `View.app` bundle, follow [source installation](docs/architecture.md#build-and-package). The bundle declares macOS 27.0 as its minimum version. With no directory argument, the executable browses the current directory. Unknown options produce a `view: ...` error and exit status 1.
+
+Browser mode lists one directory per tab. Recursive mode flattens the directory tree without showing folders. Its current traversal emits files in reverse natural name order within each directory, followed by child directories. Hidden names, symlinks, and recognized package directories are skipped.
+
+## Controls
 
 | Interaction | Behavior |
 | --- | --- |
-| Launch with a directory | Browse that folder |
-| Double-click or Return | Enter a folder (browse mode) |
-| Click thumbnail | Select item |
-| Drag a thumbnail | Drag the file out of the app |
-| Right-click | Context menu (Open, Show in Finder, Copy Path, Move to Trash, Undo, Redo) |
-| Arrow keys | Move selection; grid/carousel window keeps the selection visible |
-| Space | Toggle inline video playback in carousel mode; in grid mode, open the carousel and start playback for a video. For still images, or if a video cannot play inline, Space toggles the Quick Look panel. While a video is loading, Space toggles whether playback starts when ready. |
-| E | Open the Quick Look panel for the selection (for a video, Quick Look's editing controls) |
-| Backspace | Up one folder (browse mode) |
-| Cmd+Backspace or Ctrl+Backspace | Trash the selection |
-| Cmd+Z / Cmd+Shift+Z | Undo / redo Move to Trash |
-| Shift+Left / Shift+Right | Back / forward through history |
+| Click; Shift-click | Select an item; extend the selection from its anchor |
+| Double-click or Return on a folder | Enter the folder |
+| Arrow keys | Move selection and scroll it into view |
+| Backspace or Delete | Move the selection to Trash, including with Cmd or Ctrl held |
+| Cmd+Up | Go to the parent folder in browser mode |
+| Cmd+Z; Cmd+Shift+Z | Undo; redo Move to Trash |
+| Shift+Left; Shift+Right | Navigate back; forward |
+| Space on a video | Toggle inline playback in the carousel; from the grid, enter the carousel and request playback |
+| Space on another item | Toggle Quick Look |
+| E | Toggle Quick Look for the selection, including videos |
+| Cmd+T; Cmd+W | Open a tab for the current folder; close the active tab when another remains |
+| Cmd+minus; Cmd+plus | Decrease; increase thumbnail size |
+| Drag selected thumbnails | Copy the files to another application |
+| Drop a folder or media file | Browse the folder or select the file; the tab bar also accepts drops |
+| Right-click an item | Open, show in Finder, copy its path, rename, move to Trash, or undo/redo |
 | Cmd+Q | Quit |
 
-Folders sort first by natural name. Files sort by descending size; unknown or equal sizes fall back to natural name order. `--recursive` lists every image and video beneath the root in natural relative-path order.
+The toolbar and View menu switch between carousel and grid. The app remembers the chosen view mode. Video previews retain a poster until a frame is ready. While loading, Space toggles the request to play when ready. After a video load fails, Space can open Quick Look instead.
 
-Carousel mode plays supported videos inline with a reusable `AVPlayer`, keeping a thumbnail poster visible until the player item is ready. Quick Look remains available for still-image preview, adjacent-item navigation, and as a fallback when inline playback is unavailable. Without a directory the launcher opens the current directory, and an unknown option exits with a one-line `view: ...` error. `View.app` can be rebuilt with `scripts/package-app.sh`; set `VIEW_APP` to point the launcher at another bundle.
+Catalogs and trash history last for the current session. There is no filesystem watcher, so changes made elsewhere do not automatically refresh an open listing. Search, tags, a persistent media library, and a custom editor are outside the app's scope.
 
-## Scope
-
-Search, tagging, libraries, editing, slideshows, AI indexing, preferences, background daemons, network access, and external dependencies are out of scope. Inline video playback is limited to the carousel preview and relies on system media frameworks.
-
-## Layout
-
-- `src/lib.rs`: discovery, catalog, thumbnails, trash, preview session, launch options. See [docs/architecture.md](docs/architecture.md).
-- `src/bin/app.rs`: the AppKit window, grid, Quick Look panel, menus, drag-out.
-- `benches/view.rs` and `src/bin/app/benchmarks.rs`: benchmark harness. See [docs/performance.md](docs/performance.md).
-- `tests/`: integration and UI-parity suites.
-- `scripts/package-app.sh`: packages `View.app` from a dist build.
-- `Info.plist`: bundle metadata.
-
-Build with `cargo build --profile dist --bin app --features app`, test with `cargo test --profile dist`, package with `sh scripts/package-app.sh`.
-
-## Licensing
-
-See `LICENSE` if present; otherwise this personal project is provided as-is.
-
-
-For a one-shot build-and-install, use `make install` (installs `View.app` to `/Applications` by default; override with `INSTALL_DIR=...`).
+Report problems through [Issues](https://github.com/joshuarli/view/issues). No license file is included in this repository.

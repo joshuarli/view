@@ -1,9 +1,9 @@
 # Performance
 
 These targets describe interactive browsing on an Apple Silicon Mac. They are
-engineering goals, not automated release gates. Compare changes on the same
-machine and unchanged corpus. Resize meets its frame target. Scroll and
-carousel still miss theirs.
+engineering goals, not automated release gates. The measurements below are
+historical results from 2026-11-09, before the tab and later playback changes.
+They do not establish the current revision's latency, memory use, or binary size.
 
 ## Targets
 
@@ -34,7 +34,6 @@ It does not wait for asynchronous video thumbnails to settle.
 
 The harness writes its corpus under `.work/bench-corpus` and reuses that tree
 while the `READY` stamp matches the generator. Benchmarks read this tree.
-`.work/` is gitignored.
 
 `small` and `typical` hold generated 1920×1080 JPEGs at quality 0.55, each
 with its own noise seed. `small` holds 42, and the largest sorts first for
@@ -47,7 +46,13 @@ Quick Look test already uses.
 
 ## Run
 
-Check that every workload completes:
+The benchmark target currently cannot compile: `prepare_window` and other
+workloads in `src/bin/app/benchmarks.rs` still access fields moved from
+`AppState` into `Tab`. Repair those references before using these commands.
+The production app and benchmark are separate targets.
+
+The runner also requires `fd` and the external `perf-gate-ready` command.
+After repairing the harness, check workload completion with:
 
 ```sh
 sh scripts/bench.sh --test
@@ -103,7 +108,7 @@ Rust allocations on the benchmark thread, not native framework allocations or
 background work. The synchronous grid measurements do not wait for all video
 thumbnails to finish. None of these measurements represents a cold disk cache.
 
-## Baseline
+## Historical baseline
 
 The table below is the private-corpus measurement from 2026-11-09, before
 concurrent thumbnail decode. The harness no longer reads that disk. Compare a
@@ -162,8 +167,8 @@ builds. Scroll's ranges do not. Carousel Rust allocations rose from 51–57
 Five production-app memory runs on the typical directory sampled a median
 maximum of 114.2 MiB RSS (range 114.1–114.2) and a median final RSS of 113.7
 MiB (range 113.7–113.8). The previous paint path sampled 86.4 MiB maximum and
-84.5 MiB final. The increase is the retained display-sized thumbnails. The
-500 MiB budget still holds. The memory workload does not wait for video
+84.5 MiB final. The increase is the retained display-sized thumbnails. Those
+runs were below the 500 MiB budget. The memory workload does not wait for video
 thumbnails.
 
 The production `dist` binary, with the debug info that the `dist` profile
@@ -172,12 +177,13 @@ Rustybench and its dependencies are enabled only by the `benchmark` feature.
 Production build-time impact has not been measured. Binary size after
 concurrent decode has not been remeasured.
 
-## Generated corpus
+## Historical generated-corpus results
 
-On 2026-11-09 the same Apple M1 ran the current `dist` bench on the generated
+On 2026-11-09 the same Apple M1 ran that revision's `dist` bench on the generated
 corpus. Five processes of five samples were interleaved with a rejected
-point-size build. The rows below are the current-code side. Each value is the
-median of the five run medians, and the range is the spread of those medians.
+point-size build. The rows below are the retained build from that comparison.
+Each value is the median of the five run medians, and the range is the spread of
+those medians.
 
 | Workflow | Median ms | Range ms | Rust allocations | Rust bytes |
 | --- | ---: | ---: | ---: | ---: |

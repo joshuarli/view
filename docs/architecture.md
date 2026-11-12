@@ -1,72 +1,57 @@
 # Architecture
 
+One AppKit window hosts multiple tabs. Each `Tab` owns a root directory, browser mode, catalog, selection, navigation history, preview session, and trash history. `AppState` owns the tabs and active index. A shared grid and carousel render the active tab.
+
+## Catalog and navigation
+
+`list_browser` and `scan_recursive` in `src/lib.rs` discover media. Browser listings put directories first by natural name, followed by files in descending size order. Recursive traversal visits child directories through a stack and emits each directory's files in reverse natural name order. It does not globally sort relative paths.
+
+Navigation synchronously replaces a tab's catalog through `load_listing` and `show_listing` in `src/bin/app.rs`. There are no incremental scan batches, scan generations, or background directory workers. Listing errors currently become empty vectors. `after_navigation` updates the title, layout, Quick Look, scroll position, and tab bar.
+
+`Catalog` stores selection membership, anchor, and focus by path. `PreviewSession` supplies Quick Look's URL list and selected index. Panel navigation updates catalog focus. Selection membership can be sparse after insertion, even though some UI consumers still reconstruct a contiguous range. The open defects are in [TODO.md](../TODO.md).
+
+There is no persistent catalog or filesystem watcher. Navigation rereads a directory; merely activating a tab keeps its existing catalog. `NSUserDefaults` stores the chosen view mode, and `NSWindow` uses a frame autosave name.
+
+## Images and video
+
+The application owns `ThumbStore` in `src/bin/app.rs`, with FIFO eviction against `THUMBNAIL_CACHE_LIMIT` (96 MiB of estimated image data). Still-image keys include path, requested pixel size, file size, and modification time. Movie requests and cached results currently omit file metadata.
+
+Still images use ImageIO thumbnails with orientation transforms. `draw_rect` gathers visible cache misses; `decode_cg_thumbnails` joins concurrent decodes before drawing continues. A single preview miss decodes synchronously. This work therefore blocks the main event loop until it finishes.
+
+Movies use asynchronous `QLThumbnailGenerator` requests, deduplicated by path and pixel size. Requests have no app-managed concurrency limit, generation check, or navigation cancellation. Completions cache the result and refresh the current carousel selection.
+
+`src/bin/app/player.rs` owns one reusable `AVPlayer`, its view, the selected item, and KVO observation. Loading a different movie removes the old item's status observer and replaces the player item. The poster stays visible until both the item and its display are ready. Space toggles playback or pending autoplay; a failed item can fall back to Quick Look. Grid mode and non-video selections release the item. Quick Look remains available through E for videos.
+
+The exported `Scheduler`, `ThumbnailCache`, `TrashService`, and PNG decoder helpers in `src/lib.rs` have separate core tests. The application does not use them for thumbnail scheduling, cache ownership, or trash execution. Its still-image path does not call `decode_png` or `decode_png_native`.
+
+## File operations and lifecycle
+
+`trash_selected` calls `NSWorkspace.recycleURLs` and receives original-to-Trash mappings asynchronously. It currently chooses the first tab whose catalog contains a mapped path and records that tab's undo transaction. A non-null error causes the completion to return without applying its successful mappings. These limitations and cross-directory undo behavior are covered by the [draft ownership design](rfc/VIEW-3-trash-operation-ownership.md).
+
+Rename, undo, and redo call `renamex_np` with `RENAME_EXCL`. Existing destinations are preserved, and cross-volume moves fail. Failed undo/redo entries stay on their original history stack for retry. Rename reloads all tabs, relocates roots and navigation paths, and updates original paths in trash history.
+
+AppKit state belongs to the main thread. Quick Look thumbnail callbacks marshal successful results to the main queue. ImageIO workers own their `CGImage` until joined. The app has no termination coordinator that drains pending trash or thumbnail requests; SIGINT and SIGTERM call `exit(0)`.
+
+AppKit provides native window, menu, focus, drag, Quick Look, and playback controls. Replacing it would require rebuilding those behaviors as well as the custom grid.
+
+## Build and package
+
+Build with the nightly pinned in `rust-toolchain.toml`. The `app` feature selects the native host. The `dist` profile enables fat LTO and retains debug information.
+
+```sh
+cargo build --profile dist --bin app --features app --locked
+./target/dist/app ~/Pictures
+cargo run --profile dist --bin app --features app -- --recursive ~/Pictures
+sh scripts/package-app.sh
+make install
 ```
-Terminal: cargo run --profile dist --bin app --features app [--recursive] [directory]
-          |
-          v
-      View.app (NSApplication, one NSWindow)
-          |
-          v
-   Directory Listing (browser)  |  Recursive Media Scanner (--recursive)
-          |
-          v
-   In-memory Media Catalog (flat, ordered)
-          |
-          v
-    Custom grid view (~160pt cells, carousel strip in carousel mode)
-          |
-          +-- QLThumbnailGenerator (+ ImageIO fallback via decode_png_native)
-          |      |
-          |      +-- Bounded request scheduler (visible-first + prefetch)
-          |      +-- Pure-Rust PNG decode (decode_png)
-          |
-          +-- AVPlayerView (inline video in the carousel preview, Space)
-          |
-          +-- QLPreviewPanel (Space for stills and unplayable items)
-          |
-          +-- NSWorkspace.recycle (Cmd+Delete or Ctrl+Delete)
-```
 
-The app owns no persistent database. Files trashed by the app are removed from the in-memory catalog; there is no watcher or rescan. Browser mode replaces the catalog on navigation and keeps the thumbnail cache across directories.
-
-## Modules
-
-`src/lib.rs` has no AppKit dependency except the `decode_png_native` FFI:
-
-- Discovery: shared natural-name ordering, package/hidden/symlink skipping, extension surface + content sniffing for extensionless files, browser ordering (directories first, size descending) and recursive scan (stable natural relative-path order).
-- Catalog: flat ordered array plus stable selection by URL. `selected` is the focus. A range keeps its anchor at the start of `selected_all` and its focus on the clicked path. Append preserves selection; removing the last selected entry picks the neighbor at the removal index, else the final item.
-- PreviewSession: stable snapshot of URLs plus the selected index for Quick Look. Survives scan appends and trash removals by identity, never by stale index.
-- Trash: `TrashService` guards one in-flight operation per URL and only removes from the catalog after `recycle` confirms. `restore` moves a trashed file back.
-- TrashHistory: undo/redo stacks for trash operations. Each transaction records the items, their trash locations, their catalog positions, and the selection before trashing.
-- Scheduler: demand bookkeeping (visible first, prefetch, generations, cancel) plus `execute_pending` worker-limited execution returning `(key, generation)` completion pairs.
-- ThumbnailCache: byte-costed FIFO-eviction cache with a 96 MiB default limit (`THUMBNAIL_CACHE_LIMIT`). Keys include path, kind, pixel size, and scale. The grid keeps its own decoded images under that same limit.
-- GridCommand: Space, E, Ctrl+Delete, Cmd+Z / Cmd+Shift+Z undo/redo, Shift+arrows history, UpLevel, ActivateDirectory.
-- decode_png: pure-Rust 8-bit PNG decode (colour types 0/2/4/6, non-interlaced) via flate2. `decode_png_native` is the ImageIO path via `CGImageSource` + `CGBitmapContext`.
-
-`src/bin/app.rs` is the AppKit binary (feature `app`), with inline-video state extracted to `src/bin/app/player.rs`:
-
-- Owns `NSApplication`, the window, the main menu, and shutdown. Termination waits for scan cancellation, thumbnail cancellation, and any pending trash.
-- Custom grid view owns the catalog and both content modes. Browser mode lists one directory, applies each listing atomically, and navigates into folders or to the parent with a scan-generation guard; going up selects the folder it came from. Recursive mode keeps incremental inserts per batch. Both share selection by identity, demand updates from visible plus scroll-direction prefetch, and scroll-into-view after trash and panel navigation. A cell paints a display-sized ImageIO thumbnail kept in the thumbnail cache. When several visible stills miss that cache, they are decoded on a concurrent queue and joined before painting continues. The file-size label comes from the catalog. Handles Space, E (Quick Look for the selection), Return, Backspace/Delete, Cmd+Delete, Cmd+Up, and Ctrl+Delete in `keyDown`.
-- QLPreviewPanel: the panel remains the preview surface for still images and for adjacent-item navigation, and the fallback when inline video playback is unavailable. Space toggles the panel for stills; for movies it opens the panel only when inline playback fails. The panel's items are the current `PreviewSession`, rebuilt from the catalog after the listing changes and closed when that session is empty. Stepping through items updates the grid selection. The grid reflows when the window changes size, and Cmd-minus / Cmd-plus resize thumbnails in both modes. Selected items can be dragged out as file URLs; dropping a folder opens it and dropping a media file selects it.
-- Inline video: `src/bin/app/player.rs` owns the carousel preview player state (`AVPlayerView` backed by a reusable `AVPlayer`, KVO observer, and main-thread-only store). Selecting a movie keeps the existing Quick Look thumbnail as a poster until the player has a frame ready to display, then shows the player paused. Space toggles playback; while loading, Space toggles autoplay intent. In grid mode, Space switches to carousel and starts playback for a movie. Navigating to another item, entering a folder, or switching to grid mode releases the item. If the item fails to load, the player stays hidden, the poster remains, and Space falls back to the Quick Look panel.
-- Trash: trashes the selection in one guarded operation and records the batch for undo (Cmd+Z) and redo (Cmd+Shift+Z). Undo and redo atomically rename files or folders without replacing an existing destination. Failed moves stay in history for retry; cross-volume moves are reported as failures.
-- Rename: the context menu renames one file or folder in its existing directory without replacing another item. Open tabs, navigation, and trash history follow renamed paths.
-
-## Why AppKit
-
-The GUI uses `objc2-app-kit` (the same frameworks the original Swift app used) rather than custom windowing (winit/egui/Metal): it keeps window/menu/key-equivalent/drag-session/focus behavior identical, at the cost of unsafe interop and a larger dependency surface. Any swap reimplements virtualization, text, scroll, menus, Quick Look, accessibility, and window integration from scratch.
-
-## Concurrency
-
-UI, catalog, scheduler bookkeeping, and Quick Look state are main-thread. Thumbnail generation runs through `QLThumbnailGenerator` on its own queue; the demand scheduler executes under worker limits with generation-based stale-discards. State that must outlive the session is committed in the repository; `View.app` is built from the `dist` profile.
+Packaging creates `View.app`, copies `Info.plist` and the executable, and applies an ad-hoc signature. `make install` copies that bundle to `/Applications`; override the destination with `INSTALL_DIR=...`. Launch the installed executable as `/Applications/View.app/Contents/MacOS/view [directory]`. The manually dispatched release workflow publishes an Apple Silicon executable ZIP and checksums.
 
 ## Testing
 
-- `cargo test --profile dist --lib` (unit) and `cargo test --profile dist` (unit + `tests/` integration + UI-parity suites).
-- `cargo test --features app --test app_regression` exercises the live AppKit window, navigation and history, image orientation, Quick Look selection, layout, thumbnail completion, inline video playback, file URL drag/drop, and file undo/redo with an isolated simulated Trash. This test is not included unless the `app` feature is enabled. `--player-test` boots the real window, waits for the selected movie's player item to become ready, and asserts that Space toggles playback and that grid mode releases the player.
-- `cargo test --profile dist --test ui_parity` checks core shortcuts and trash conflict handling, native drag-item construction, and movie thumbnail generation.
-- `cargo build --profile dist --bin app --features app` builds the AppKit binary. [Performance](performance.md) describes the benchmark harness.
-- `sh scripts/package-app.sh` builds the signed `View.app`. `View.app/Contents/MacOS/view --self-test <dir>` boots the real window and asserts key handling end-to-end through the live run loop; it exits nonzero on failure.
-- SIGINT/SIGTERM exit 0, so Ctrl-C works when the binary is run directly.
+The commands are in [AGENTS.md](../AGENTS.md). Native dependencies and framework linkage require macOS; this repository does not currently provide a Linux test configuration.
 
-This file owns the architecture, module map, concurrency model, and testing notes. Performance and baselines live in [docs/performance.md](performance.md).
+`tests/integration.rs` exercises discovery and core catalog, scheduling, and trash helpers. `tests/ui_parity.rs` checks shortcuts, restore conflicts, native drag-item construction, and Quick Look movie thumbnails. Those helper tests do not exercise the application's asynchronous trash callback.
+
+The `app` feature enables `tests/app_regression.rs`. It launches the real AppKit process for navigation, selection, Quick Look, layout, drag/drop, rename, undo/redo, and inline playback scenarios. File restoration uses an isolated simulated Trash. `--player-test` checks initial playback, pause, item changes, and release on grid mode; it does not check replay after the item ends. Test fixtures live beneath `.work/tmp` and child processes are reaped by the test harness.

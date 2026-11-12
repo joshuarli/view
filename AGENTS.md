@@ -1,11 +1,20 @@
 # AGENTS.md
 
-`view` is a native macOS image and video browser in Rust (AppKit via `objc2`), and the only Swift in this repository is historical naming in comments.
+`view` is a native macOS image and video browser in Rust, using AppKit through `objc2`.
 
-Build: `cargo build --profile dist --bin app --features app`
-Test: `cargo test --profile dist --test ui_parity` (ports the Swift `viewUITests` scenarios; see the Testing section of [docs/architecture.md](docs/architecture.md)) and `cargo test --profile dist` for the full suite.
-Package: `sh scripts/package-app.sh`; launch: `./target/dist/app [directory]`
-Performance baselines: [docs/performance.md](docs/performance.md)
-Architecture and module overview: [docs/architecture.md](docs/architecture.md)
+## Commands
 
-Invariants: one `NSWindow` owns browsing; the catalog is in-memory and authoritative (trash derives visibility from it); `decode_png` is the pure-Rust pixel path, `decode_png_native` is ImageIO rendering.
+- Build: `cargo build --profile dist --bin app --features app --locked`.
+- Core tests: `cargo test --lib --locked`.
+- App interactions: `cargo test --features app --test app_regression --locked`.
+- UI parity: `cargo test --test ui_parity --locked`.
+- Full suite when requested: `cargo test --profile dist --features app --locked`.
+- Lint: `make lint`. Package: `sh scripts/package-app.sh`.
+
+One `NSWindow` hosts all tabs. Catalog selection uses paths; indexes are presentation positions.
+Rename, undo, and redo use exclusive moves that refuse to replace an existing destination.
+Keep the video poster visible until the selected item is ready for display.
+
+[Architecture](docs/architecture.md) owns the runtime, build, packaging, and test boundaries.
+[Performance](docs/performance.md) owns workloads, targets, and historical measurements.
+[Trash operation ownership](docs/rfc/VIEW-3-trash-operation-ownership.md) is a draft design.

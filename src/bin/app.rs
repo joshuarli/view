@@ -1,8 +1,4 @@
-//! Rust port GUI binary (see Rust/PARITY.md).
-//!
-//! Native AppKit host built on `objc2-app-kit` (the same frameworks as
-//! the Swift app): window + scroll view + custom grid view, wired to
-//! the `view_core` discovery/catalog state.
+//! Native AppKit host for tabbed media browsing and inline video playback.
 
 use std::path::PathBuf;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -2704,7 +2700,6 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
     assert!(!album.exists(), "redo removes the original folder");
     assert_eq!(std::fs::read(trashed_album.join("inside.png")).expect("redo preserves folder contents"), content);
-    // multi-selection delete: plain Delete trashes all selected items and undo restores them
     {
         enter_directory(folder.clone());
         let (p1, p2) = {
@@ -2738,7 +2733,6 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         assert!(restored, "undo after multi-selection delete restores all trashed files");
     }
 
-    // tab drag-and-drop routing: drop on a tab navigates that tab, drop outside opens a new tab
     {
         let original_tab_count = unsafe { (*app_state()).tabs.len() };
         let original_active = unsafe { (*app_state()).active };
