@@ -1,6 +1,6 @@
 # VIEW-3: Own trash operations outside tab catalogs
 
-Status: draft
+Status: accepted (implemented)
 
 ## Summary
 
@@ -85,13 +85,14 @@ and focus. Refresh the displayed tab once after reconciliation. A tab showing
 
 ## Open questions
 
-1. **Undo scope:** adopt the recommended window-wide trash history, or retain
-   per-tab histories with a defined transfer policy when a tab closes? This is a
-   user-visible decision to settle before implementation.
-2. **Unavailable roots:** if another tab trashes a directory that is itself an
-   open root, retain that tab with an unavailable-directory message, or navigate
-   it to the nearest available parent? Prefer the explicit unavailable state so
-   background reconciliation does not unexpectedly change navigation.
+Settled on implementation (user decision):
+
+1. **Undo scope:** window-wide undo/redo history. Cmd+Z acts on the latest
+   completed trash transaction regardless of navigation or tab closure.
+2. **Unavailable roots:** retain the tab with an unavailable-directory message.
+   Reconciliation does not change navigation. An unavailable tab keeps its
+   catalog, shows the error instead of its contents, and rejects stale file
+   operations until a listing succeeds again.
 
 ## Validation
 
@@ -113,7 +114,7 @@ controlled completion seam for deterministic success and failure combinations:
 
 ## Decision
 
-No design has been accepted. This draft recommends session-owned operations and
-window-wide trash history; the undo scope and unavailable-root behavior remain
-open. Implementation should resolve those choices and retain the existing
-exclusive-move guarantees.
+Accepted: session-owned operations, window-wide trash history, and retained
+unavailable tabs, as implemented. The mixed-result completion is covered in the
+app regression harness through a controlled seam; native NSWorkspace
+mixed-result mappings were not exercised end-to-end.

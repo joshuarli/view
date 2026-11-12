@@ -17,4 +17,4 @@ Keep the video poster visible until the selected item is ready for display.
 
 [Architecture](docs/architecture.md) owns the runtime, build, packaging, and test boundaries.
 [Performance](docs/performance.md) owns workloads, targets, and historical measurements.
-[Trash operation ownership](docs/rfc/VIEW-3-trash-operation-ownership.md) is a draft design.
+[Trash operation ownership](docs/rfc/VIEW-3-trash-operation-ownership.md) records the session-owned operations and window-wide undo adopted for file mutations.
