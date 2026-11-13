@@ -38,7 +38,7 @@ Browser mode lists one directory per tab. Recursive mode flattens the directory 
 | Right-click an item | Open, show in Finder, copy its path, rename, move to Trash, or undo/redo |
 | Cmd+Q | Quit |
 
-The toolbar and View menu switch between carousel and grid. The app remembers the chosen view mode. The toolbar also switches the listing between images, videos, and both; the app remembers that choice too. Folders stay visible in browser mode regardless of the filter. Video previews retain a poster until a frame is ready. While loading, Space toggles the request to play when ready. After a video load fails, Space can open Quick Look instead.
+The toolbar and View menu switch between carousel and grid. The app remembers the chosen view mode. The toolbar also switches the listing between images, videos, and both; the app remembers that choice too. Folders stay visible in browser mode regardless of the filter. Video previews retain a poster until a frame is ready. While loading, Space toggles the request to play when ready. After a video load fails, Space can open Quick Look instead. Quick Look shows Markup for images and Trim for videos; edits are written to the original file.
 
 Catalogs and trash history last for the current session. There is no filesystem watcher, so changes made elsewhere do not automatically refresh an open listing. Search, tags, a persistent media library, and a custom editor are outside the app's scope.
 

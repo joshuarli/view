@@ -21,7 +21,7 @@ use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
     QLThumbnailRepresentation,
 };
-use objc2_quick_look_ui::{QLPreviewPanel, QLPreviewPanelDataSource};
+use objc2_quick_look_ui::{QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource};
 
 use view_core::{
     list_browser, scan_recursive, BrowserMode, Catalog, MediaKind, MediaItem, PreviewSession, TrashHistory,
@@ -775,6 +775,24 @@ fn redo_trash() {
     reconcile_after_mutation(&changed, &[]);
 }
 
+pub(crate) fn preview_panel_delegate_object() -> &'static objc2::runtime::AnyObject {
+    unsafe { &*(Retained::as_ptr(&preview_panel_delegate().0) as *const objc2::runtime::AnyObject) }
+}
+
+fn bind_preview_panel(panel: &QLPreviewPanel, grid: &GridView) {
+    unsafe {
+        panel.setDelegate(Some(preview_panel_delegate_object()));
+        panel.setDataSource(Some(objc2::runtime::ProtocolObject::from_ref(grid)));
+    }
+}
+
+fn unbind_preview_panel(panel: &QLPreviewPanel) {
+    unsafe {
+        panel.setDelegate(None);
+        panel.setDataSource(None);
+    }
+}
+
 pub(crate) fn quicklook_selected() {
     player::pause();
     let mtm = objc2::MainThreadMarker::new().unwrap();
@@ -800,7 +818,7 @@ pub(crate) fn quicklook_selected() {
                 tab.preview.current_index().expect("preview session has a focus")
             };
             unsafe {
-                panel.setDataSource(Some(objc2::runtime::ProtocolObject::from_ref(grid)));
+                bind_preview_panel(&panel, grid);
                 panel.setCurrentPreviewItemIndex(index as objc2_foundation::NSInteger);
                 let _: () = objc2::msg_send![&*panel, addObserver: grid, forKeyPath: &*NSString::from_str("currentPreviewItemIndex"), options: 0usize, context: core::ptr::null_mut::<core::ffi::c_void>()];
             }
@@ -2488,7 +2506,7 @@ define_class!(
                 tab.preview.current_index().expect("preview session has a focus")
             };
             unsafe {
-                panel.setDataSource(Some(objc2::runtime::ProtocolObject::from_ref(self)));
+                bind_preview_panel(panel, self);
                 panel.setCurrentPreviewItemIndex(index as objc2_foundation::NSInteger);
                 let _: () = objc2::msg_send![panel, addObserver: self, forKeyPath: &*NSString::from_str("currentPreviewItemIndex"), options: 0usize, context: core::ptr::null_mut::<core::ffi::c_void>()];
             }
@@ -2507,7 +2525,7 @@ define_class!(
             if bound {
                 unsafe { let _: () = objc2::msg_send![panel, removeObserver: self, forKeyPath: &*NSString::from_str("currentPreviewItemIndex")]; }
             }
-            unsafe { panel.setDataSource(None) };
+            unbind_preview_panel(panel);
         }
 
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
@@ -3039,6 +3057,25 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let _ = window.makeFirstResponder(Some(grid));
     send_key_via_app(&app, 14, false);
     assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !unsafe { panel.isVisible() }), "e toggles the quick look panel closed");
+
+    {
+        quicklook_selected();
+        assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || panel.isVisible()), "quick look reopens for the editing assertions");
+        let delegate = unsafe { panel.delegate() }.expect("quick look panel has an editing delegate");
+        let can_edit = objc2::sel!(previewPanel:canEditItem:);
+        let responds: bool = unsafe { objc2::msg_send![&*delegate, respondsToSelector: can_edit] };
+        assert!(responds, "quick look delegate implements the editing SPI");
+        let selected = unsafe { (*app_state()).selected() };
+        let selected_path = unsafe { (*app_state()).items()[selected.unwrap()].path.clone() };
+        let item_url = url_from_path(&selected_path);
+        let editable: bool = unsafe {
+            objc2::msg_send![&*delegate, previewPanel: &*panel, canEditItem: objc2::runtime::ProtocolObject::<dyn QLPreviewItem>::from_ref(&*item_url)]
+        };
+        assert!(editable, "image items advertise editing to quick look");
+        panel.orderOut(None);
+        window.makeKeyAndOrderFront(None);
+        let _ = window.makeFirstResponder(Some(grid));
+    }
 
     unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Grid; }
     window.setContentSize(NSSize::new(400.0, 500.0));
@@ -3712,6 +3749,88 @@ fn main() {
     let delegate: Retained<AppDelegate> = unsafe { objc2::msg_send![AppDelegate::class(), new] };
     app.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
     app.run();
+}
+
+struct SyncPanelDelegate(Retained<PreviewPanelDelegate>);
+unsafe impl Send for SyncPanelDelegate {}
+unsafe impl Sync for SyncPanelDelegate {}
+
+static PREVIEW_PANEL_DELEGATE: std::sync::OnceLock<SyncPanelDelegate> = std::sync::OnceLock::new();
+
+fn preview_item_path(item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>) -> Option<PathBuf> {
+    unsafe { item.previewItemURL() }.map(|url| path_from_url(&url))
+}
+
+fn apply_quicklook_edit(path: &std::path::Path) {
+    reconcile_after_mutation(&[path.to_path_buf()], &[path.to_path_buf()]);
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ()]
+    struct PreviewPanelDelegate;
+
+    impl PreviewPanelDelegate {
+        #[unsafe(method_id(init))]
+        fn init(this: Allocated<Self>) -> Retained<Self> {
+            let this = this.set_ivars(());
+            unsafe { objc2::msg_send![super(this), init] }
+        }
+
+        #[unsafe(method(previewPanel:canEditItem:))]
+        fn can_edit_item(&self, _panel: &QLPreviewPanel, item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>) -> bool {
+            preview_item_path(item)
+                .and_then(|path| view_core::kind_for_extension(&path))
+                .is_some_and(|kind| matches!(kind, MediaKind::Image | MediaKind::Movie))
+        }
+
+        #[unsafe(method(previewPanel:saveModeForItem:))]
+        fn save_mode_for_item(&self, _panel: &QLPreviewPanel, item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>) -> objc2_foundation::NSInteger {
+            let _ = item;
+            1
+        }
+
+        #[unsafe(method(previewPanel:initialEditModeForItem:))]
+        fn initial_edit_mode_for_item(&self, _panel: &QLPreviewPanel, item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>) -> objc2_foundation::NSInteger {
+            let _ = item;
+            0
+        }
+
+        #[unsafe(method(previewPanel:didUpdateContentsOfPreviewItem:))]
+        fn did_update_contents_of_preview_item(&self, _panel: &QLPreviewPanel, item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>) {
+            if let Some(path) = preview_item_path(item) {
+                apply_quicklook_edit(&path);
+            }
+        }
+
+        #[unsafe(method(previewPanel:didSaveEditedCopyOfPreviewItem:atURL:))]
+        fn did_save_edited_copy_of_preview_item_at_url(&self, _panel: &QLPreviewPanel, item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>, url: &NSURL) {
+            let Some(original) = preview_item_path(item) else { return };
+            let edited = path_from_url(url);
+            let result = match std::fs::rename(&edited, &original) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                    std::fs::copy(&edited, &original).and_then(|_| std::fs::remove_file(&edited))
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                show_error_alert("Unable to save the edit", &format!("The edited copy is at {}\n{error}", edited.display()));
+                eprintln!("view: cannot save edit for {}: {error}", original.display());
+                return;
+            }
+            apply_quicklook_edit(&original);
+        }
+    }
+);
+
+unsafe impl NSObjectProtocol for PreviewPanelDelegate {}
+
+fn preview_panel_delegate() -> &'static SyncPanelDelegate {
+    PREVIEW_PANEL_DELEGATE.get_or_init(|| {
+        SyncPanelDelegate(unsafe { objc2::msg_send![PreviewPanelDelegate::class(), new] })
+    })
 }
 
 unsafe impl QLPreviewPanelDataSource for GridView {}

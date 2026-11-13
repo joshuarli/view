@@ -34,6 +34,10 @@ Rename, undo, and redo call `renamex_np` with `RENAME_EXCL`. Existing destinatio
 
 AppKit state belongs to the main thread. Quick Look thumbnail callbacks marshal successful results to the main queue. ImageIO workers own their `CGImage` until joined. The app has no termination coordinator that drains pending trash or thumbnail requests; SIGINT and SIGTERM call `exit(0)`.
 
+Every listed directory is reachable with both modes. The toolbar's Images / Videos / Both segmented control filters the listing and the choice persists in `NSUserDefaults`. After deletions, Quick Look edits, or a filter change rebuild the catalog, the listing is filtered the same way everywhere through `load_listing`.
+
+The Quick Look panel advertises editing for images and videos through private `QLPreviewPanelDelegate` SPI (`previewPanel:canEditItem:`, `previewPanel:saveModeForItem:`, `previewPanel:initialEditModeForItem:` and the didUpdate/didSave callbacks). macOS has no public editing API for the panel; Finder implements the same SPI. Save mode 1 (UpdateContents) overwrites the file in place, and edits refresh the tab so the catalog and thumbnails pick up the new file version.
+
 AppKit provides native window, menu, focus, drag, Quick Look, and playback controls. Replacing it would require rebuilding those behaviors as well as the custom grid.
 
 ## Build and package
@@ -56,4 +60,4 @@ The commands are in [AGENTS.md](../AGENTS.md). Native dependencies and framework
 
 `tests/integration.rs` exercises discovery and core catalog, scheduling, and trash helpers. `tests/ui_parity.rs` checks shortcuts, restore conflicts, native drag-item construction, and Quick Look movie thumbnails. Those helper tests do not exercise the application's asynchronous trash callback.
 
-The `app` feature enables `tests/app_regression.rs`. It launches the real AppKit process for navigation, selection, Quick Look, layout, drag/drop, rename, undo/redo, mixed-result trash completion, sparse selection across trash/undo/rename, active-tab file drops, same-path movie replacement, and inline playback scenarios. File restoration uses an isolated simulated Trash. `--player-test` checks initial playback, pause, item changes, and release on grid mode; it does not check replay after the item ends. Test fixtures live beneath `.work/tmp` and child processes are reaped by the test harness.
+The `app` feature enables `tests/app_regression.rs`. It launches the real AppKit process for navigation, selection, Quick Look, layout, drag/drop, rename, undo/redo, mixed-result trash completion, sparse selection across trash/undo/rename, active-tab file drops, same-path movie replacement, inline playback, media filtering, delete selection advance, and Quick Look editing support scenarios. File restoration uses an isolated simulated Trash. `--player-test` checks initial playback, pause, item changes, release on grid mode, and that E pauses inline playback and opens Quick Look; it does not check replay after the item ends. Test fixtures live beneath `.work/tmp` and child processes are reaped by the test harness.
