@@ -2166,7 +2166,10 @@ unsafe impl NSObjectProtocol for PreviewPlayerView {}
 struct GridInteraction {
     deferred_click: std::cell::Cell<Option<usize>>,
     drag_candidate: std::cell::Cell<bool>,
+    drag_origin: std::cell::Cell<Option<NSPoint>>,
 }
+
+const DRAG_THRESHOLD: f64 = 5.0;
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -2397,6 +2400,7 @@ define_class!(
         fn mouse_down(&self, event: &objc2_app_kit::NSEvent) {
             self.ivars().drag_candidate.set(false);
             self.ivars().deferred_click.set(None);
+            self.ivars().drag_origin.set(None);
             let location = event.locationInWindow();
             let view_location = self.convertPoint_fromView(location, None);
             let (items_len, clicked_item, is_dir) = {
@@ -2412,6 +2416,7 @@ define_class!(
             let (index, item_opt) = clicked_item;
             let Some(item) = item_opt else { return };
             self.ivars().drag_candidate.set(true);
+            self.ivars().drag_origin.set(Some(view_location));
             if event.clickCount() >= 2 {
                 if is_dir { enter_directory(item.path.clone()); return; }
             } else {
@@ -2439,6 +2444,7 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &objc2_app_kit::NSEvent) {
             self.ivars().drag_candidate.set(false);
+            self.ivars().drag_origin.set(None);
             if let Some(index) = self.ivars().deferred_click.take() {
                 let state = unsafe { &mut *app_state() };
                 select_index(&mut state.tab_mut().catalog, index);
@@ -2449,7 +2455,12 @@ define_class!(
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &objc2_app_kit::NSEvent) {
-            if !self.ivars().drag_candidate.replace(false) { return; }
+            if !self.ivars().drag_candidate.get() { return; }
+            let Some(origin) = self.ivars().drag_origin.get() else { return };
+            let location = self.convertPoint_fromView(event.locationInWindow(), None);
+            if (location.x - origin.x).hypot(location.y - origin.y) < DRAG_THRESHOLD { return; }
+            self.ivars().drag_candidate.set(false);
+            self.ivars().drag_origin.set(None);
             self.ivars().deferred_click.set(None);
             begin_drag_session(self, event);
         }
