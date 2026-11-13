@@ -6,11 +6,13 @@ One AppKit window hosts multiple tabs. Each `Tab` owns a root directory, browser
 
 `list_browser` and `scan_recursive` in `src/lib.rs` discover media. Browser listings put directories first by natural name, followed by files in descending size order. Recursive traversal visits child directories through a stack and emits each directory's files in reverse natural name order. It does not globally sort relative paths.
 
-Navigation synchronously replaces a tab's catalog through `load_listing` and `show_listing` in `src/bin/app.rs`. `load_listing` carries a path-aware `ListingError` from `src/lib.rs` on failure. A failed listing keeps the previous catalog and marks the tab unavailable; the grid shows the error instead of a listing. There are no incremental scan batches, scan generations, or background directory workers. `after_navigation` updates the title, layout, Quick Look, scroll position, and tab bar.
+Navigation synchronously replaces a tab's catalog through `load_listing` and `show_listing` in `src/bin/app.rs`. `load_listing` carries a path-aware `ListingError` from `src/lib.rs` on failure and applies the tab's media filter — images, videos, or both — which folders always bypass. A failed listing keeps the previous catalog and marks the tab unavailable; the grid shows the error instead of a listing. There are no incremental scan batches, scan generations, or background directory workers. `after_navigation` updates the title, layout, Quick Look, scroll position, and tab bar.
+
+After a trash mutation rebuilds a tab's catalog, the selection advances to the item that followed the deleted focus, clamped to the surviving listing; the grid document view shrinks to the new content size and the scroll origin is clamped into it.
 
 `Catalog` stores selection membership, anchor, and focus by path. `PreviewSession` supplies Quick Look's URL list and selected index. Panel navigation updates catalog focus. Selection membership is sparse after insertion and across trash/undo cycles. Highlighting, dragging, rename reconciliation, and trash targets use membership; anchor and focus remain only for range gestures and restoration ordering.
 
-There is no persistent catalog or filesystem watcher. Navigation rereads a directory; merely activating a tab keeps its existing catalog. `NSUserDefaults` stores the chosen view mode, and `NSWindow` uses a frame autosave name.
+There is no persistent catalog or filesystem watcher. Navigation rereads a directory; merely activating a tab keeps its existing catalog. `NSUserDefaults` stores the chosen view mode, the media filter, and `NSWindow` uses a frame autosave name.
 
 ## Images and video
 

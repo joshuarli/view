@@ -46,11 +46,31 @@ impl Default for ViewMode {
     fn default() -> Self { Self::Carousel }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum MediaFilter {
+    #[default]
+    Both,
+    Images,
+    Videos,
+}
+
+impl MediaFilter {
+    fn keeps(self, kind: MediaKind) -> bool {
+        match (kind, self) {
+            (MediaKind::Directory, _) => true,
+            (MediaKind::Image, MediaFilter::Videos) => false,
+            (MediaKind::Movie, MediaFilter::Images) => false,
+            _ => true,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Tab {
     root: PathBuf,
     mode: BrowserMode,
     view_mode: ViewMode,
+    media_filter: MediaFilter,
     thumbnail_size_step: i8,
     catalog: Catalog,
     preview: PreviewSession,
@@ -78,6 +98,7 @@ impl AppState {
         tab.root = root.clone();
         tab.mode = mode;
         tab.view_mode = self.tab().view_mode;
+        tab.media_filter = self.tab().media_filter;
         tab.thumbnail_size_step = self.tab().thumbnail_size_step;
         show_listing(&mut tab.catalog, items, ListingPick::First);
         self.tabs.push(tab);
@@ -286,6 +307,16 @@ fn layout_carousel(
     }
 }
 
+fn persist_media_filter() {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let value = match unsafe { (*app_state()).tab().media_filter } {
+        MediaFilter::Both => "both",
+        MediaFilter::Images => "images",
+        MediaFilter::Videos => "videos",
+    };
+    unsafe { defaults.setObject_forKey(Some(&*NSString::from_str(value) as &NSObject), &NSString::from_str("View.MediaFilter")) };
+}
+
 fn persist_view_mode() {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let value = if unsafe { (*app_state()).tab().view_mode } == ViewMode::Carousel {
@@ -385,11 +416,33 @@ fn update_carousel_preview() {
     preview.setNeedsDisplay(true);
 }
 
+fn resize_grid_document() {
+    let binding = window_refs();
+    let Some(refs) = binding.as_ref() else { return };
+    unsafe {
+        let scroll = &*refs.scroll;
+        let grid = &*refs.grid;
+        let viewport = scroll.contentView().bounds().size;
+        let carousel = (*app_state()).tab().view_mode == ViewMode::Carousel;
+        let doc_size = content_size(viewport.width, viewport.height, (*app_state()).items().len(), carousel);
+        grid.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), doc_size));
+        let clip = scroll.contentView();
+        let clip_bounds = clip.bounds();
+        let clamped_x = clip_bounds.origin.x.clamp(0.0, (doc_size.width - clip_bounds.size.width).max(0.0));
+        let clamped_y = clip_bounds.origin.y.clamp(0.0, (doc_size.height - clip_bounds.size.height).max(0.0));
+        if clamped_x != clip_bounds.origin.x || clamped_y != clip_bounds.origin.y {
+            clip.scrollToPoint(NSPoint::new(clamped_x, clamped_y));
+            scroll.reflectScrolledClipView(&clip);
+        }
+        grid.setNeedsDisplay(true);
+    }
+}
+
 fn apply_view_mode_layout() {
-    let (window_ptr, scroll_ptr, grid_ptr, preview_ptr, preview_image_ptr, divider_ptr, player_ptr, tab_bar_ptr) = {
+    let (window_ptr, scroll_ptr, preview_ptr, preview_image_ptr, divider_ptr, player_ptr, tab_bar_ptr) = {
         let refs = window_refs();
         let Some(refs) = refs.as_ref() else { return };
-        (refs.window, refs.scroll, refs.grid, refs.preview, refs.preview_image, refs.divider, refs.player, refs.tab_bar)
+        (refs.window, refs.scroll, refs.preview, refs.preview_image, refs.divider, refs.player, refs.tab_bar)
     };
     let carousel = unsafe { (*app_state()).tab().view_mode } == ViewMode::Carousel;
     if !carousel {
@@ -398,7 +451,6 @@ fn apply_view_mode_layout() {
     unsafe {
         let window = &*window_ptr;
         let scroll = &*scroll_ptr;
-        let grid = &*grid_ptr;
         let preview = &*preview_ptr;
         let preview_image = &*preview_image_ptr;
         let divider = &*divider_ptr;
@@ -418,10 +470,7 @@ fn apply_view_mode_layout() {
         tab_bar.sync();
         scroll.setHasVerticalScroller(!carousel);
         scroll.setHasHorizontalScroller(carousel);
-        let viewport = scroll.contentView().bounds().size;
-        let doc_size = content_size(viewport.width, viewport.height, (*app_state()).items().len(), carousel);
-        grid.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), doc_size));
-        grid.setNeedsDisplay(true);
+        resize_grid_document();
     }
     update_carousel_preview();
 }
@@ -505,19 +554,30 @@ fn tab_affected(root: &std::path::Path, mode: BrowserMode, changed: &[PathBuf]) 
 }
 
 fn reconcile_tab_after_mutation(tab: &mut Tab, select_after: &[PathBuf]) {
-    match load_listing(&tab.root, tab.mode) {
+    let focus_index_before = tab.catalog.focus_index();
+    let old_paths: Vec<PathBuf> = tab.catalog.items().iter().map(|item| item.path.clone()).collect();
+    match load_listing(&tab.root, tab.mode, tab.media_filter) {
         Ok(items) => {
             let mut catalog = Catalog::new();
             catalog.append(items);
             let previous_selection = tab.catalog.selected_all().to_vec();
             let focus = tab.catalog.selected().map(|path| path.to_path_buf());
             let present: Vec<PathBuf> = catalog.items().iter().map(|item| item.path.clone()).collect();
+            let deleted_focus = focus.as_deref().is_some_and(|path| !present.iter().any(|item| item == path));
             let mut selection: Vec<PathBuf> = previous_selection.into_iter().filter(|path| present.contains(path)).collect();
             if selection.is_empty() {
                 for path in select_after {
                     if present.contains(path) && !selection.contains(path) {
                         selection.push(path.clone());
                     }
+                }
+            }
+            if selection.is_empty() && deleted_focus && let Some(focus) = focus_index_before {
+                let pick = old_paths.iter().take(focus).filter(|path| present.contains(path)).count();
+                let len = catalog.items().len();
+                if len > 0 {
+                    let item = &catalog.items()[pick.min(len - 1)];
+                    selection.push(item.path.clone());
                 }
             }
             catalog.restore_selection(&selection, focus.as_deref());
@@ -541,9 +601,7 @@ fn reconcile_after_mutation(changed: &[PathBuf], select_after: &[PathBuf]) {
             reconcile_tab_after_mutation(tab, select_after);
         }
     }
-    if let Some(refs) = window_refs().as_ref() {
-        unsafe { &*refs.grid }.setNeedsDisplay(true);
-    }
+    resize_grid_document();
     update_carousel_preview();
     refresh_tab_bar();
 }
@@ -844,7 +902,7 @@ fn rename_item(from: &std::path::Path, name: &str) -> std::io::Result<()> {
             *root = relocated_path(root, from, &to);
             if let Some(path) = selection { *path = relocated_path(path, from, &to); }
         }
-        match load_listing(&tab.root, tab.mode) {
+        match load_listing(&tab.root, tab.mode, tab.media_filter) {
             Ok(items) => {
                 let mut catalog = Catalog::new();
                 catalog.append(items);
@@ -900,7 +958,8 @@ fn enter_directory(path: PathBuf) {
         let state = unsafe { &mut *app_state() };
         let tab = state.tab_mut();
         let mode = tab.mode;
-        match load_listing(&path, mode) {
+        let media_filter = tab.media_filter;
+        match load_listing(&path, mode, media_filter) {
             Ok(items) => {
                 let current = tab.root.clone();
                 let previous = tab.catalog.selected().map(|path| path.to_path_buf());
@@ -924,7 +983,8 @@ fn navigate_back() {
         let tab = state.tab_mut();
         let Some((url, sel)) = tab.back.last().cloned() else { return };
         let mode = tab.mode;
-        match load_listing(&url, mode) {
+        let filter = tab.media_filter;
+        match load_listing(&url, mode, filter) {
             Ok(items) => {
                 tab.back.pop();
                 let current = tab.root.clone();
@@ -948,7 +1008,8 @@ fn navigate_forward() {
         let tab = state.tab_mut();
         let Some((url, sel)) = tab.forward.last().cloned() else { return };
         let mode = tab.mode;
-        match load_listing(&url, mode) {
+        let filter = tab.media_filter;
+        match load_listing(&url, mode, filter) {
             Ok(items) => {
                 tab.forward.pop();
                 let current = tab.root.clone();
@@ -974,9 +1035,10 @@ fn navigate_to_parent() {
         let Some(parent) = tab.root.parent().map(|p| p.to_path_buf()) else { return };
         if parent == tab.root { return; }
         let mode = tab.mode;
+        let filter = tab.media_filter;
         let came_from = tab.root.clone();
         let leaving = tab.catalog.selected().map(|path| path.to_path_buf());
-        match load_listing(&parent, mode) {
+        match load_listing(&parent, mode, filter) {
             Ok(items) => {
                 tab.back.push((came_from.clone(), leaving));
                 tab.forward.clear();
@@ -1044,7 +1106,8 @@ fn new_tab() {
         let state = unsafe { &mut *app_state() };
         let root = state.tab().root.clone();
         let mode = state.tab().mode;
-        match load_listing(&root, mode) {
+        let filter = state.tab().media_filter;
+        match load_listing(&root, mode, filter) {
             Ok(items) => Some(state.new_tab(root, mode, items)),
             Err(error) => {
                 state.tab_mut().unavailable = Some(format!("Unable to open {}: {error}", root.display()));
@@ -1056,6 +1119,45 @@ fn new_tab() {
         Some(index) => activate_tab(index),
         None => after_navigation(false),
     }
+}
+
+fn apply_media_filter(filter: MediaFilter) {
+    {
+        let state = unsafe { &mut *app_state() };
+        state.tab_mut().media_filter = filter;
+    }
+    persist_media_filter();
+    let reload = {
+        let state = unsafe { &*app_state() };
+        let tab = state.tab();
+        let mode = tab.mode;
+        let root = tab.root.clone();
+        let previous_selection = tab.catalog.selected_all().to_vec();
+        match load_listing(&root, mode, filter) {
+            Ok(items) => Some((items, previous_selection)),
+            Err(error) => {
+                unsafe {
+                    (*app_state()).tab_mut().unavailable = Some(format!("Unable to read {}: {error}", root.display()));
+                }
+                None
+            }
+        }
+    };
+    if let Some((items, previous_selection)) = reload {
+        let state = unsafe { &mut *app_state() };
+        let tab = state.tab_mut();
+        let mut catalog = Catalog::new();
+        catalog.append(items);
+        let present: std::collections::HashSet<&PathBuf> = catalog.items().iter().map(|item| &item.path).collect();
+        let mut selection: Vec<PathBuf> = previous_selection.into_iter().filter(|path| present.contains(path)).collect();
+        if selection.is_empty() && let Some(first) = catalog.items().first().map(|item| item.path.clone()) {
+            selection.push(first);
+        }
+        catalog.restore_selection(&selection, selection.first().map(|path| path.as_path()));
+        tab.catalog = catalog;
+        tab.unavailable = None;
+    }
+    after_navigation(false);
 }
 
 fn toggle_view_mode() {
@@ -1086,7 +1188,8 @@ fn open_path_in_new_tab(path: PathBuf) {
     let created = {
         let state = unsafe { &mut *app_state() };
         let mode = state.tab().mode;
-        match load_listing(&root, mode) {
+        let filter = state.tab().media_filter;
+        match load_listing(&root, mode, filter) {
             Ok(items) => {
                 let index = state.new_tab(root, mode, items);
                 if let Some(file) = file {
@@ -1120,8 +1223,9 @@ fn navigate_tab_to_path(index: usize, path: PathBuf) {
             path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone())
         };
         let mode = tab.mode;
+        let filter = tab.media_filter;
         if tab.root != target_root {
-            match load_listing(&target_root, mode) {
+            match load_listing(&target_root, mode, filter) {
                 Ok(items) => {
                     let current = tab.root.clone();
                     let previous = tab.catalog.selected().map(|p| p.to_path_buf());
@@ -1231,7 +1335,8 @@ fn accept_dropped_path(view: &GridView, pasteboard: &objc2_app_kit::NSPasteboard
     if !path.is_file() { return false; }
     let Some(parent) = path.parent() else { return false };
     let mode = unsafe { (*app_state()).tab().mode };
-    match load_listing(parent, mode) {
+    let filter = unsafe { (*app_state()).tab().media_filter };
+    match load_listing(parent, mode, filter) {
         Ok(items) if items.iter().any(|item| item.path == path) => {}
         _ => return false,
     }
@@ -1259,11 +1364,12 @@ fn show_error_alert(title: &str, message: &str) {
     alert.runModal();
 }
 
-fn load_listing(root: &std::path::Path, mode: BrowserMode) -> Result<Vec<MediaItem>, view_core::ListingError> {
-    match mode {
-        BrowserMode::Browser => list_browser(root),
-        BrowserMode::Recursive => scan_recursive(root),
-    }
+fn load_listing(root: &std::path::Path, mode: BrowserMode, filter: MediaFilter) -> Result<Vec<MediaItem>, view_core::ListingError> {
+    let items = match mode {
+        BrowserMode::Browser => list_browser(root)?,
+        BrowserMode::Recursive => scan_recursive(root)?,
+    };
+    Ok(items.into_iter().filter(|item| filter.keeps(item.kind)).collect())
 }
 
 fn folder_like_icon(item: &MediaItem) -> Option<Retained<NSImage>> {
@@ -1737,20 +1843,24 @@ fn tab_label(tab: &Tab) -> String {
     tab.root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| tab.root.display().to_string())
 }
 
-fn tab_bar_metrics(width: f64, count: usize) -> (Vec<NSRect>, NSRect, NSRect, NSRect, NSRect) {
+const FILTER_W: f64 = 158.0;
+const FILTER_GAP: f64 = 8.0;
+
+fn tab_bar_metrics(width: f64, count: usize) -> (Vec<NSRect>, NSRect, NSRect, NSRect, NSRect, NSRect) {
     let h = TAB_BAR_HEIGHT;
     let back = NSRect::new(NSPoint::new(6.0, 4.0), NSSize::new(28.0, h - 8.0));
     let forward = NSRect::new(NSPoint::new(36.0, 4.0), NSSize::new(28.0, h - 8.0));
     let toggle = NSRect::new(NSPoint::new(66.0, 4.0), NSSize::new(28.0, h - 8.0));
     let add = NSRect::new(NSPoint::new((width - 34.0).max(100.0), 4.0), NSSize::new(28.0, h - 8.0));
+    let filter = NSRect::new(NSPoint::new(add.origin.x - FILTER_GAP - FILTER_W, 4.0), NSSize::new(FILTER_W, h - 8.0));
     let tabs_x = 100.0;
-    let tabs_w = (add.origin.x - tabs_x - 4.0).max(40.0);
+    let tabs_w = (filter.origin.x - FILTER_GAP - tabs_x - 4.0).max(40.0);
     let tab_w = if count == 0 { tabs_w } else { (tabs_w / count as f64).clamp(80.0, 220.0) };
     let mut rects = Vec::with_capacity(count);
     for i in 0..count {
         rects.push(NSRect::new(NSPoint::new(tabs_x + i as f64 * tab_w, 4.0), NSSize::new(tab_w - 4.0, h - 8.0)));
     }
-    (rects, back, forward, toggle, add)
+    (rects, back, forward, toggle, add, filter)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1760,7 +1870,7 @@ enum TabDropTarget {
 }
 
 fn resolve_tab_drop(width: f64, tab_count: usize, location: NSPoint) -> TabDropTarget {
-    let (tab_rects, _, _, _, _) = tab_bar_metrics(width, tab_count);
+    let (tab_rects, _, _, _, _, _) = tab_bar_metrics(width, tab_count);
     tab_rects
         .iter()
         .enumerate()
@@ -1781,6 +1891,26 @@ struct TabBarControls {
     forward: Retained<NSButton>,
     toggle: Retained<NSButton>,
     add: Retained<NSButton>,
+    filter: Retained<objc2_app_kit::NSSegmentedControl>,
+}
+
+fn tab_bar_filter_control() -> Retained<objc2_app_kit::NSSegmentedControl> {
+    const LABELS: [&str; 3] = ["Images", "Videos", "Both"];
+    const TOOLTIPS: [&str; 3] = ["Show images only", "Show videos only", "Show images and videos"];
+    let mtm = objc2::MainThreadMarker::new().unwrap();
+    let control = objc2_app_kit::NSSegmentedControl::new(mtm);
+    control.setSegmentCount(3);
+    for (index, (label, tooltip)) in LABELS.iter().zip(TOOLTIPS.iter()).enumerate() {
+        control.setLabel_forSegment(&NSString::from_str(label), index as objc2_foundation::NSInteger);
+        control.setWidth_forSegment(52.0, index as objc2_foundation::NSInteger);
+        control.setToolTip_forSegment(Some(&NSString::from_str(tooltip)), index as objc2_foundation::NSInteger);
+    }
+    control.setTrackingMode(objc2_app_kit::NSSegmentSwitchTracking::SelectOne);
+    control.setSelectedSegment(2);
+    control.setControlSize(objc2_app_kit::NSControlSize::Small);
+    control.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+    control.setToolTip(Some(&NSString::from_str("Show images, videos, or both")));
+    control
 }
 
 fn tab_bar_button(symbol: &str, label: &str) -> Retained<NSButton> {
@@ -1808,6 +1938,7 @@ define_class!(
                 forward: tab_bar_button("chevron.right", "Forward"),
                 toggle: tab_bar_button("square.grid.2x2", "Change view"),
                 add: tab_bar_button("plus", "New Tab"),
+                filter: tab_bar_filter_control(),
             });
             unsafe {
                 let this: Retained<Self> = objc2::msg_send![super(this), initWithFrame: frame];
@@ -1821,6 +1952,9 @@ define_class!(
                     button.setAction(Some(action));
                     this.addSubview(button);
                 }
+                this.ivars().filter.setTarget(Some(&*this));
+                this.ivars().filter.setAction(Some(objc2::sel!(setMediaFilter:)));
+                this.addSubview(&this.ivars().filter);
                 this.registerForDraggedTypes(&NSArray::from_slice(&[&*objc2_app_kit::NSPasteboardTypeFileURL]));
                 this
             }
@@ -1839,7 +1973,7 @@ define_class!(
             objc2_app_kit::NSRectFill(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(self.bounds().size.width, 1.0)));
             let state = unsafe { &*app_state() };
             let width = self.bounds().size.width;
-            let (tab_rects, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
+            let (tab_rects, _, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
             let pstyle: Retained<objc2_app_kit::NSMutableParagraphStyle> = {
                 let p: Retained<objc2_app_kit::NSMutableParagraphStyle> = unsafe { objc2::msg_send![objc2_app_kit::NSMutableParagraphStyle::class(), new] };
                 p.setAlignment(objc2_app_kit::NSTextAlignment::Center);
@@ -1867,7 +2001,7 @@ define_class!(
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
             let state = unsafe { &*app_state() };
             let width = self.bounds().size.width;
-            let (tab_rects, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
+            let (tab_rects, _, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
             for (i, rect) in tab_rects.iter().enumerate() {
                 if objc2_foundation::NSPointInRect(location, *rect) {
                     activate_tab(i);
@@ -1882,6 +2016,15 @@ define_class!(
         fn go_forward(&self, _sender: &NSButton) { navigate_forward(); }
         #[unsafe(method(changeView:))]
         fn change_view(&self, _sender: &NSButton) { toggle_view_mode(); }
+        #[unsafe(method(setMediaFilter:))]
+        fn set_media_filter(&self, sender: &objc2_app_kit::NSSegmentedControl) {
+            let filter = match sender.selectedSegment() {
+                0 => MediaFilter::Images,
+                1 => MediaFilter::Videos,
+                _ => MediaFilter::Both,
+            };
+            apply_media_filter(filter);
+        }
         #[unsafe(method(addTab:))]
         fn add_tab(&self, _sender: &NSButton) { new_tab(); }
 
@@ -1890,7 +2033,7 @@ define_class!(
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
             let state = unsafe { &*app_state() };
             let width = self.bounds().size.width;
-            let (tab_rects, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
+            let (tab_rects, _, _, _, _, _) = tab_bar_metrics(width, state.tabs.len());
             for (i, rect) in tab_rects.iter().enumerate() {
                 if objc2_foundation::NSPointInRect(location, *rect) {
                     let mtm = objc2::MainThreadMarker::new().unwrap();
@@ -1948,12 +2091,19 @@ define_class!(
 impl TabBarView {
     fn sync(&self) {
         let state = unsafe { &*app_state() };
-        let (_, back, forward, toggle, add) = tab_bar_metrics(self.bounds().size.width, state.tabs.len());
+        let (_, back, forward, toggle, add, filter) = tab_bar_metrics(self.bounds().size.width, state.tabs.len());
         let controls = self.ivars();
         controls.back.setFrame(back);
         controls.forward.setFrame(forward);
         controls.toggle.setFrame(toggle);
         controls.add.setFrame(add);
+        controls.filter.setFrame(filter);
+        let segment = match state.tab().media_filter {
+            MediaFilter::Images => 0,
+            MediaFilter::Videos => 1,
+            MediaFilter::Both => 2,
+        };
+        controls.filter.setSelectedSegment(segment);
         controls.back.setEnabled(!state.tab().back.is_empty());
         controls.forward.setEnabled(!state.tab().forward.is_empty());
         let (symbol, label) = if state.tab().view_mode == ViewMode::Grid { ("rectangle", "Show Carousel") } else { ("square.grid.2x2", "Show Grid") };
@@ -2724,7 +2874,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let keep2 = mixed_dir.join("kept2.png");
         std::fs::write(&keep1, include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
         std::fs::write(&keep2, include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
-        let mixed_tab = unsafe { (*app_state()).new_tab(mixed_dir.clone(), BrowserMode::Browser, load_listing(&mixed_dir, BrowserMode::Browser).unwrap()) };
+        let mixed_tab = unsafe { (*app_state()).new_tab(mixed_dir.clone(), BrowserMode::Browser, load_listing(&mixed_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
         activate_tab(mixed_tab);
         let staged = mixed_dir.join(".trashed-kept2.png");
         std::fs::rename(&keep2, &staged).unwrap();
@@ -2755,7 +2905,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let sparse_dir = parent.join("sparse-test");
         std::fs::create_dir(&sparse_dir).unwrap();
         for name in ["a.png", "b.png", "c.png", "d.png"] { std::fs::write(sparse_dir.join(name), include_bytes!("../../tests/fixtures/orientation.png")).unwrap(); }
-        let sparse_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser).unwrap()) };
+        let sparse_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
         activate_tab(sparse_tab);
         let a = sparse_dir.join("a.png");
         let b = sparse_dir.join("b.png");
@@ -2788,7 +2938,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "sparse range selects only the surviving paths");
         undo_trash();
         assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "undo of a trash inside a sparse selection preserves it");
-        let other_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser).unwrap()) };
+        let other_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
         let d = sparse_dir.join("d.png");
         rename_item(&d, "d2.png").unwrap();
         assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "renaming an unrelated file preserves sparse selections");
@@ -3042,9 +3192,91 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     }
 
     {
+        let advance_dir = parent.join("advance-select");
+        std::fs::create_dir(&advance_dir).unwrap();
+        for index in 0..30 {
+            std::fs::write(advance_dir.join(format!("item-{index:02}.png")), include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        }
+        let advance_tab = unsafe { (*app_state()).new_tab(advance_dir.clone(), BrowserMode::Browser, load_listing(&advance_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
+        activate_tab(advance_tab);
+        unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Grid; }
+        apply_view_mode_layout();
+        let height_before = grid.frame().size.height;
+        let expected_advance = unsafe { (*app_state()).items()[8].path.clone() };
+        {
+            let state = unsafe { &mut *app_state() };
+            let tab = state.tab_mut();
+            let first = tab.catalog.items()[0].path.clone();
+            let last = tab.catalog.items()[7].path.clone();
+            tab.catalog.select_range(&first, &last).expect("select the first eight items");
+        }
+        window.makeKeyAndOrderFront(None);
+        let _ = window.makeFirstResponder(Some(grid));
+        send_key_via_app(&app, 51, false);
+        let removed = pump_run_loop_until(std::time::Duration::from_secs(10), || {
+            let state = unsafe { &*app_state() };
+            state.items().len() == 22
+        });
+        assert!(removed, "multi-selection delete removes the eight selected files");
+        let state = unsafe { &*app_state() };
+        let selected = state.selected().and_then(|index| state.items().get(index)).map(|item| item.path.clone());
+        assert_eq!(selected.as_deref(), Some(expected_advance.as_path()), "delete advances the selection to the item after the deleted range");
+        let height_after = grid.frame().size.height;
+        assert!(height_after < height_before, "delete shrinks the grid document view ({height_after} < {height_before})");
+        send_key_command(&app, 6); // Cmd+Z undo restores the files
+        let restored = pump_run_loop_until(std::time::Duration::from_secs(10), || {
+            let state = unsafe { &*app_state() };
+            state.items().len() == 30
+        });
+        assert!(restored, "undo restores the deleted files");
+        close_tab(advance_tab);
+        std::fs::remove_dir_all(&advance_dir).unwrap();
+    }
+
+    {
+        let filter_dir = parent.join("filter-test");
+        std::fs::create_dir(&filter_dir).unwrap();
+        std::fs::write(filter_dir.join("pic.png"), include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        std::fs::copy(parent.join(".video.mp4"), filter_dir.join("clip.mp4")).unwrap();
+        let filter_tab = unsafe { (*app_state()).new_tab(filter_dir.clone(), BrowserMode::Browser, load_listing(&filter_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
+        activate_tab(filter_tab);
+        assert_eq!(unsafe { (*app_state()).items().len() }, 2, "filter starts with both kinds");
+        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        let saved_filter = defaults.stringForKey(&NSString::from_str("View.MediaFilter")).map(|s| s.to_string());
+        apply_media_filter(MediaFilter::Images);
+        {
+            let state = unsafe { &*app_state() };
+            assert_eq!(state.items().len(), 1, "images filter shows only images");
+            assert_eq!(state.items()[0].kind, MediaKind::Image);
+            assert_eq!(state.selected(), Some(0), "images filter selects the remaining item");
+        }
+        apply_media_filter(MediaFilter::Videos);
+        {
+            let state = unsafe { &*app_state() };
+            assert_eq!(state.items().len(), 1, "videos filter shows only videos");
+            assert_eq!(state.items()[0].kind, MediaKind::Movie);
+            assert_eq!(state.selected(), Some(0), "videos filter selects the remaining item");
+        }
+        apply_media_filter(MediaFilter::Both);
+        assert_eq!(unsafe { (*app_state()).items().len() }, 2, "both filter restores all media");
+        {
+            let refs = window_refs();
+            let bar = unsafe { &*refs.as_ref().unwrap().tab_bar };
+            assert_eq!(bar.ivars().filter.selectedSegment(), 2, "toolbar control reflects the active filter");
+            assert_eq!(bar.ivars().filter.segmentCount(), 3, "toolbar offers images, videos, and both");
+        }
+        match saved_filter {
+            Some(value) => unsafe { defaults.setObject_forKey(Some(&*NSString::from_str(&value) as &NSObject), &NSString::from_str("View.MediaFilter")) },
+            None => unsafe { let _: () = objc2::msg_send![&*defaults, removeObjectForKey: &*NSString::from_str("View.MediaFilter")]; },
+        }
+        close_tab(filter_tab);
+        std::fs::remove_dir_all(&filter_dir).unwrap();
+    }
+
+    {
         let original_tab_count = unsafe { (*app_state()).tabs.len() };
         let original_active = unsafe { (*app_state()).active };
-        let (tab_rects, _, _, _, _) = tab_bar_metrics(800.0, original_tab_count);
+        let (tab_rects, _, _, _, _, _) = tab_bar_metrics(800.0, original_tab_count);
         if let Some(rect) = tab_rects.get(0).copied() {
             let on_tab = NSPoint::new(rect.origin.x + rect.size.width / 2.0, rect.origin.y + rect.size.height / 2.0);
             assert_eq!(resolve_tab_drop(800.0, original_tab_count, on_tab), TabDropTarget::Tab(0), "drop on tab rect targets that tab");
@@ -3109,7 +3341,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     rename_item(&renamed, "NEW.png").unwrap();
     assert_eq!(unsafe { (*app_state()).tab().catalog.selected() }, Some(rename_dir.join("NEW.png").as_path()));
     navigate_to_parent();
-    let other_tab = unsafe { (*app_state()).new_tab(rename_dir.clone(), BrowserMode::Browser, load_listing(&rename_dir, BrowserMode::Browser).unwrap()) };
+    let other_tab = unsafe { (*app_state()).new_tab(rename_dir.clone(), BrowserMode::Browser, load_listing(&rename_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
     let moved_dir = folder.join("renamed-test");
     rename_item(&rename_dir, "renamed-test").unwrap();
     assert!(moved_dir.join("NEW.png").exists());
@@ -3416,11 +3648,18 @@ fn main() {
         let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
         let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode")).map(|s| s.to_string());
         let view_mode = if benchmark_memory { ViewMode::Grid } else if benchmark_startup { ViewMode::Carousel } else { match saved.as_deref() { Some("grid") => ViewMode::Grid, _ => ViewMode::Carousel } };
+        let saved_filter = defaults.stringForKey(&NSString::from_str("View.MediaFilter")).map(|s| s.to_string());
+        let media_filter = match saved_filter.as_deref() {
+            Some("images") => MediaFilter::Images,
+            Some("videos") => MediaFilter::Videos,
+            _ => MediaFilter::Both,
+        };
         let mut tab = Tab::default();
         tab.root = root.clone();
         tab.mode = mode;
         tab.view_mode = view_mode;
-        match load_listing(&root, mode) {
+        tab.media_filter = media_filter;
+        match load_listing(&root, mode, media_filter) {
             Ok(items) => show_listing(&mut tab.catalog, items, ListingPick::First),
             Err(error) => tab.unavailable = Some(format!("Unable to read {}: {error}", root.display())),
         }
