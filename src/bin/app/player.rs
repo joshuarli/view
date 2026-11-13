@@ -208,6 +208,14 @@ pub(crate) fn start() {
     }
 }
 
+pub(crate) fn pause() {
+    let Some(store) = player_store().as_mut() else { return };
+    store.autoplay = false;
+    if unsafe { store.player.rate() } != 0.0 {
+        unsafe { store.player.pause() };
+    }
+}
+
 pub(crate) fn toggle() {
     let Some(store) = player_store().as_mut() else { return };
     match store.status {

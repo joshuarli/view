@@ -776,6 +776,7 @@ fn redo_trash() {
 }
 
 pub(crate) fn quicklook_selected() {
+    player::pause();
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
     if panel.isVisible() {
@@ -3547,6 +3548,26 @@ fn run_player_test() {
             send_key_via_app(&app, 49, false);
             let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             assert!(rate > 0.0, "space plays the inline video");
+            send_key_via_app(&app, 14, false);
+            let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(-1.0);
+            assert_eq!(rate, 0.0, "e pauses the inline video");
+            let panel = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }.expect("quick look panel");
+            assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || panel.isVisible()), "e opens quick look");
+            if let Some(refs) = window_refs().as_ref() {
+                let window = unsafe { &*refs.window };
+                window.makeKeyAndOrderFront(None);
+                let _ = window.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 14, false);
+            assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !panel.isVisible()), "second e closes quick look");
+            if let Some(refs) = window_refs().as_ref() {
+                let window = unsafe { &*refs.window };
+                window.makeKeyAndOrderFront(None);
+                let _ = window.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 49, false);
+            let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
+            assert!(rate > 0.0, "space plays the inline video after quick look closes");
             send_key_via_app(&app, 49, false);
             let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             assert_eq!(rate, 0.0, "space pauses the inline video");

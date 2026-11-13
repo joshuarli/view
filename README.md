@@ -29,7 +29,7 @@ Browser mode lists one directory per tab. Recursive mode flattens the directory 
 | Shift+Left; Shift+Right | Navigate back; forward |
 | Space on a video | Toggle inline playback in the carousel; from the grid, enter the carousel and request playback |
 | Space on another item | Toggle Quick Look |
-| E | Toggle Quick Look for the selection, including videos |
+| E | Toggle Quick Look for the selection, including videos; pauses inline playback |
 | Cmd+T; Cmd+W | Open a tab for the current folder; close the active tab when another remains |
 | Cmd+minus; Cmd+plus | Decrease; increase thumbnail size |
 | Images; Videos; Both | Toolbar control filters the listing to images, videos, or both |
