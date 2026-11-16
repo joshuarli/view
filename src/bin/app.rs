@@ -2671,6 +2671,11 @@ define_class!(
     }
 
     unsafe impl NSApplicationDelegate for AppDelegate {
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn application_should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
+            true
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let (title, frame_size, item_count) = {
@@ -3688,6 +3693,45 @@ static PLAYER_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static PLAYER_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+fn launched_from_terminal() -> bool {
+    [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO]
+        .into_iter()
+        .any(|fd| unsafe { libc::isatty(fd) } == 1)
+}
+
+fn detach_from_terminal() {
+    unsafe {
+        match libc::fork() {
+            0 => {
+                if libc::setsid() == -1 {
+                    eprintln!("view: setsid failed: {}", std::io::Error::last_os_error());
+                    std::process::exit(1);
+                }
+                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                if devnull == -1 {
+                    eprintln!("view: open /dev/null failed: {}", std::io::Error::last_os_error());
+                    std::process::exit(1);
+                }
+                if libc::dup2(devnull, libc::STDIN_FILENO) == -1
+                    || libc::dup2(devnull, libc::STDOUT_FILENO) == -1
+                    || libc::dup2(devnull, libc::STDERR_FILENO) == -1
+                {
+                    eprintln!("view: redirect to /dev/null failed: {}", std::io::Error::last_os_error());
+                    std::process::exit(1);
+                }
+                if devnull > libc::STDERR_FILENO {
+                    libc::close(devnull);
+                }
+            }
+            pid if pid > 0 => std::process::exit(0),
+            _ => {
+                eprintln!("view: fork failed: {}", std::io::Error::last_os_error());
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
@@ -3713,6 +3757,10 @@ fn main() {
         Ok(v) => v,
         Err(e) => { eprintln!("view: {e}"); std::process::exit(1); }
     };
+    let internal_run = self_test || debug_enter || regression_test || benchmark_startup || benchmark_memory || player_test;
+    if !internal_run && launched_from_terminal() {
+        detach_from_terminal();
+    }
     {
         let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
         let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode")).map(|s| s.to_string());

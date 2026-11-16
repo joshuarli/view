@@ -32,7 +32,7 @@ The exported `Scheduler`, `ThumbnailCache`, `TrashService`, and PNG decoder help
 
 Rename, undo, and redo call `renamex_np` with `RENAME_EXCL`. Existing destinations are preserved, and cross-volume moves fail. Failed undo/redo entries stay on their original history stack for retry. Rename reloads all tabs, relocates roots and navigation paths, preserves sparse selections by relocating each selected path, updates original paths in trash history, and marks a tab unavailable when its reload fails.
 
-AppKit state belongs to the main thread. Quick Look thumbnail callbacks marshal successful results to the main queue. ImageIO workers own their `CGImage` until joined. The app has no termination coordinator that drains pending trash or thumbnail requests; SIGINT and SIGTERM call `exit(0)`.
+AppKit state belongs to the main thread. Quick Look thumbnail callbacks marshal successful results to the main queue. ImageIO workers own their `CGImage` until joined. The app has no termination coordinator that drains pending trash or thumbnail requests; SIGINT and SIGTERM call `exit(0)`. Closing the window quits the app (`applicationShouldTerminateAfterLastWindowClosed:`). When launched from a terminal (any of stdin/stdout/stderr is a tty and no internal test or benchmark flag is given), the process forks before touching AppKit: the parent exits 0 and the child calls `setsid`, redirects the standard streams to `/dev/null`, and runs as a launchd-owned GUI app, so the terminal returns immediately.
 
 Every listed directory is reachable with both modes. The toolbar's Images / Videos / Both segmented control filters the listing and the choice persists in `NSUserDefaults`. After deletions, Quick Look edits, or a filter change rebuild the catalog, the listing is filtered the same way everywhere through `load_listing`.
 
@@ -52,7 +52,7 @@ sh scripts/package-app.sh
 make install
 ```
 
-Packaging creates `View.app`, copies `Info.plist` and the executable, and applies an ad-hoc signature. `make install` copies that bundle to `/Applications`; override the destination with `INSTALL_DIR=...`. Launch the installed executable as `/Applications/View.app/Contents/MacOS/view [directory]`. The manually dispatched release workflow publishes an Apple Silicon executable ZIP and checksums.
+Packaging creates `View.app`, copies `Info.plist` and the executable, and applies an ad-hoc signature. `make install` copies that bundle to `/Applications`; override the destination with `INSTALL_DIR=...`. Launch the installed executable as `/Applications/View.app/Contents/MacOS/view [directory]`. Launched from a terminal, View detaches before the prompt returns; closing the window quits the app. The manually dispatched release workflow publishes an Apple Silicon executable ZIP and checksums.
 
 ## Testing
 

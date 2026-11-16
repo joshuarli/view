@@ -12,7 +12,7 @@ chmod +x view-aarch64-apple-darwin
 ./view-aarch64-apple-darwin --recursive ~/Pictures
 ```
 
-For a `View.app` bundle, follow [source installation](docs/architecture.md#build-and-package). The bundle declares macOS 27.0 as its minimum version. With no directory argument, the executable browses the current directory. Unknown options produce a `view: ...` error and exit status 1.
+For a `View.app` bundle, follow [source installation](docs/architecture.md#build-and-package). The bundle declares macOS 27.0 as its minimum version. With no directory argument, the executable browses the current directory. Unknown options produce a `view: ...` error and exit status 1. Launched from a terminal, View detaches and the command returns immediately; launched from Finder or `open`, it stays attached to launchd as usual. Closing the window quits the app.
 
 Browser mode lists one directory per tab. Recursive mode flattens the directory tree without showing folders. Its current traversal emits files in reverse natural name order within each directory, followed by child directories. Hidden names, symlinks, and recognized package directories are skipped.
 
