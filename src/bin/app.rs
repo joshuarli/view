@@ -12,7 +12,7 @@ use objc2_app_kit::{
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer};
-use objc2_av_kit::AVPlayerView;
+use objc2_av_kit::{AVPlayerView, AVPlayerViewControlsStyle};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     NSArray, NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
@@ -2733,6 +2733,7 @@ define_class!(
             let player = unsafe { AVPlayer::playerWithPlayerItem(None, mtm) };
             unsafe {
                 player_view.setVideoGravity(AVLayerVideoGravityResizeAspect.unwrap());
+                player_view.setControlsStyle(AVPlayerViewControlsStyle::Inline);
                 player_view.setPlayer(Some(&player));
             }
             player::install(player::PlayerStore {
@@ -3575,6 +3576,9 @@ fn run_player_test() {
             assert_eq!(rate, 0.0, "inline player starts paused");
             assert!(attached, "inline player view is attached to the preview");
             assert!(!focus, "inline player view must not take keyboard focus");
+            let controls = player::with_store(|store| unsafe { store.view.controlsStyle() })
+                .unwrap_or(AVPlayerViewControlsStyle::None);
+            assert_eq!(controls, AVPlayerViewControlsStyle::Inline, "inline player shows playback controls");
             let preview_ready = { let refs = window_refs(); unsafe { (&*refs.as_ref().unwrap().preview_image).image().is_some() } };
             if !preview_ready { assert!(started.elapsed().as_secs() < 10, "video poster did not load"); return; }
             let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
