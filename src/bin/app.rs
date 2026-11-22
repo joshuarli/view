@@ -1,5 +1,6 @@
 //! Native AppKit host for tabbed media browsing and inline video playback.
 
+use std::ffi::CString;
 use std::path::PathBuf;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
@@ -3703,36 +3704,71 @@ fn launched_from_terminal() -> bool {
         .any(|fd| unsafe { libc::isatty(fd) } == 1)
 }
 
-fn detach_from_terminal() {
+fn detach_from_terminal(args: &[String]) {
+    if std::env::var_os("VIEW_DETACHED").is_some() {
+        return;
+    }
+    const POSIX_SPAWN_SETSID: libc::c_short = 0x0400;
     unsafe {
-        match libc::fork() {
-            0 => {
-                if libc::setsid() == -1 {
-                    eprintln!("view: setsid failed: {}", std::io::Error::last_os_error());
-                    std::process::exit(1);
-                }
-                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
-                if devnull == -1 {
-                    eprintln!("view: open /dev/null failed: {}", std::io::Error::last_os_error());
-                    std::process::exit(1);
-                }
-                if libc::dup2(devnull, libc::STDIN_FILENO) == -1
-                    || libc::dup2(devnull, libc::STDOUT_FILENO) == -1
-                    || libc::dup2(devnull, libc::STDERR_FILENO) == -1
-                {
-                    eprintln!("view: redirect to /dev/null failed: {}", std::io::Error::last_os_error());
-                    std::process::exit(1);
-                }
-                if devnull > libc::STDERR_FILENO {
-                    libc::close(devnull);
-                }
-            }
-            pid if pid > 0 => std::process::exit(0),
-            _ => {
-                eprintln!("view: fork failed: {}", std::io::Error::last_os_error());
+        let exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("view: current_exe failed: {error}");
                 std::process::exit(1);
             }
+        };
+        let mut argv = Vec::with_capacity(args.len() + 2);
+        argv.push(CString::new(exe.as_os_str().as_encoded_bytes()).expect("executable path has no NUL"));
+        argv.extend(args.iter().map(|arg| CString::new(arg.as_bytes()).expect("argument has no NUL")));
+        let mut argv_ptrs: Vec<*mut libc::c_char> = argv.iter().map(|arg| arg.as_ptr() as *mut libc::c_char).collect();
+        argv_ptrs.push(core::ptr::null_mut());
+
+        let mut env = Vec::with_capacity(std::env::vars_os().count() + 1);
+        env.push(CString::new("VIEW_DETACHED=1").expect("marker has no NUL"));
+        env.extend(std::env::vars_os().filter_map(|(key, value)| {
+            if key == "VIEW_DETACHED" {
+                return None;
+            }
+            let mut entry = key.as_encoded_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_encoded_bytes());
+            Some(CString::new(entry).expect("environment entry has no NUL"))
+        }));
+        let mut envp: Vec<*mut libc::c_char> = env.iter().map(|entry| entry.as_ptr() as *mut libc::c_char).collect();
+        envp.push(core::ptr::null_mut());
+
+        let mut attr: libc::posix_spawnattr_t = core::mem::zeroed();
+        let mut actions: libc::posix_spawn_file_actions_t = core::mem::zeroed();
+        let attr_ready = libc::posix_spawnattr_init(&mut attr) == 0;
+        let actions_ready = libc::posix_spawn_file_actions_init(&mut actions) == 0;
+        let mut status = if attr_ready && actions_ready { 0 } else { libc::EINVAL };
+        if status == 0 {
+            status = libc::posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_SETSID);
         }
+        if status == 0 {
+            status = libc::posix_spawn_file_actions_addopen(&mut actions, libc::STDIN_FILENO, c"/dev/null".as_ptr(), libc::O_RDWR, 0);
+        }
+        if status == 0 {
+            status = libc::posix_spawn_file_actions_adddup2(&mut actions, libc::STDIN_FILENO, libc::STDOUT_FILENO);
+        }
+        if status == 0 {
+            status = libc::posix_spawn_file_actions_adddup2(&mut actions, libc::STDIN_FILENO, libc::STDERR_FILENO);
+        }
+        let mut pid: libc::pid_t = 0;
+        if status == 0 {
+            status = libc::posix_spawn(&mut pid, argv[0].as_ptr(), &actions, &attr, argv_ptrs.as_ptr(), envp.as_ptr());
+        }
+        if attr_ready {
+            libc::posix_spawnattr_destroy(&mut attr);
+        }
+        if actions_ready {
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+        }
+        if status != 0 {
+            eprintln!("view: detach failed: {}", std::io::Error::from_raw_os_error(status));
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 }
 
@@ -3763,7 +3799,7 @@ fn main() {
     };
     let internal_run = self_test || debug_enter || regression_test || benchmark_startup || benchmark_memory || player_test;
     if !internal_run && launched_from_terminal() {
-        detach_from_terminal();
+        detach_from_terminal(&args);
     }
     {
         let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
