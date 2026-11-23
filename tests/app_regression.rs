@@ -16,6 +16,14 @@ impl Drop for TestProcess {
 }
 
 #[test]
+fn help_shows_maintainer_link_without_opening_app() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_app")).arg("--help").output().unwrap();
+    assert!(output.status.success(), "help exited unsuccessfully: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Maintained by Joshua Li: https://github.com/joshuarli/view"), "help omitted maintainer link: {stdout}");
+}
+
+#[test]
 fn app_interactions() {
     let _gui = GUI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = support::TestDirectory::new("app-regression");

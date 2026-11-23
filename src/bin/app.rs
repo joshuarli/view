@@ -3761,6 +3761,10 @@ fn main() {
         std::process::abort();
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().take_while(|arg| *arg != "--").any(|arg| arg == "--help") {
+        println!("Usage: view [--recursive] [--] [DIRECTORY]\nBrowse images and videos in a directory.\nMaintained by Joshua Li: https://github.com/joshuarli/view");
+        return;
+    }
     let self_test = args.iter().any(|a| a == "--self-test");
     let benchmark_memory = args.iter().any(|a| a == "--benchmark-memory");
     let benchmark_startup = args.iter().any(|a| a == "--benchmark-startup");
