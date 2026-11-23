@@ -29,7 +29,7 @@ dispatch2 = { version = "0.3", optional = true }
 objc2-quick-look-thumbnailing = { version = "0.3", optional = true }
 objc2-quick-look-ui = { version = "0.3", optional = true }
 objc2-uniform-type-identifiers = { version = "0.3", optional = true }
-rustybench = { version = "0.4", optional = true }
+rustybench = { version = "0.6.0", optional = true }
 
 [profile.dev]
 incremental = false
@@ -56,8 +56,7 @@ block2 = "0.6"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
-debug = true
-strip = false
+strip = true
 
 [[test]]
 name = "app_regression"

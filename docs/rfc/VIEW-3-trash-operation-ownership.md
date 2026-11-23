@@ -17,8 +17,7 @@ catalog contains a successful path. It reconstructs the undo transaction from
 that catalog. Duplicate tabs can assign history to the wrong tab; navigation can
 leave no matching tab. Undo restores a file to its recorded original path but
 inserts the item into the tab's current catalog, even when that tab shows another
-directory. [VIEW-3](../../TODO.md#view-3--p2--trash-completion-and-undo-follow-mutable-tab-catalogs)
-records the reproduced cases and verification limits.
+directory. VIEW-3 recorded the reproduced cases and verification limits.
 
 Two adjacent defects constrain the repair: mixed-result recycle completions must
 retain successes despite an error (VIEW-4), and catalog reconciliation must

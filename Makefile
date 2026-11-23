@@ -1,4 +1,4 @@
-.PHONY: build test lint package install bench toolchain
+.PHONY: build test lint package install bench toolchain clean
 
 APP := View.app
 INSTALL_DIR ?= /Applications
@@ -25,3 +25,7 @@ bench:
 
 toolchain:
 	sh scripts/install-gluon.sh
+
+clean:
+	cargo clean
+	rm -rf $(APP)

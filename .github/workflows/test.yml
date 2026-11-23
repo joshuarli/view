@@ -1,4 +1,4 @@
-name: CI
+name: test
 
 on:
   pull_request:
@@ -14,9 +14,9 @@ defaults:
     shell: bash -euo pipefail {0}
 
 jobs:
-  ci:
-    name: CI
-    runs-on: macos-latest
+  test:
+    name: test
+    runs-on: xcode-27
     permissions:
       contents: read
     defaults:
@@ -29,4 +29,4 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Test
-        run: cargo test --profile dist --locked --features app
+        run: make test
