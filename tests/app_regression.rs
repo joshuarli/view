@@ -2,6 +2,8 @@
 
 mod support;
 
+static GUI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct TestProcess(std::process::Child);
 
 impl Drop for TestProcess {
@@ -15,6 +17,7 @@ impl Drop for TestProcess {
 
 #[test]
 fn app_interactions() {
+    let _gui = GUI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = support::TestDirectory::new("app-regression");
     let folder = root.join("folder");
     std::fs::create_dir_all(&folder).unwrap();
@@ -39,6 +42,7 @@ fn app_interactions() {
 
 #[test]
 fn inline_video_playback() {
+    let _gui = GUI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = support::TestDirectory::new("player");
     std::fs::write(root.join("clip.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
     std::fs::write(root.join("next.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();

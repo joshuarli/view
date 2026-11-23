@@ -309,6 +309,7 @@ fn layout_carousel(
 }
 
 fn persist_media_filter() {
+    if internal_test_mode() { return; }
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let value = match unsafe { (*app_state()).tab().media_filter } {
         MediaFilter::Both => "both",
@@ -319,6 +320,7 @@ fn persist_media_filter() {
 }
 
 fn persist_view_mode() {
+    if internal_test_mode() { return; }
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let value = if unsafe { (*app_state()).tab().view_mode } == ViewMode::Carousel {
         NSString::from_str("carousel")
@@ -3291,8 +3293,6 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let filter_tab = unsafe { (*app_state()).new_tab(filter_dir.clone(), BrowserMode::Browser, load_listing(&filter_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
         activate_tab(filter_tab);
         assert_eq!(unsafe { (*app_state()).items().len() }, 2, "filter starts with both kinds");
-        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-        let saved_filter = defaults.stringForKey(&NSString::from_str("View.MediaFilter")).map(|s| s.to_string());
         apply_media_filter(MediaFilter::Images);
         {
             let state = unsafe { &*app_state() };
@@ -3314,10 +3314,6 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
             let bar = unsafe { &*refs.as_ref().unwrap().tab_bar };
             assert_eq!(bar.ivars().filter.selectedSegment(), 2, "toolbar control reflects the active filter");
             assert_eq!(bar.ivars().filter.segmentCount(), 3, "toolbar offers images, videos, and both");
-        }
-        match saved_filter {
-            Some(value) => unsafe { defaults.setObject_forKey(Some(&*NSString::from_str(&value) as &NSObject), &NSString::from_str("View.MediaFilter")) },
-            None => unsafe { let _: () = objc2::msg_send![&*defaults, removeObjectForKey: &*NSString::from_str("View.MediaFilter")]; },
         }
         close_tab(filter_tab);
         std::fs::remove_dir_all(&filter_dir).unwrap();
@@ -3678,6 +3674,11 @@ static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static PLAYER_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static INTERNAL_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn internal_test_mode() -> bool {
+    INTERNAL_RUN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 fn launched_from_terminal() -> bool {
     [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO]
@@ -3779,19 +3780,20 @@ fn main() {
         Err(e) => { eprintln!("view: {e}"); std::process::exit(1); }
     };
     let internal_run = self_test || debug_enter || regression_test || benchmark_startup || benchmark_memory || player_test;
+    INTERNAL_RUN.store(internal_run, std::sync::atomic::Ordering::Relaxed);
     if !internal_run && launched_from_terminal() {
         detach_from_terminal(&args);
     }
     {
         let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
         let saved = defaults.stringForKey(&NSString::from_str("View.ViewMode")).map(|s| s.to_string());
-        let view_mode = if benchmark_memory { ViewMode::Grid } else if benchmark_startup { ViewMode::Carousel } else { match saved.as_deref() { Some("grid") => ViewMode::Grid, _ => ViewMode::Carousel } };
+        let view_mode = if benchmark_memory { ViewMode::Grid } else if benchmark_startup || internal_test_mode() { ViewMode::Carousel } else { match saved.as_deref() { Some("grid") => ViewMode::Grid, _ => ViewMode::Carousel } };
         let saved_filter = defaults.stringForKey(&NSString::from_str("View.MediaFilter")).map(|s| s.to_string());
-        let media_filter = match saved_filter.as_deref() {
+        let media_filter = if internal_test_mode() { MediaFilter::Both } else { match saved_filter.as_deref() {
             Some("images") => MediaFilter::Images,
             Some("videos") => MediaFilter::Videos,
             _ => MediaFilter::Both,
-        };
+        } };
         let mut tab = Tab::default();
         tab.root = root.clone();
         tab.mode = mode;
