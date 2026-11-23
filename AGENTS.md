@@ -13,7 +13,7 @@
 
 One `NSWindow` hosts all tabs. Catalog selection uses paths; indexes are presentation positions.
 Rename, undo, and redo use exclusive moves that refuse to replace an existing destination.
-Keep the video poster visible until the selected item is ready for display.
+Show only the inline player for video previews; never show a thumbnail poster while a video loads or switches.
 
 [Architecture](docs/architecture.md) owns the runtime, build, packaging, and test boundaries.
 [Performance](docs/performance.md) owns workloads, targets, and historical measurements.

@@ -393,14 +393,6 @@ fn update_carousel_preview() {
         preview_label.setFrame(NSRect::new(NSPoint::new(16.0, 8.0), NSSize::new((preview_bounds.size.width - 32.0).max(0.0), label_h)));
     } else if item.kind == MediaKind::Movie {
         preview_label.setHidden(true);
-        preview_image.setFrame(NSRect::new(NSPoint::ZERO, preview_bounds.size));
-        preview_image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
-        let pixels = pixel_limit(preview, preview_bounds);
-        if let Some(image) = cached_sized(&item.path, pixels, item.file_size, item.modification) {
-            preview_image.setImage(Some(&*image));
-        } else {
-            request_quicklook_thumbnail_sized(item.path.clone(), pixels, item.file_size, item.modification);
-        }
         player::load(&item.path);
     } else {
         player::release();
@@ -2889,7 +2881,9 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let movie = unsafe { (*app_state()).tab_mut().catalog.append(vec![movie_item]).0 };
     unsafe { select_index(&mut (*app_state()).tab_mut().catalog, movie); }
     update_carousel_preview();
-    assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "keep the previous preview while the movie poster loads");
+    assert!(preview.isHidden(), "movie preview never shows a thumbnail poster");
+    assert!(player::with_store(|store| !store.view.isHidden()).unwrap_or(false), "movie preview shows the player while the frame loads");
+    assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "selecting a movie does not replace the preview image");
     unsafe { select_index(&mut (*app_state()).tab_mut().catalog, 0); }
     update_carousel_preview();
     unsafe { (*app_state()).tab_mut().catalog.remove(&movie_path); }
@@ -3412,10 +3406,10 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     let video = video_dir.join("clip.mp4");
     std::fs::copy(parent.join(".video.mp4"), &video).unwrap();
     unsafe { (*app_state()).tab_mut().view_mode = ViewMode::Carousel; }
-    let previous_image = preview.image().unwrap();
     enter_directory(video_dir.clone());
     assert_eq!(unsafe { (*app_state()).items()[0].kind }, MediaKind::Movie);
-    assert!(preview.image().is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&previous_image)), "video preview retains the previous image while its thumbnail loads");
+    assert!(preview.isHidden(), "video preview never shows a thumbnail poster");
+    assert!(player::with_store(|store| !store.view.isHidden()).unwrap_or(false), "video preview shows the player while the frame loads");
     let version_before = unsafe { (*app_state()).items()[0].clone() };
     let clip_bytes = std::fs::read(&video).unwrap();
     let mut replaced = clip_bytes.clone();
@@ -3427,19 +3421,8 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     assert_ne!(version_before.file_size, version_after.file_size, "same-path replacement changes the file size");
     let superseded_pixels = pixel_limit(preview, preview.bounds());
     assert!(cached_sized(&video, superseded_pixels, version_before.file_size, version_before.modification).is_none(), "superseded thumbnail version is not served after a same-path replacement");
-    let started = std::time::Instant::now();
-    let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
-        let (pixels, image) = { let refs = window_refs(); let refs = refs.as_ref().unwrap(); unsafe {
-            (pixel_limit(&*refs.preview, (&*refs.preview).bounds()), (&*refs.preview_image).image())
-        } };
-        if let Some(poster) = cached_sized(&video, pixels, version_after.file_size, version_after.modification) {
-            assert!(image.is_some_and(|image| Retained::as_ptr(&image) == Retained::as_ptr(&poster)), "video preview updates when the replacement thumbnail completes");
-            eprintln!("app regression: PASS");
-            std::process::exit(0);
-        }
-        assert!(started.elapsed().as_secs() < 10, "video thumbnail did not complete");
-    });
-    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &block) };
+    eprintln!("app regression: PASS");
+    std::process::exit(0);
 }
 
 static SELF_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -3580,16 +3563,14 @@ fn run_player_test() {
             let controls = player::with_store(|store| unsafe { store.view.controlsStyle() })
                 .unwrap_or(AVPlayerViewControlsStyle::None);
             assert_eq!(controls, AVPlayerViewControlsStyle::Inline, "inline player shows playback controls");
-            let preview_ready = { let refs = window_refs(); unsafe { (&*refs.as_ref().unwrap().preview_image).image().is_some() } };
-            if !preview_ready { assert!(started.elapsed().as_secs() < 10, "video poster did not load"); return; }
+            let poster_hidden = { let refs = window_refs(); unsafe { (&*refs.as_ref().unwrap().preview_image).isHidden() } };
+            assert!(poster_hidden, "video preview never shows a thumbnail poster");
             let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
             send_key_via_app(&app, 124, false);
             assert_eq!(unsafe { (*app_state()).selected() }, Some(1), "right selects the next video");
             player::with_store(|store| {
-                if store.view.isHidden() {
-                    let poster = unsafe { &*store.poster };
-                    assert!(!poster.isHidden() && poster.image().is_some(), "keep a poster visible while the next frame loads");
-                }
+                assert!(!store.view.isHidden(), "keep the player visible while the next frame loads");
+                assert!(unsafe { (*store.poster).isHidden() }, "do not show a thumbnail while the next frame loads");
             });
             PLAYER_TEST_STEP.store(1, std::sync::atomic::Ordering::SeqCst);
         }

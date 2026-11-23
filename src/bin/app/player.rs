@@ -43,14 +43,6 @@ fn player_store() -> &'static mut Option<PlayerStore> {
 }
 
 pub(crate) fn install(store: PlayerStore) {
-    unsafe {
-        store.view.addObserver_forKeyPath_options_context(
-            store.observer.as_super(),
-            &NSString::from_str("readyForDisplay"),
-            NSKeyValueObservingOptions::New,
-            core::ptr::null_mut(),
-        );
-    }
     *player_store() = Some(store);
 }
 
@@ -88,12 +80,9 @@ pub(crate) fn new_observer() -> Retained<PlayerItemObserver> {
 }
 
 fn update_player_visibility(store: &mut PlayerStore) {
-    let visible = store.item_path.is_some() && store.status == PlayerStatus::Ready && unsafe { store.view.isReadyForDisplay() };
-    store.view.setHidden(!visible);
-    unsafe { (*store.poster).setHidden(visible) };
-    if *super::PLAYER_TEST.get_or_init(|| false) && visible {
-        assert!(unsafe { store.view.isReadyForDisplay() }, "player must not replace the poster before its first frame is ready");
-    }
+    let video_selected = store.item_path.is_some();
+    store.view.setHidden(!video_selected);
+    unsafe { (*store.poster).setHidden(video_selected) };
 }
 
 fn player_item_status_changed(object: Option<*const AnyObject>) {
@@ -105,10 +94,6 @@ fn player_item_status_changed(object: Option<*const AnyObject>) {
         return;
     }
     let Some(store) = player_store().as_mut() else { return };
-    if object == Some(Retained::as_ptr(&store.view) as *const AnyObject) {
-        update_player_visibility(store);
-        return;
-    }
     let Some(item) = store.item.as_ref() else { return };
     if object != Some(Retained::as_ptr(item) as *const AnyObject) {
         return;
@@ -119,7 +104,6 @@ fn player_item_status_changed(object: Option<*const AnyObject>) {
         AVPlayerItemStatus::Failed => PlayerStatus::Failed,
         _ => PlayerStatus::Loading,
     };
-    update_player_visibility(store);
     if store.status == PlayerStatus::Ready && store.autoplay {
         store.autoplay = false;
         unsafe { store.player.play() };
@@ -144,9 +128,6 @@ pub(crate) fn release() {
         }
     }
     unsafe { player.replaceCurrentItemWithPlayerItem(None) };
-    if let Some(store) = player_store().as_mut() {
-        update_player_visibility(store);
-    }
 }
 
 pub(crate) fn load(path: &std::path::Path) {
@@ -159,7 +140,6 @@ pub(crate) fn load(path: &std::path::Path) {
         store.item_path = None;
         store.status = PlayerStatus::Loading;
         store.autoplay = false;
-        update_player_visibility(store);
         (store.player.clone(), store.observer.clone(), store.item.take())
     };
     if let Some(old_item) = old_item {

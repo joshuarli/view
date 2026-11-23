@@ -22,7 +22,7 @@ Still images use ImageIO thumbnails with orientation transforms. `draw_rect` gat
 
 Movies use asynchronous `QLThumbnailGenerator` requests, deduplicated by path, pixel size, and file version. Requests have no app-managed concurrency limit or navigation cancellation. Completions consult the file's current version before caching and refresh the current carousel selection.
 
-`src/bin/app/player.rs` owns one reusable `AVPlayer`, its view, the selected item, and KVO observation. Loading a different movie removes the old item's status observer and replaces the player item. The poster stays visible until both the item and its display are ready; the `AVPlayerView` then shows inline playback controls. Space toggles playback or pending autoplay; a failed item can fall back to Quick Look. Grid mode and non-video selections release the item. Quick Look remains available through E for videos.
+`src/bin/app/player.rs` owns one reusable `AVPlayer`, its view, the selected item, and KVO observation. Loading a different movie removes the old item's status observer and replaces the player item. The `AVPlayerView` stays visible whenever a video is selected, including while it loads; the shared thumbnail image view stays hidden for videos and is used only for still images and folders. Space toggles playback or pending autoplay; a failed item can fall back to Quick Look. Grid mode and non-video selections release the item. Quick Look remains available through E for videos.
 
 The exported `Scheduler`, `ThumbnailCache`, `TrashService`, and PNG decoder helpers in `src/lib.rs` have separate core tests. The application does not use them for thumbnail scheduling, cache ownership, or trash execution. Its still-image path does not call `decode_png` or `decode_png_native`.
 
