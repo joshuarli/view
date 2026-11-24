@@ -2,6 +2,8 @@
 
 `view` is a native macOS image and video browser in Rust, using AppKit through `objc2`.
 
+The roadmap, [docs/roadmap.md](docs/roadmap.md), holds all current and future work; its Status is the resume point.
+
 ## Commands
 
 - Build: `cargo build --profile dist --bin app --features app --locked`.
