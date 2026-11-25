@@ -73,6 +73,7 @@ enum Phase {
     Validating,
 }
 
+#[derive(Clone)]
 enum SaveTarget {
     ReplaceOriginal,
     Copy(PathBuf),
@@ -108,6 +109,7 @@ pub(crate) fn active() -> bool {
 fn finish() {
     let op = operation().take();
     if let Some(op) = op {
+        let playhead = op.playhead;
         unsafe {
             let _: () = objc2::msg_send![&*op.item, setForwardPlaybackEndTime: CMTime::invalid()];
             let _: () = objc2::msg_send![&*op.item, setReversePlaybackEndTime: CMTime::invalid()];
@@ -115,6 +117,7 @@ fn finish() {
         if let Some(temp) = op.temp_dir {
             let _ = std::fs::remove_dir_all(temp);
         }
+        restore_playhead(playhead);
     }
     player::set_trim_focus(false);
     restore_grid_focus();
@@ -180,7 +183,7 @@ pub(crate) fn begin_selected() {
     let (item_path, ready, can_trim) = {
         let state = unsafe { &*app_state() };
         let Some(media) = focused_item(state) else { return };
-        if media.kind != MediaKind::Movie || state.tab().catalog.selected_all().len() != 1 || !supported_container(&media.path) {
+        if media.kind != MediaKind::Movie || state.tab().catalog.selected_all().len() != 1 || state.pending_trash.contains(&media.path) || !supported_container(&media.path) {
             return;
         }
         let ready = player::with_store(|store| {
@@ -240,9 +243,7 @@ fn trim_completed(token: u64, result: AVPlayerViewTrimResult) {
         return;
     }
     if result == AVPlayerViewTrimResult::CancelButton {
-        let playhead = operation().as_ref().map(|op| op.playhead).unwrap_or_else(CMTime::invalid);
         finish();
-        restore_playhead(playhead);
         return;
     }
     let extracted = operation().as_ref().and_then(|op| {
@@ -259,9 +260,7 @@ fn trim_completed(token: u64, result: AVPlayerViewTrimResult) {
         return;
     };
     if trim_selection_is_full(selection) {
-        let playhead = operation().as_ref().map(|op| op.playhead).unwrap_or_else(CMTime::invalid);
         finish();
-        restore_playhead(playhead);
         return;
     }
     if let Some(op) = operation().as_mut() {
@@ -284,6 +283,9 @@ fn offer_save(token: u64) {
     alert.addButtonWithTitle(&NSString::from_str("Save Trimmed Copy…"));
     alert.addButtonWithTitle(&NSString::from_str("Replace Original…"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    if super::internal_test_mode() {
+        super::schedule_test_alert_click("Replace Original…");
+    }
     let response = alert.runModal();
     if response == objc2_app_kit::NSAlertFirstButtonReturn {
         let Some(destination) = choose_copy_destination(&source) else {
@@ -301,6 +303,9 @@ fn offer_save(token: u64) {
         confirm.setInformativeText(&NSString::from_str("The untrimmed original will be replaced after the trimmed export validates. This cannot be undone in View."));
         confirm.addButtonWithTitle(&NSString::from_str("Replace Original"));
         confirm.addButtonWithTitle(&NSString::from_str("Cancel"));
+        if super::internal_test_mode() {
+            super::schedule_test_alert_click("Replace Original");
+        }
         if confirm.runModal() == objc2_app_kit::NSAlertFirstButtonReturn {
             start_export(token, SaveTarget::ReplaceOriginal);
         } else {
@@ -385,17 +390,18 @@ fn start_export(token: u64, target: SaveTarget) {
             return;
         }
     };
+    if let Some(op) = operation().as_mut() {
+        op.temp_dir = Some(temp_dir.clone());
+    }
     let extension = source.extension().and_then(|e| e.to_str()).unwrap_or("mov");
     let output = temp_dir.join(format!("output.{extension}"));
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url_from_path(&source), None) };
     let Some(session) = (unsafe { AVAssetExportSession::exportSessionWithAsset_presetName(&asset, AVAssetExportPresetPassthrough) }) else {
-        let _ = std::fs::remove_dir_all(&temp_dir);
         fail("This movie cannot be exported without re-encoding.");
         return;
     };
     let type_supported = unsafe { session.supportedFileTypes() }.iter().any(|supported| &*supported == file_type);
     if !type_supported {
-        let _ = std::fs::remove_dir_all(&temp_dir);
         fail("Passthrough export does not support this movie's container without re-encoding.");
         return;
     }
@@ -403,7 +409,10 @@ fn start_export(token: u64, target: SaveTarget) {
         session.setOutputURL(Some(&url_from_path(&output)));
         session.setOutputFileType(Some(file_type));
         let start = CMTime::valid(selection.start.value, selection.start.timescale);
-        let duration_value = rational_difference_value(selection.end, selection.start);
+        let Some(duration_value) = rational_difference_value(selection.end, selection.start) else {
+            fail("The selected trim range cannot be represented exactly by CoreMedia.");
+            return;
+        };
         let duration = CMTime::valid(duration_value.0, duration_value.1);
         let range = CMTimeRange { start, duration };
         let _: () = objc2::msg_send![&*session, setTimeRange: range];
@@ -420,9 +429,9 @@ fn start_export(token: u64, target: SaveTarget) {
     unsafe { session.exportAsynchronouslyWithCompletionHandler(&handler) };
 }
 
-fn rational_difference_value(end: TrimTime, start: TrimTime) -> (i64, i32) {
+fn rational_difference_value(end: TrimTime, start: TrimTime) -> Option<(i64, i32)> {
     if end.timescale == start.timescale {
-        return (end.value - start.value, end.timescale);
+        return Some((end.value - start.value, end.timescale));
     }
     let scale = i128::from(end.timescale) * i128::from(start.timescale);
     let end_scaled = i128::from(end.value) * i128::from(start.timescale);
@@ -443,7 +452,7 @@ fn rational_difference_value(end: TrimTime, start: TrimTime) -> (i64, i32) {
         numerator /= 2;
         denominator /= 2;
     }
-    (i64::try_from(numerator).unwrap_or(i64::MAX), i32::try_from(denominator).unwrap_or(i32::MAX))
+    Some((i64::try_from(numerator).ok()?, i32::try_from(denominator).ok()?))
 }
 
 fn export_completed(token: u64) {
@@ -475,7 +484,7 @@ fn validate_export(token: u64) {
         }
         let temp_dir = op.temp_dir.clone()?;
         let extension = op.source.extension().and_then(|e| e.to_str()).unwrap_or("mov");
-        Some((op.source.clone(), op.selection?, op.target.as_ref()?.clone_for_validate(), temp_dir.join(format!("output.{extension}")), op.identity))
+        Some((op.source.clone(), op.selection?, op.target.as_ref()?.clone(), temp_dir.join(format!("output.{extension}")), op.identity))
     }) else {
         return;
     };
@@ -483,19 +492,6 @@ fn validate_export(token: u64) {
         let result = validate_exported_asset(&source, &temp_output, selection, &target, identity);
         dispatch2::DispatchQueue::main().exec_async(move || validation_completed(token, result));
     });
-}
-
-trait ValidateTargetClone {
-    fn clone_for_validate(&self) -> SaveTarget;
-}
-
-impl ValidateTargetClone for SaveTarget {
-    fn clone_for_validate(&self) -> SaveTarget {
-        match self {
-            SaveTarget::ReplaceOriginal => SaveTarget::ReplaceOriginal,
-            SaveTarget::Copy(path) => SaveTarget::Copy(path.clone()),
-        }
-    }
 }
 
 fn asset_signature(path: &Path) -> Result<(TrimTime, Vec<(String, i64, i64, usize)>), String> {
@@ -588,7 +584,7 @@ fn commit_export(token: u64) {
         if op.token != token || op.phase != Phase::Validating {
             return None;
         }
-        Some((op.source.clone(), op.target.as_ref()?.clone_for_validate(), op.temp_dir.clone()?))
+        Some((op.source.clone(), op.target.as_ref()?.clone(), op.temp_dir.clone()?))
     }) else {
         return;
     };

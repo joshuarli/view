@@ -2166,6 +2166,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            if trim::conflicts() { return; }
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
             let state = unsafe { &*app_state() };
             let width = self.bounds().size.width;
@@ -2179,13 +2180,14 @@ define_class!(
         }
 
         #[unsafe(method(goBack:))]
-        fn go_back(&self, _sender: &NSButton) { navigate_back(); }
+        fn go_back(&self, _sender: &NSButton) { if !trim::conflicts() { navigate_back(); } }
         #[unsafe(method(goForward:))]
-        fn go_forward(&self, _sender: &NSButton) { navigate_forward(); }
+        fn go_forward(&self, _sender: &NSButton) { if !trim::conflicts() { navigate_forward(); } }
         #[unsafe(method(changeView:))]
-        fn change_view(&self, _sender: &NSButton) { toggle_view_mode(); }
+        fn change_view(&self, _sender: &NSButton) { if !trim::conflicts() { toggle_view_mode(); } }
         #[unsafe(method(setMediaFilter:))]
         fn set_media_filter(&self, sender: &objc2_app_kit::NSSegmentedControl) {
+            if trim::conflicts() { return; }
             let filter = match sender.selectedSegment() {
                 0 => MediaFilter::Images,
                 1 => MediaFilter::Videos,
@@ -2194,7 +2196,7 @@ define_class!(
             apply_media_filter(filter);
         }
         #[unsafe(method(addTab:))]
-        fn add_tab(&self, _sender: &NSButton) { new_tab(); }
+        fn add_tab(&self, _sender: &NSButton) { if !trim::conflicts() { new_tab(); } }
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
@@ -2541,6 +2543,7 @@ define_class!(
         fn open_selected_action(&self, _sender: &NSObject) { if !trim::conflicts() { open_selected(); } }
         #[unsafe(method(openInNewTab:))]
         fn open_in_new_tab_action(&self, _sender: &NSObject) {
+            if trim::conflicts() { return; }
             if let Some(item) = focused_item(unsafe { &*app_state() }) { if item.kind == MediaKind::Directory { open_path_in_new_tab(item.path); } }
         }
         #[unsafe(method(newTab:))]
@@ -2570,6 +2573,7 @@ define_class!(
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            if trim::conflicts() { return; }
             let location = event.locationInWindow();
             let view_location = self.convertPoint_fromView(location, None);
             if let Some(index) = self.index_at_point(view_location) {
@@ -2583,6 +2587,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            if trim::conflicts() { return; }
             self.ivars().drag_candidate.set(false);
             self.ivars().deferred_click.set(None);
             self.ivars().drag_origin.set(None);
@@ -2652,21 +2657,25 @@ define_class!(
 
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2_app_kit::NSDragOperation {
+            if trim::conflicts() { return objc2_app_kit::NSDragOperation::empty() }
             grid_drop_operation(self, sender)
         }
 
         #[unsafe(method(draggingUpdated:))]
         fn dragging_updated(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2_app_kit::NSDragOperation {
+            if trim::conflicts() { return objc2_app_kit::NSDragOperation::empty() }
             grid_drop_operation(self, sender)
         }
 
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _sender: Option<&objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>>) {
+            if trim::conflicts() { return; }
             clear_move_drop_target(self);
         }
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> bool {
+            if trim::conflicts() { return objc2::runtime::Bool::NO; }
             if sender.draggingSource().is_some() {
                 let location = self.convertPoint_fromView(sender.draggingLocation(), None);
                 let paths = pasteboard_file_paths(&sender.draggingPasteboard());
@@ -3774,6 +3783,54 @@ fn send_mouse_click_at(point: objc2_foundation::NSPoint) {
     }
 }
 
+fn send_mouse_drag(start: objc2_foundation::NSPoint, end: objc2_foundation::NSPoint) {
+    let Some(window_ptr) = target_window() else { return };
+    let window = unsafe { &*window_ptr };
+    let timestamp = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let send = |event_type, point| {
+        let event = objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            event_type, point, objc2_app_kit::NSEventModifierFlags::empty(), timestamp(), window.windowNumber(), None, 0, 1, 0.0,
+        );
+        if let Some(event) = event { window.sendEvent(&event); }
+    };
+    send(objc2_app_kit::NSEventType::LeftMouseDown, start);
+    for step in 1..=8 {
+        let t = f64::from(step) / 8.0;
+        send(objc2_app_kit::NSEventType::LeftMouseDragged, objc2_foundation::NSPoint::new(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t));
+    }
+    send(objc2_app_kit::NSEventType::LeftMouseUp, end);
+}
+
+fn click_titled_button(view: &NSView, title: &str) -> bool {
+    if view.isKindOfClass(NSButton::class()) {
+        let button = unsafe { &*(view as *const NSView).cast::<NSButton>() };
+        if button.title().to_string() == title {
+            unsafe { button.performClick(None); }
+            return true;
+        }
+    }
+    view.subviews().iter().any(|subview| click_titled_button(&subview, title))
+}
+
+fn click_window_button(app: &NSApplication, title: &str) -> bool {
+    app.windows().iter().any(|window| window.contentView().is_some_and(|view| click_titled_button(&view, title)))
+}
+
+pub(crate) fn schedule_test_alert_click(title: &'static str) {
+    let block = block2::RcBlock::new(move |timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
+        let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+        if click_window_button(&app, title) {
+            unsafe { (*timer.as_ptr()).invalidate() };
+        }
+    });
+    let timer = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, true, &block) };
+    let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
+    unsafe {
+        run_loop.addTimer_forMode(&timer, objc2_app_kit::NSModalPanelRunLoopMode);
+        run_loop.addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
+    }
+}
+
 fn find_titled_button(view: &NSView, title: &str) -> Option<NSRect> {
     if view.isKindOfClass(NSButton::class()) {
         let button = unsafe { &*(view as *const NSView).cast::<NSButton>() };
@@ -3847,7 +3904,8 @@ fn start_self_test() {
 fn start_player_test() {
     PLAYER_TEST_START.set(std::time::Instant::now()).ok();
     let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| { run_player_test(); });
-    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &block) };
+    let timer = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, true, &block) };
+    unsafe { objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes) };
 }
 
 fn run_player_test() {
@@ -3949,13 +4007,48 @@ fn run_player_test() {
             send_mouse_click_at(point);
             PLAYER_TEST_STEP.store(4, std::sync::atomic::Ordering::SeqCst);
         }
-        _ => {
+        4 => {
             if trim::active() {
                 assert!(started.elapsed().as_secs() < 10, "canceling native trim did not end the operation");
                 return;
             }
             let focus = player::with_store(|store| store.view.acceptsFirstResponder()).unwrap_or(true);
             assert!(!focus, "player relinquishes keyboard focus after canceling trim");
+            let path = focused_item(unsafe { &*app_state() }).map(|item| item.path).expect("trim target remains selected");
+            TRIM_ORIGINAL_SIZE.store(std::fs::metadata(path).unwrap().len(), std::sync::atomic::Ordering::SeqCst);
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(refs) = window_refs().as_ref() {
+                let _ = unsafe { &*refs.window }.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 17, false);
+            PLAYER_TEST_STEP.store(5, std::sync::atomic::Ordering::SeqCst);
+        }
+        5 => {
+            if !trim::active() {
+                assert!(started.elapsed().as_secs() < 10, "second trim invocation did not start");
+                return;
+            }
+            let Some((view, frame)) = player::with_store(|store| (store.view.clone(), store.view.convertRect_toView(store.view.bounds(), None))) else { return };
+            let start = objc2_foundation::NSPoint::new(frame.origin.x + frame.size.width * (97.0 / 1260.0), frame.origin.y + 38.0);
+            let end = objc2_foundation::NSPoint::new(start.x + frame.size.width * (176.0 / 1260.0), start.y);
+            send_mouse_drag(start, end);
+            assert!(click_titled_button(&view, "Trim"), "native trim confirmation button is available");
+            PLAYER_TEST_STEP.store(6, std::sync::atomic::Ordering::SeqCst);
+        }
+        _ => {
+            if trim::active() {
+                assert!(started.elapsed().as_secs() < 10, "replacement export did not finish");
+                return;
+            }
+            let path = focused_item(unsafe { &*app_state() }).map(|item| item.path).expect("trim target remains selected");
+            let new_size = std::fs::metadata(&path).unwrap().len();
+            assert!(new_size < TRIM_ORIGINAL_SIZE.load(std::sync::atomic::Ordering::SeqCst), "replacement writes the smaller trimmed movie");
+            let ready = player::with_store(|store| store.status == player::PlayerStatus::Ready && store.item_path.as_deref() == Some(path.as_path())).unwrap_or(false);
+            if !ready {
+                assert!(started.elapsed().as_secs() < 10, "same-path replacement did not reload the player");
+                return;
+            }
             eprintln!("player test: PASS");
             std::process::exit(0);
         }
@@ -4012,6 +4105,7 @@ static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static PLAYER_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TRIM_ORIGINAL_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 static INTERNAL_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn internal_test_mode() -> bool {
@@ -4195,7 +4289,7 @@ define_class!(
         fn can_edit_item(&self, _panel: &QLPreviewPanel, item: &objc2::runtime::ProtocolObject<dyn objc2_quick_look_ui::QLPreviewItem>) -> bool {
             preview_item_path(item)
                 .and_then(|path| view_core::kind_for_extension(&path))
-                .is_some_and(|kind| matches!(kind, MediaKind::Image | MediaKind::Movie))
+                .is_some_and(|kind| matches!(kind, MediaKind::Image))
         }
 
         #[unsafe(method(previewPanel:saveModeForItem:))]

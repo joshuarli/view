@@ -1375,39 +1375,6 @@ impl FileIdentity {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct OperationOwner {
-    next: u64,
-    active: Option<u64>,
-}
-
-impl OperationOwner {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn begin(&mut self) -> Option<u64> {
-        if self.active.is_some() {
-            return None;
-        }
-        self.next = self.next.wrapping_add(1);
-        self.active = Some(self.next);
-        self.active
-    }
-
-    pub fn finish(&mut self, token: u64) -> bool {
-        if self.active != Some(token) {
-            return false;
-        }
-        self.active = None;
-        true
-    }
-
-    pub fn reject_stale(&mut self, token: u64) -> bool {
-        !self.finish(token)
-    }
-
-    pub fn active_token(&self) -> Option<u64> { self.active }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1908,18 +1875,6 @@ mod trim_core_tests {
     fn trim_full_range_is_a_noop() {
         let selection = validate_trim_selection(TrimTime::new(0, 600), TrimTime::new(6000, 600), TrimTime::new(10, 1)).unwrap();
         assert!(trim_selection_is_full(selection));
-    }
-
-    #[test]
-    fn operation_owner_rejects_stale_or_duplicate_completion() {
-        let mut owner = OperationOwner::new();
-        let first = owner.begin().unwrap();
-        assert!(owner.begin().is_none());
-        assert!(owner.reject_stale(first + 1));
-        assert!(owner.finish(first));
-        assert!(!owner.finish(first));
-        let second = owner.begin().unwrap();
-        assert_ne!(first, second);
     }
 
     #[test]
