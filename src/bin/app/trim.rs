@@ -405,16 +405,17 @@ fn start_export(token: u64, target: SaveTarget) {
         fail("Passthrough export does not support this movie's container without re-encoding.");
         return;
     }
+    let start = CMTime::valid(selection.start.value, selection.start.timescale);
+    let Some(duration_value) = rational_difference_value(selection.end, selection.start) else {
+        fail("The selected trim range cannot be represented exactly by CoreMedia.");
+        return;
+    };
+    let duration = CMTime::valid(duration_value.0, duration_value.1);
+    let range = CMTimeRange { start, duration };
+    // SAFETY: the session is a live AVAssetExportSession on the main thread and range is a valid CMTimeRange.
     unsafe {
         session.setOutputURL(Some(&url_from_path(&output)));
         session.setOutputFileType(Some(file_type));
-        let start = CMTime::valid(selection.start.value, selection.start.timescale);
-        let Some(duration_value) = rational_difference_value(selection.end, selection.start) else {
-            fail("The selected trim range cannot be represented exactly by CoreMedia.");
-            return;
-        };
-        let duration = CMTime::valid(duration_value.0, duration_value.1);
-        let range = CMTimeRange { start, duration };
         let _: () = objc2::msg_send![&*session, setTimeRange: range];
     }
     if let Some(op) = operation().as_mut() {

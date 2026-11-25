@@ -3785,6 +3785,7 @@ fn send_mouse_click_at(point: objc2_foundation::NSPoint) {
 
 fn send_mouse_drag(start: objc2_foundation::NSPoint, end: objc2_foundation::NSPoint) {
     let Some(window_ptr) = target_window() else { return };
+    // SAFETY: window_ptr points to the live window held by window_refs on the main thread.
     let window = unsafe { &*window_ptr };
     let timestamp = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     let send = |event_type, point| {
@@ -3803,8 +3804,10 @@ fn send_mouse_drag(start: objc2_foundation::NSPoint, end: objc2_foundation::NSPo
 
 fn click_titled_button(view: &NSView, title: &str) -> bool {
     if view.isKindOfClass(NSButton::class()) {
+        // SAFETY: isKindOfClass confirms the view is an NSButton.
         let button = unsafe { &*(view as *const NSView).cast::<NSButton>() };
         if button.title().to_string() == title {
+            // SAFETY: the button is a real NSButton and this runs on the main thread.
             unsafe { button.performClick(None); }
             return true;
         }
@@ -3820,15 +3823,17 @@ pub(crate) fn schedule_test_alert_click(title: &'static str) {
     let block = block2::RcBlock::new(move |timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
         let app = NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
         if click_window_button(&app, title) {
+            // SAFETY: NSTimer passes its own live pointer to the callback.
             unsafe { (*timer.as_ptr()).invalidate() };
         }
     });
+    // SAFETY: the block is copied by NSTimer and this runs on the main thread.
     let timer = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, true, &block) };
     let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
-    unsafe {
-        run_loop.addTimer_forMode(&timer, objc2_app_kit::NSModalPanelRunLoopMode);
-        run_loop.addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
-    }
+    // SAFETY: the run loop retains the timer and both modes are valid main-thread modes.
+    unsafe { run_loop.addTimer_forMode(&timer, objc2_app_kit::NSModalPanelRunLoopMode) };
+    // SAFETY: the run loop retains the timer and common modes are valid main-thread modes.
+    unsafe { run_loop.addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes) };
 }
 
 fn find_titled_button(view: &NSView, title: &str) -> Option<NSRect> {
@@ -3904,7 +3909,9 @@ fn start_self_test() {
 fn start_player_test() {
     PLAYER_TEST_START.set(std::time::Instant::now()).ok();
     let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| { run_player_test(); });
+    // SAFETY: the block is copied by NSTimer and this runs on the main thread.
     let timer = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, true, &block) };
+    // SAFETY: the main run loop retains the timer and common modes are valid main-thread modes.
     unsafe { objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes) };
 }
 
@@ -4014,11 +4021,13 @@ fn run_player_test() {
             }
             let focus = player::with_store(|store| store.view.acceptsFirstResponder()).unwrap_or(true);
             assert!(!focus, "player relinquishes keyboard focus after canceling trim");
+            // SAFETY: app state is initialized before the test timer runs on the main thread.
             let path = focused_item(unsafe { &*app_state() }).map(|item| item.path).expect("trim target remains selected");
             TRIM_ORIGINAL_SIZE.store(std::fs::metadata(path).unwrap().len(), std::sync::atomic::Ordering::SeqCst);
             let mtm = objc2::MainThreadMarker::new().unwrap();
             let app = NSApplication::sharedApplication(mtm);
             if let Some(refs) = window_refs().as_ref() {
+                // SAFETY: window_refs holds the live window and grid for this main-thread test.
                 let _ = unsafe { &*refs.window }.makeFirstResponder(Some(unsafe { &*refs.grid }));
             }
             send_key_via_app(&app, 17, false);
@@ -4041,6 +4050,7 @@ fn run_player_test() {
                 assert!(started.elapsed().as_secs() < 10, "replacement export did not finish");
                 return;
             }
+            // SAFETY: app state is initialized before the test timer runs on the main thread.
             let path = focused_item(unsafe { &*app_state() }).map(|item| item.path).expect("trim target remains selected");
             let new_size = std::fs::metadata(&path).unwrap().len();
             assert!(new_size < TRIM_ORIGINAL_SIZE.load(std::sync::atomic::Ordering::SeqCst), "replacement writes the smaller trimmed movie");
