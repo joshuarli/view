@@ -28,6 +28,7 @@ Browser mode lists one directory per tab. Recursive mode flattens the directory 
 | Cmd+Z; Cmd+Shift+Z | Undo; redo file moves, including Move to Trash |
 | Shift+Left; Shift+Right | Navigate back; forward |
 | Space on a video | Toggle inline playback in the carousel; from the grid, enter the carousel and request playback |
+| T on a carousel video | Trim the video with the native AVKit controls |
 | Space on another item | Toggle Quick Look |
 | E | Toggle Quick Look for the selection, including videos; pauses inline playback |
 | Cmd+T; Cmd+W | Open a tab for the current folder; close the active tab when another remains |
@@ -35,10 +36,10 @@ Browser mode lists one directory per tab. Recursive mode flattens the directory 
 | Images; Videos; Both | Toolbar control filters the listing to images, videos, or both |
 | Drag selected thumbnails onto a folder | Move the selected folders and media into that folder; drags to other applications copy |
 | Drop a folder or media file from another application | Browse the folder or select the file; the tab bar also accepts external drops |
-| Right-click an item | Open, show in Finder, copy its path, rename, move to Trash, or undo/redo |
+| Right-click an item | Open, show in Finder, copy its path, rename, trim a supported video, move to Trash, or undo/redo |
 | Cmd+Q | Quit |
 
-The toolbar and View menu switch between carousel and grid. The app remembers the chosen view mode. The toolbar also switches the listing between images, videos, and both; the app remembers that choice too. Folders stay visible in browser mode regardless of the filter. Video previews show only the inline player, with standard playback controls; no thumbnail is displayed while a frame loads or switches. While loading, Space toggles the request to play when ready. After a video load fails, Space can open Quick Look instead. Quick Look shows Markup for images and Trim for videos; edits are written to the original file.
+The toolbar and View menu switch between carousel and grid. The app remembers the chosen view mode. The toolbar also switches the listing between images, videos, and both; the app remembers that choice too. Folders stay visible in browser mode regardless of the filter. Video previews show only the inline player, with standard playback controls; no thumbnail is displayed while a frame loads or switches. While loading, Space toggles the request to play when ready. After a video load fails, Space can open Quick Look instead. Quick Look shows Markup for images. Inline trimming is available for one ready local `.mp4`, `.m4v`, or `.mov` video in the carousel. Press T or choose Trim Video…, adjust Apple's native range handles, then choose Trim or Cancel. After Trim, View offers Save Trimmed Copy… first, Replace Original… after an explicit warning, or Cancel. Passthrough export preserves the source container and codec without re-encoding; a copy must keep the source extension. Cancellation, unsupported media, export failure, validation failure, and a full-duration selection leave the original unchanged. Replacement is not undoable in View. Trimming is unavailable for protected content, unsupported containers, failed player items, and multiple selections. Frame boundaries can depend on encoded keyframes and container edit lists; the measured H.264 fixture preserved the exact selected three-second duration.
 
 Catalogs and move history last for the current session. There is no filesystem watcher, so changes made elsewhere do not automatically refresh an open listing. Search, tags, a persistent media library, and a custom editor are outside the app's scope.
 

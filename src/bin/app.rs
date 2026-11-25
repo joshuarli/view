@@ -31,6 +31,8 @@ use view_core::{
 
 #[path = "app/player.rs"]
 mod player;
+#[path = "app/trim.rs"]
+mod trim;
 
 const CELL_W: f64 = 160.0;
 const CELL_H: f64 = 180.0;
@@ -517,6 +519,7 @@ fn install_main_menu(_delegate: &AppDelegate, _carousel: bool, grid: &GridView) 
     let edit_menu = NSMenu::new(mtm);
     edit_menu.addItem(&menu_item(grid, "Undo", objc2::sel!(undoMove:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
     edit_menu.addItem(&menu_item(grid, "Redo", objc2::sel!(redoMove:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
+    edit_menu.addItem(&menu_item(grid, "Trim Video…", objc2::sel!(trimSelectedVideo:), Some("t"), objc2_app_kit::NSEventModifierFlags::empty()));
     edit_menu.addItem(&menu_item(grid, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::empty()));
     let edit_item = NSMenuItem::new(mtm);
     edit_item.setTitle(&NSString::from_str("Edit"));
@@ -933,6 +936,7 @@ fn build_context_menu(target: &GridView) -> Retained<NSMenu> {
     menu.addItem(&make_context_action_item(target, "Show in Finder", objc2::sel!(showSelectedInFinder:), None, objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Copy Path", objc2::sel!(copySelectedPath:), None, objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Rename…", objc2::sel!(renameSelected:), None, objc2_app_kit::NSEventModifierFlags::empty()));
+    menu.addItem(&make_context_action_item(target, "Trim Video…", objc2::sel!(trimSelectedVideo:), Some("t"), objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Undo", objc2::sel!(undoMove:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
     menu.addItem(&make_context_action_item(target, "Redo", objc2::sel!(redoMove:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
@@ -2222,12 +2226,14 @@ define_class!(
 
         #[unsafe(method(closeTabAt:))]
         fn close_tab_at(&self, sender: &NSMenuItem) {
+            if trim::conflicts() { return; }
             let index = sender.tag() as usize;
             close_tab(index);
         }
 
         #[unsafe(method(closeOtherTabsAt:))]
         fn close_other_tabs_at(&self, sender: &NSMenuItem) {
+            if trim::conflicts() { return; }
             let index = sender.tag() as usize;
             close_other_tabs(index);
         }
@@ -2240,6 +2246,7 @@ define_class!(
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2::runtime::Bool {
+            if trim::conflicts() { return objc2::runtime::Bool::NO }
             if sender.draggingSource().is_some() { return objc2::runtime::Bool::NO }
             let Some(path) = dropped_path(&sender.draggingPasteboard()) else { return objc2::runtime::Bool::NO };
             let location = self.convertPoint_fromView(sender.draggingLocation(), None);
@@ -2308,19 +2315,19 @@ define_class!(
 define_class!(
     #[unsafe(super(AVPlayerView))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = ()]
+    #[ivars = std::cell::Cell<bool>]
     pub(crate) struct PreviewPlayerView;
 
     impl PreviewPlayerView {
         #[unsafe(method_id(initWithFrame:))]
         fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
-            let this = this.set_ivars(());
+            let this = this.set_ivars(std::cell::Cell::new(false));
             unsafe { objc2::msg_send![super(this), initWithFrame: frame] }
         }
 
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
-            false
+            self.ivars().get()
         }
     }
 );
@@ -2492,6 +2499,8 @@ define_class!(
                 self.scroll_selection_into_view();
                 return;
             }
+            if trim::conflicts() { return; }
+            if code == 17 && !command && !control && !shift { trim::begin_selected(); return; }
             if code == 49 && !command && !control && !shift { space_pressed(); return; }
             if code == 14 && !command && !control && !shift { quicklook_selected(); return; }
             if code == 51 || code == 117 { trash_selected(self); return; }
@@ -2529,33 +2538,35 @@ define_class!(
         }
 
         #[unsafe(method(openSelected:))]
-        fn open_selected_action(&self, _sender: &NSObject) { open_selected(); }
+        fn open_selected_action(&self, _sender: &NSObject) { if !trim::conflicts() { open_selected(); } }
         #[unsafe(method(openInNewTab:))]
         fn open_in_new_tab_action(&self, _sender: &NSObject) {
             if let Some(item) = focused_item(unsafe { &*app_state() }) { if item.kind == MediaKind::Directory { open_path_in_new_tab(item.path); } }
         }
         #[unsafe(method(newTab:))]
-        fn new_tab_action(&self, _sender: &NSObject) { new_tab(); }
+        fn new_tab_action(&self, _sender: &NSObject) { if !trim::conflicts() { new_tab(); } }
         #[unsafe(method(closeTab:))]
-        fn close_tab_action(&self, _sender: &NSObject) { let i = unsafe { (*app_state()).active }; close_tab(i); }
+        fn close_tab_action(&self, _sender: &NSObject) { if trim::conflicts() { return; } let i = unsafe { (*app_state()).active }; close_tab(i); }
         #[unsafe(method(navigateBack:))]
-        fn navigate_back_action(&self, _sender: &NSObject) { navigate_back(); }
+        fn navigate_back_action(&self, _sender: &NSObject) { if !trim::conflicts() { navigate_back(); } }
         #[unsafe(method(navigateForward:))]
-        fn navigate_forward_action(&self, _sender: &NSObject) { navigate_forward(); }
+        fn navigate_forward_action(&self, _sender: &NSObject) { if !trim::conflicts() { navigate_forward(); } }
         #[unsafe(method(toggleGridView:))]
-        fn toggle_grid_view_action(&self, _sender: &NSObject) { toggle_view_mode(); }
+        fn toggle_grid_view_action(&self, _sender: &NSObject) { if !trim::conflicts() { toggle_view_mode(); } }
         #[unsafe(method(showSelectedInFinder:))]
         fn show_selected_action(&self, _sender: &NSObject) { show_selected_in_finder(); }
         #[unsafe(method(copySelectedPath:))]
         fn copy_selected_action(&self, _sender: &NSObject) { copy_selected_path(); }
         #[unsafe(method(renameSelected:))]
-        fn rename_selected_action(&self, _sender: &NSObject) { rename_selected(); }
+        fn rename_selected_action(&self, _sender: &NSObject) { if !trim::conflicts() { rename_selected(); } }
         #[unsafe(method(moveSelectedToTrash:))]
-        fn move_selected_action(&self, _sender: &NSObject) { trash_selected(self); }
+        fn move_selected_action(&self, _sender: &NSObject) { if !trim::conflicts() { trash_selected(self); } }
+        #[unsafe(method(trimSelectedVideo:))]
+        fn trim_selected_action(&self, _sender: &NSObject) { trim::begin_selected(); }
         #[unsafe(method(undoMove:))]
-        fn undo_move_action(&self, _sender: &NSObject) { undo_move(); }
+        fn undo_move_action(&self, _sender: &NSObject) { if !trim::conflicts() { undo_move(); } }
         #[unsafe(method(redoMove:))]
-        fn redo_move_action(&self, _sender: &NSObject) { redo_move(); }
+        fn redo_move_action(&self, _sender: &NSObject) { if !trim::conflicts() { redo_move(); } }
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
@@ -3237,15 +3248,15 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     unsafe { panel.setCurrentPreviewItemIndex(2); }
     assert_eq!(unsafe { (*app_state()).selected() }, Some(2), "reopened quick look updates selection");
     panel.orderOut(None);
-    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !unsafe { panel.isVisible() }), "quick look panel hides");
+    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !panel.isVisible()), "quick look panel hides");
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
     send_key_via_app(&app, 14, false);
-    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || unsafe { panel.isVisible() }), "e opens the quick look panel");
+    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || panel.isVisible()), "e opens the quick look panel");
     window.makeKeyAndOrderFront(None);
     let _ = window.makeFirstResponder(Some(grid));
     send_key_via_app(&app, 14, false);
-    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !unsafe { panel.isVisible() }), "e toggles the quick look panel closed");
+    assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || !panel.isVisible()), "e toggles the quick look panel closed");
 
     {
         quicklook_selected();
@@ -3750,6 +3761,34 @@ fn send_key_via_app(_app: &NSApplication, key_code: u16, shift: bool) {
     if let Some(event) = event { window.sendEvent(&event); }
 }
 
+fn send_mouse_click_at(point: objc2_foundation::NSPoint) {
+    let Some(window_ptr) = target_window() else { return };
+    let window = unsafe { &*window_ptr };
+    for event_type in [objc2_app_kit::NSEventType::LeftMouseDown, objc2_app_kit::NSEventType::LeftMouseUp] {
+        let event = objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            event_type, point, objc2_app_kit::NSEventModifierFlags::empty(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
+            window.windowNumber(), None, 0, 1, 0.0,
+        );
+        if let Some(event) = event { window.sendEvent(&event); }
+    }
+}
+
+fn find_titled_button(view: &NSView, title: &str) -> Option<NSRect> {
+    if view.isKindOfClass(NSButton::class()) {
+        let button = unsafe { &*(view as *const NSView).cast::<NSButton>() };
+        if button.title().to_string() == title {
+            return Some(button.convertRect_toView(button.bounds(), None));
+        }
+    }
+    for subview in view.subviews().iter() {
+        if let Some(rect) = find_titled_button(&subview, title) {
+            return Some(rect);
+        }
+    }
+    None
+}
+
 fn start_self_test() {
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
@@ -3879,11 +3918,44 @@ fn run_player_test() {
             send_key_via_app(&app, 49, false);
             PLAYER_TEST_STEP.store(2, std::sync::atomic::Ordering::SeqCst);
         }
-        _ => {
+        2 => {
             let carousel = unsafe { (*app_state()).tab().view_mode == ViewMode::Carousel };
             assert!(carousel, "space in grid mode returns to carousel");
             let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             if rate <= 0.0 { assert!(started.elapsed().as_secs() < 10, "space in grid mode did not begin playback"); return; }
+            player::pause();
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(refs) = window_refs().as_ref() {
+                let _ = unsafe { &*refs.window }.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 17, false);
+            PLAYER_TEST_STEP.store(3, std::sync::atomic::Ordering::SeqCst);
+        }
+        3 => {
+            if !trim::active() {
+                assert!(started.elapsed().as_secs() < 10, "t did not enter native trimming");
+                return;
+            }
+            let focus = player::with_store(|store| store.view.acceptsFirstResponder()).unwrap_or(false);
+            assert!(focus, "player accepts keyboard focus while trimming");
+            let Some((view, frame)) = player::with_store(|store| (store.view.clone(), store.view.frame())) else { return };
+            let Some(rect) = find_titled_button(&view, "Cancel") else {
+                assert!(started.elapsed().as_secs() < 10, "native trim cancel button did not appear");
+                return;
+            };
+            let _ = frame;
+            let point = objc2_foundation::NSPoint::new(rect.origin.x + rect.size.width / 2.0, rect.origin.y + rect.size.height / 2.0);
+            send_mouse_click_at(point);
+            PLAYER_TEST_STEP.store(4, std::sync::atomic::Ordering::SeqCst);
+        }
+        _ => {
+            if trim::active() {
+                assert!(started.elapsed().as_secs() < 10, "canceling native trim did not end the operation");
+                return;
+            }
+            let focus = player::with_store(|store| store.view.acceptsFirstResponder()).unwrap_or(true);
+            assert!(!focus, "player relinquishes keyboard focus after canceling trim");
             eprintln!("player test: PASS");
             std::process::exit(0);
         }

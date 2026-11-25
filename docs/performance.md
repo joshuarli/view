@@ -87,6 +87,12 @@ bytes. Rustybench 0.4 from crates.io does not report macOS RSS; the upstream
 runner now supports it, but the app-process check remains necessary because the
 launch benchmark runs a child process.
 
+## Trimming measurements
+
+Inline trimming adds no work before T invokes it: no export session, asset scan, thumbnail pipeline, frame polling, or persistent observer is created during ordinary browsing. Export runs through AVFoundation off the main thread.
+
+On 2026-11-25, the checked-in 6-second 640×360 H.264 MP4 fixture (18,991 bytes) exported a 1–4 second selection in well under 0.1 seconds in the native test process. The output was 12,788 bytes and reported exactly 1800/600 seconds. Its video track preserved media type `vide`, H.264 format-description subtype `avc1` (observed numeric subtype 1635148593), and 640×360 dimensions. This small fixture establishes exact boundary behavior for that encoding, not representative throughput for large movies; passthrough cost scales with media size, container structure, and storage throughput.
+
 ## Workload boundaries
 
 Directory benchmarks time the app's listing and recursive discovery functions.

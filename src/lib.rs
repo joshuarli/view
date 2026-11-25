@@ -1268,6 +1268,146 @@ impl ThumbnailCache {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrimTime {
+    pub value: i64,
+    pub timescale: i32,
+    pub epoch: i64,
+}
+
+impl TrimTime {
+    pub fn new(value: i64, timescale: i32) -> Self {
+        Self { value, timescale, epoch: 0 }
+    }
+
+    fn scaled(self, other: Self) -> (i128, i128) {
+        (
+            i128::from(self.value) * i128::from(other.timescale),
+            i128::from(other.value) * i128::from(self.timescale),
+        )
+    }
+
+    pub fn compare(self, other: Self) -> Ordering {
+        self.epoch.cmp(&other.epoch).then_with(|| {
+            let (a, b) = self.scaled(other);
+            a.cmp(&b)
+        })
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.value == 0 && self.epoch == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrimSelection {
+    pub start: TrimTime,
+    pub end: TrimTime,
+    pub duration: TrimTime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimSelectionError {
+    NonPositiveTimescale,
+    NegativeStart,
+    EndAtOrBeforeStart,
+    EndAfterDuration,
+    ZeroDuration,
+    EpochMismatch,
+}
+
+pub fn validate_trim_selection(start: TrimTime, end: TrimTime, duration: TrimTime) -> Result<TrimSelection, TrimSelectionError> {
+    if start.timescale <= 0 || end.timescale <= 0 || duration.timescale <= 0 {
+        return Err(TrimSelectionError::NonPositiveTimescale);
+    }
+    if start.epoch != 0 || end.epoch != 0 || duration.epoch != 0 {
+        return Err(TrimSelectionError::EpochMismatch);
+    }
+    if start.value < 0 {
+        return Err(TrimSelectionError::NegativeStart);
+    }
+    if duration.value <= 0 {
+        return Err(TrimSelectionError::ZeroDuration);
+    }
+    if end.compare(start) != Ordering::Greater {
+        return Err(TrimSelectionError::EndAtOrBeforeStart);
+    }
+    if end.compare(duration) == Ordering::Greater {
+        return Err(TrimSelectionError::EndAfterDuration);
+    }
+    Ok(TrimSelection { start, end, duration })
+}
+
+pub fn trim_selection_is_full(selection: TrimSelection) -> bool {
+    selection.start.is_zero() && selection.end.compare(selection.duration) == Ordering::Equal
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub len: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+    pub links: u64,
+}
+
+impl FileIdentity {
+    pub fn capture(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            links: metadata.nlink(),
+        })
+    }
+
+    pub fn matches(self, path: &Path) -> std::io::Result<bool> {
+        Ok(Self::capture(path)? == self)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OperationOwner {
+    next: u64,
+    active: Option<u64>,
+}
+
+impl OperationOwner {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn begin(&mut self) -> Option<u64> {
+        if self.active.is_some() {
+            return None;
+        }
+        self.next = self.next.wrapping_add(1);
+        self.active = Some(self.next);
+        self.active
+    }
+
+    pub fn finish(&mut self, token: u64) -> bool {
+        if self.active != Some(token) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
+    pub fn reject_stale(&mut self, token: u64) -> bool {
+        !self.finish(token)
+    }
+
+    pub fn active_token(&self) -> Option<u64> { self.active }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1735,5 +1875,64 @@ mod tests {
         history.push_redo(MoveTransaction { files: txn.files, selection_before_op: vec![] });
         assert!(history.can_redo());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+#[cfg(test)]
+mod trim_core_tests {
+    use super::*;
+
+    #[test]
+    fn trim_validation_accepts_exact_rational_bounds() {
+        let selection = validate_trim_selection(
+            TrimTime::new(3000, 600),
+            TrimTime::new(15, 2),
+            TrimTime::new(30, 1),
+        ).unwrap();
+        assert_eq!(selection.end.compare(TrimTime::new(7500, 1000)), Ordering::Equal);
+        assert!(!trim_selection_is_full(selection));
+    }
+
+    #[test]
+    fn trim_validation_rejects_invalid_shapes() {
+        let duration = TrimTime::new(10, 1);
+        assert_eq!(validate_trim_selection(TrimTime::new(-1, 1), TrimTime::new(2, 1), duration), Err(TrimSelectionError::NegativeStart));
+        assert_eq!(validate_trim_selection(TrimTime::new(2, 1), TrimTime::new(2, 1), duration), Err(TrimSelectionError::EndAtOrBeforeStart));
+        assert_eq!(validate_trim_selection(TrimTime::new(0, 1), TrimTime::new(11, 1), duration), Err(TrimSelectionError::EndAfterDuration));
+        assert_eq!(validate_trim_selection(TrimTime::new(0, 0), TrimTime::new(1, 1), duration), Err(TrimSelectionError::NonPositiveTimescale));
+        assert_eq!(validate_trim_selection(TrimTime::new(0, 1), TrimTime::new(1, 1), TrimTime::new(0, 1)), Err(TrimSelectionError::ZeroDuration));
+    }
+
+    #[test]
+    fn trim_full_range_is_a_noop() {
+        let selection = validate_trim_selection(TrimTime::new(0, 600), TrimTime::new(6000, 600), TrimTime::new(10, 1)).unwrap();
+        assert!(trim_selection_is_full(selection));
+    }
+
+    #[test]
+    fn operation_owner_rejects_stale_or_duplicate_completion() {
+        let mut owner = OperationOwner::new();
+        let first = owner.begin().unwrap();
+        assert!(owner.begin().is_none());
+        assert!(owner.reject_stale(first + 1));
+        assert!(owner.finish(first));
+        assert!(!owner.finish(first));
+        let second = owner.begin().unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn file_identity_detects_same_path_replacement() {
+        let root = std::env::temp_dir().join(format!("view-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("movie.mp4");
+        std::fs::write(&file, b"first").unwrap();
+        let identity = FileIdentity::capture(&file).unwrap();
+        assert!(identity.matches(&file).unwrap());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, b"second").unwrap();
+        assert!(!identity.matches(&file).unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

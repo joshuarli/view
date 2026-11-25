@@ -32,7 +32,7 @@ fn app_interactions() {
     let png = include_bytes!("fixtures/orientation.png");
     for name in ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png", "g.png", "h.png"] { std::fs::write(folder.join(name), png).unwrap(); }
     std::fs::write(folder.join("weird % café.png"), png).unwrap();
-    std::fs::write(root.join(".video.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
+    std::fs::write(root.join(".video.mp4"), include_bytes!("fixtures/trim-source.mp4")).unwrap();
     let stderr_path = root.join(".stderr");
     let stderr = std::fs::File::create(&stderr_path).unwrap();
     let mut child = TestProcess(std::process::Command::new(env!("CARGO_BIN_EXE_app"))
@@ -52,8 +52,8 @@ fn app_interactions() {
 fn inline_video_playback() {
     let _gui = GUI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = support::TestDirectory::new("player");
-    std::fs::write(root.join("clip.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
-    std::fs::write(root.join("next.mp4"), include_bytes!("fixtures/carousel.mp4")).unwrap();
+    std::fs::write(root.join("clip.mp4"), include_bytes!("fixtures/trim-source.mp4")).unwrap();
+    std::fs::write(root.join("next.mp4"), include_bytes!("fixtures/trim-source.mp4")).unwrap();
     let stderr_path = root.join(".stderr");
     let stderr = std::fs::File::create(&stderr_path).unwrap();
     let mut child = TestProcess(std::process::Command::new(env!("CARGO_BIN_EXE_app"))

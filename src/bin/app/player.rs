@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, ClassType, MainThreadOnly};
+use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2_av_foundation::{AVPlayer, AVPlayerItem, AVPlayerItemStatus};
 use objc2_foundation::{
     NSDictionary, NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
@@ -209,4 +209,16 @@ pub(crate) fn toggle() {
         PlayerStatus::Failed => quicklook_selected(),
         PlayerStatus::Loading => store.autoplay = !store.autoplay,
     }
+}
+
+
+pub(crate) fn set_trim_focus(enabled: bool) {
+    let Some(store) = player_store().as_ref() else { return };
+    store.view.ivars().set(enabled);
+}
+
+pub(crate) fn reload_current() {
+    let Some(path) = player_store().as_ref().and_then(|store| store.item_path.clone()) else { return };
+    release();
+    load(&path);
 }
