@@ -25,8 +25,8 @@ use objc2_quick_look_thumbnailing::{
 use objc2_quick_look_ui::{QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource};
 
 use view_core::{
-    list_browser, scan_recursive, BrowserMode, Catalog, MediaKind, MediaItem, PreviewSession, TrashHistory,
-    TrashTransaction,
+    list_browser, scan_recursive, BrowserMode, Catalog, MediaKind, MediaItem, PlannedMove, PreviewSession, MoveHistory,
+    MoveTransaction,
 };
 
 #[path = "app/player.rs"]
@@ -85,7 +85,7 @@ struct AppState {
     tabs: Vec<Tab>,
     active: usize,
     preview_bound: bool,
-    trash_history: TrashHistory,
+    move_history: MoveHistory,
     pending_trash: std::collections::HashSet<PathBuf>,
 }
 
@@ -515,8 +515,8 @@ fn install_main_menu(_delegate: &AppDelegate, _carousel: bool, grid: &GridView) 
     main_menu.addItem(&view_item);
 
     let edit_menu = NSMenu::new(mtm);
-    edit_menu.addItem(&menu_item(grid, "Undo", objc2::sel!(undoTrash:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
-    edit_menu.addItem(&menu_item(grid, "Redo", objc2::sel!(redoTrash:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
+    edit_menu.addItem(&menu_item(grid, "Undo", objc2::sel!(undoMove:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
+    edit_menu.addItem(&menu_item(grid, "Redo", objc2::sel!(redoMove:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
     edit_menu.addItem(&menu_item(grid, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::empty()));
     let edit_item = NSMenuItem::new(mtm);
     edit_item.setTitle(&NSString::from_str("Edit"));
@@ -548,15 +548,23 @@ fn tab_affected(root: &std::path::Path, mode: BrowserMode, changed: &[PathBuf]) 
     })
 }
 
-fn reconcile_tab_after_mutation(tab: &mut Tab, select_after: &[PathBuf]) {
+fn relocate_path_with_moves(path: &std::path::Path, moves: &[PlannedMove]) -> PathBuf {
+    let mut relocated = path.to_path_buf();
+    for planned in moves {
+        relocated = relocated_path(&relocated, &planned.source, &planned.destination);
+    }
+    relocated
+}
+
+fn reconcile_tab_after_mutation(tab: &mut Tab, select_after: &[PathBuf], moves: &[PlannedMove], advance_selection: bool) {
     let focus_index_before = tab.catalog.focus_index();
     let old_paths: Vec<PathBuf> = tab.catalog.items().iter().map(|item| item.path.clone()).collect();
     match load_listing(&tab.root, tab.mode, tab.media_filter) {
         Ok(items) => {
             let mut catalog = Catalog::new();
             catalog.append(items);
-            let previous_selection = tab.catalog.selected_all().to_vec();
-            let focus = tab.catalog.selected().map(|path| path.to_path_buf());
+            let previous_selection: Vec<PathBuf> = tab.catalog.selected_all().iter().map(|path| relocate_path_with_moves(path, moves)).collect();
+            let focus = tab.catalog.selected().map(|path| relocate_path_with_moves(path, moves));
             let present: Vec<PathBuf> = catalog.items().iter().map(|item| item.path.clone()).collect();
             let deleted_focus = focus.as_deref().is_some_and(|path| !present.iter().any(|item| item == path));
             let mut selection: Vec<PathBuf> = previous_selection.into_iter().filter(|path| present.contains(path)).collect();
@@ -567,7 +575,7 @@ fn reconcile_tab_after_mutation(tab: &mut Tab, select_after: &[PathBuf]) {
                     }
                 }
             }
-            if selection.is_empty() && deleted_focus && let Some(focus) = focus_index_before {
+            if selection.is_empty() && advance_selection && deleted_focus && let Some(focus) = focus_index_before {
                 let pick = old_paths.iter().take(focus).filter(|path| present.contains(path)).count();
                 let len = catalog.items().len();
                 if len > 0 {
@@ -593,12 +601,50 @@ fn reconcile_after_mutation(changed: &[PathBuf], select_after: &[PathBuf]) {
             if !affected {
                 continue;
             }
-            reconcile_tab_after_mutation(tab, select_after);
+            reconcile_tab_after_mutation(tab, select_after, &[], true);
         }
     }
     resize_grid_document();
     update_carousel_preview();
     refresh_tab_bar();
+}
+
+fn relocate_tab_paths(moves: &[PlannedMove]) {
+    let state = unsafe { &mut *app_state() };
+    for tab in state.tabs.iter_mut() {
+        tab.root = relocate_path_with_moves(&tab.root, moves);
+        for (root, selection) in tab.back.iter_mut().chain(&mut tab.forward) {
+            *root = relocate_path_with_moves(root, moves);
+            if let Some(path) = selection {
+                *path = relocate_path_with_moves(path, moves);
+            }
+        }
+    }
+}
+
+fn relocate_state_paths(moves: &[PlannedMove]) {
+    {
+        let state = unsafe { &mut *app_state() };
+        for planned in moves {
+            state.move_history.relocate(&planned.source, &planned.destination);
+        }
+    }
+    relocate_tab_paths(moves);
+}
+
+fn reload_after_relocation(moves: &[PlannedMove], select_after: &[PathBuf], advance_selection: bool) {
+    {
+        let state = unsafe { &mut *app_state() };
+        for tab in state.tabs.iter_mut() {
+            reconcile_tab_after_mutation(tab, select_after, moves, advance_selection);
+        }
+    }
+    after_navigation(false);
+}
+
+fn reconcile_after_relocation(moves: &[PlannedMove], advance_selection: bool) {
+    relocate_state_paths(moves);
+    reload_after_relocation(moves, &[], advance_selection);
 }
 
 fn complete_trash(
@@ -613,11 +659,11 @@ fn complete_trash(
             state.pending_trash.remove(&item.path);
         }
     }
-    let files: Vec<view_core::TrashedFile> = items
+    let files: Vec<view_core::MovedItem> = items
         .iter()
         .filter_map(|item| {
             let (_, trashed) = trashed_map.iter().find(|(original, _)| original == &item.path)?;
-            Some(view_core::TrashedFile { item: item.clone(), trashed_path: trashed.clone(), index: 0 })
+            Some(view_core::MovedItem { item: item.clone(), destination: trashed.clone(), index: 0 })
         })
         .collect();
     if files.is_empty() {
@@ -626,7 +672,7 @@ fn complete_trash(
     let changed: Vec<PathBuf> = files.iter().map(|file| file.item.path.clone()).collect();
     {
         let state = unsafe { &mut *app_state() };
-        state.trash_history.record_trash(view_core::TrashTransaction { files, selection_before_op });
+        state.move_history.record_move(view_core::MoveTransaction { files, selection_before_op });
     }
     reconcile_after_mutation(&changed, &[]);
     error_message
@@ -692,24 +738,24 @@ fn move_item_exclusively(from: &std::path::Path, to: &std::path::Path) -> std::i
     if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
-fn undo_trash() {
-    let transaction = unsafe { (&mut *app_state()).trash_history.pop_undo() };
+fn undo_move() {
+    let transaction = unsafe { (&mut *app_state()).move_history.pop_undo() };
     let Some(transaction) = transaction else { return };
     let blocked = {
         let state = unsafe { &*app_state() };
         transaction.files.iter().any(|file| {
-            state.pending_trash.contains(&file.item.path) || state.pending_trash.contains(&file.trashed_path)
+            state.pending_trash.contains(&file.item.path) || state.pending_trash.contains(&file.destination)
         })
     };
     if blocked {
-        unsafe { &mut *app_state() }.trash_history.push_undo(transaction);
+        unsafe { &mut *app_state() }.move_history.push_undo(transaction);
         show_error_alert("Undo unavailable", "A trash operation is still in progress for these items.");
         return;
     }
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
-        match move_item_exclusively(&file.trashed_path, &file.item.path) {
+        match move_item_exclusively(&file.destination, &file.item.path) {
             Ok(()) => succeeded.push(file),
             Err(error) => {
                 eprintln!("view: cannot restore {}: {error}", file.item.path.display());
@@ -720,38 +766,45 @@ fn undo_trash() {
     {
         let state = unsafe { &mut *app_state() };
         let selection_before_op = transaction.selection_before_op.clone();
+        for file in &succeeded {
+            state.move_history.relocate_undo(&file.destination, &file.item.path);
+        }
         if !succeeded.is_empty() {
-            state.trash_history.push_redo(TrashTransaction { files: succeeded.clone(), selection_before_op: selection_before_op.clone() });
+            state.move_history.push_redo(MoveTransaction { files: succeeded.clone(), selection_before_op: selection_before_op.clone() });
         }
         if !residual.is_empty() {
-            state.trash_history.push_undo(TrashTransaction { files: residual, selection_before_op });
+            state.move_history.push_undo(MoveTransaction { files: residual, selection_before_op });
         }
     }
     let changed: Vec<PathBuf> = succeeded.iter().map(|file| file.item.path.clone()).collect();
-    reconcile_after_mutation(&changed, &changed);
+    let inverse_moves: Vec<PlannedMove> = succeeded.iter().map(|file| PlannedMove { source: file.destination.clone(), destination: file.item.path.clone() }).collect();
+    if !inverse_moves.is_empty() {
+        relocate_tab_paths(&inverse_moves);
+        reload_after_relocation(&inverse_moves, &changed, true);
+    }
 }
 
-fn redo_trash() {
-    let transaction = unsafe { (&mut *app_state()).trash_history.pop_redo() };
+fn redo_move() {
+    let transaction = unsafe { (&mut *app_state()).move_history.pop_redo() };
     let Some(transaction) = transaction else { return };
     let blocked = {
         let state = unsafe { &*app_state() };
         transaction.files.iter().any(|file| {
-            state.pending_trash.contains(&file.item.path) || state.pending_trash.contains(&file.trashed_path)
+            state.pending_trash.contains(&file.item.path) || state.pending_trash.contains(&file.destination)
         })
     };
     if blocked {
-        unsafe { &mut *app_state() }.trash_history.push_redo(transaction);
+        unsafe { &mut *app_state() }.move_history.push_redo(transaction);
         show_error_alert("Redo unavailable", "A trash operation is still in progress for these items.");
         return;
     }
     let mut succeeded = Vec::new();
     let mut residual = Vec::new();
     for file in transaction.files {
-        match move_item_exclusively(&file.item.path, &file.trashed_path) {
+        match move_item_exclusively(&file.item.path, &file.destination) {
             Ok(()) => succeeded.push(file),
             Err(error) => {
-                eprintln!("view: cannot redo trash for {}: {error}", file.item.path.display());
+                eprintln!("view: cannot redo move for {}: {error}", file.item.path.display());
                 residual.push(file);
             }
         }
@@ -759,15 +812,21 @@ fn redo_trash() {
     {
         let state = unsafe { &mut *app_state() };
         let selection_before_op = transaction.selection_before_op.clone();
+        for file in &succeeded {
+            state.move_history.relocate_undo(&file.item.path, &file.destination);
+        }
         if !succeeded.is_empty() {
-            state.trash_history.push_undo(TrashTransaction { files: succeeded.clone(), selection_before_op: selection_before_op.clone() });
+            state.move_history.push_undo(MoveTransaction { files: succeeded.clone(), selection_before_op: selection_before_op.clone() });
         }
         if !residual.is_empty() {
-            state.trash_history.push_redo(TrashTransaction { files: residual, selection_before_op });
+            state.move_history.push_redo(MoveTransaction { files: residual, selection_before_op });
         }
     }
-    let changed: Vec<PathBuf> = succeeded.iter().map(|file| file.item.path.clone()).collect();
-    reconcile_after_mutation(&changed, &[]);
+    let forward_moves: Vec<PlannedMove> = succeeded.iter().map(|file| PlannedMove { source: file.item.path.clone(), destination: file.destination.clone() }).collect();
+    if !forward_moves.is_empty() {
+        relocate_tab_paths(&forward_moves);
+        reload_after_relocation(&forward_moves, &[], true);
+    }
 }
 
 pub(crate) fn preview_panel_delegate_object() -> &'static objc2::runtime::AnyObject {
@@ -875,8 +934,8 @@ fn build_context_menu(target: &GridView) -> Retained<NSMenu> {
     menu.addItem(&make_context_action_item(target, "Copy Path", objc2::sel!(copySelectedPath:), None, objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Rename…", objc2::sel!(renameSelected:), None, objc2_app_kit::NSEventModifierFlags::empty()));
     menu.addItem(&make_context_action_item(target, "Move to Trash", objc2::sel!(moveSelectedToTrash:), Some("\u{8}"), objc2_app_kit::NSEventModifierFlags::empty()));
-    menu.addItem(&make_context_action_item(target, "Undo", objc2::sel!(undoTrash:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
-    menu.addItem(&make_context_action_item(target, "Redo", objc2::sel!(redoTrash:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
+    menu.addItem(&make_context_action_item(target, "Undo", objc2::sel!(undoMove:), Some("z"), objc2_app_kit::NSEventModifierFlags::Command));
+    menu.addItem(&make_context_action_item(target, "Redo", objc2::sel!(redoMove:), Some("Z"), objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift));
     menu
 }
 
@@ -904,32 +963,7 @@ fn rename_item(from: &std::path::Path, name: &str) -> std::io::Result<()> {
     let to = from.with_file_name(name);
     if from == to { return Ok(()) }
     move_item_exclusively(from, &to)?;
-    let state = unsafe { &mut *app_state() };
-    state.trash_history.relocate(from, &to);
-    for tab in state.tabs.iter_mut() {
-        let previous_selection = tab.catalog.selected_all().to_vec();
-        let focus = tab.catalog.selected().map(|path| path.to_path_buf());
-        let relocated_selection: Vec<PathBuf> = previous_selection.iter().map(|path| relocated_path(path, from, &to)).collect();
-        let relocated_focus = focus.as_deref().map(|path| relocated_path(path, from, &to));
-        tab.root = relocated_path(&tab.root, from, &to);
-        for (root, selection) in tab.back.iter_mut().chain(&mut tab.forward) {
-            *root = relocated_path(root, from, &to);
-            if let Some(path) = selection { *path = relocated_path(path, from, &to); }
-        }
-        match load_listing(&tab.root, tab.mode, tab.media_filter) {
-            Ok(items) => {
-                let mut catalog = Catalog::new();
-                catalog.append(items);
-                catalog.restore_selection(&relocated_selection, relocated_focus.as_deref());
-                tab.catalog = catalog;
-                tab.unavailable = None;
-            }
-            Err(error) => {
-                tab.unavailable = Some(format!("Unable to read {}: {error}", tab.root.display()));
-            }
-        }
-    }
-    after_navigation(false);
+    reconcile_after_relocation(&[PlannedMove { source: from.to_path_buf(), destination: to }], false);
     Ok(())
 }
 
@@ -1332,12 +1366,128 @@ fn begin_drag_session(view: &GridView, event: &objc2_app_kit::NSEvent) {
     view.beginDraggingSessionWithItems_event_source(&items, event, source);
 }
 
-fn dropped_path(pasteboard: &objc2_app_kit::NSPasteboard) -> Option<PathBuf> {
+fn dropped_path_from_string(pasteboard: &objc2_app_kit::NSPasteboard) -> Option<PathBuf> {
     let text = unsafe { pasteboard.stringForType(&objc2_app_kit::NSPasteboardTypeFileURL) }?;
     let url = NSURL::URLWithString(&text)?;
     if !url.isFileURL() { return None; }
-    let path = path_from_url(&url);
+    Some(path_from_url(&url))
+}
+
+fn pasteboard_file_paths(pasteboard: &objc2_app_kit::NSPasteboard) -> Vec<PathBuf> {
+    let classes = NSArray::from_slice(&[NSURL::class()]);
+    let objects = unsafe { pasteboard.readObjectsForClasses_options(&classes, None) };
+    let mut paths = Vec::new();
+    if let Some(objects) = objects {
+        for object in objects.iter() {
+            if let Some(url) = object.downcast_ref::<NSURL>()
+                && url.isFileURL()
+            {
+                paths.push(path_from_url(url));
+            }
+        }
+    }
+    if paths.is_empty()
+        && let Some(path) = dropped_path_from_string(pasteboard)
+    {
+        paths.push(path);
+    }
+    let mut seen = std::collections::HashSet::new();
+    paths.into_iter().filter(|path| seen.insert(path.clone())).collect()
+}
+
+fn dropped_path(pasteboard: &objc2_app_kit::NSPasteboard) -> Option<PathBuf> {
+    let path = pasteboard_file_paths(pasteboard).into_iter().next()?;
     std::fs::canonicalize(path).ok()
+}
+
+struct MoveDrop {
+    target_index: usize,
+    plans: Vec<PlannedMove>,
+    items: Vec<MediaItem>,
+    selection_before_op: Vec<PathBuf>,
+}
+
+fn paths_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a)
+}
+
+fn move_drop_at_point(view: &GridView, sources: &[PathBuf], point: NSPoint) -> Option<MoveDrop> {
+    let target_index = view.index_at_point(point)?;
+    let (target, items, selection_before_op) = {
+        let state = unsafe { &*app_state() };
+        let target = state.items().get(target_index).cloned()?;
+        let mut items = Vec::with_capacity(sources.len());
+        for source in sources {
+            items.push(state.items().iter().find(|item| item.path == *source).cloned()?);
+        }
+        (target, items, state.tab().catalog.selected_all().to_vec())
+    };
+    if target.kind != MediaKind::Directory {
+        return None;
+    }
+    let plans = view_core::plan_moves_into_directory(sources, &target.path)?;
+    if plans.iter().any(|plan| !plan.source.exists() || plan.destination.exists()) {
+        return None;
+    }
+    let pending_conflict = {
+        let state = unsafe { &*app_state() };
+        state.pending_trash.iter().any(|pending| {
+            plans.iter().any(|plan| {
+                paths_overlap(pending, &plan.source) || paths_overlap(pending, &plan.destination)
+            })
+        })
+    };
+    if pending_conflict {
+        return None;
+    }
+    Some(MoveDrop { target_index, plans, items, selection_before_op })
+}
+
+fn perform_move_drop(view: &GridView, sources: &[PathBuf], point: NSPoint) -> bool {
+    let Some(drop) = move_drop_at_point(view, sources, point) else { return false };
+    let mut moved = Vec::new();
+    let mut errors = Vec::new();
+    for plan in drop.plans {
+        let item = drop.items.iter().find(|item| item.path == plan.source).cloned().expect("move plan source is in the drag payload");
+        match move_item_exclusively(&plan.source, &plan.destination) {
+            Ok(()) => moved.push((plan, item)),
+            Err(error) => errors.push(format!("{}: {error}", plan.source.display())),
+        }
+    }
+    let performed = !moved.is_empty();
+    if performed {
+        let files: Vec<view_core::MovedItem> = moved.iter().map(|(plan, item)| {
+            view_core::MovedItem { item: item.clone(), destination: plan.destination.clone(), index: 0 }
+        }).collect();
+        let moves: Vec<PlannedMove> = moved.into_iter().map(|(plan, _)| plan).collect();
+        reconcile_after_relocation(&moves, true);
+        unsafe { &mut *app_state() }.move_history.record_move(MoveTransaction { files, selection_before_op: drop.selection_before_op });
+    }
+    if !errors.is_empty() {
+        show_error_alert("Unable to move items", &errors.join("\n"));
+    }
+    performed
+}
+
+fn clear_move_drop_target(view: &GridView) {
+    if view.ivars().drop_target.take().is_some() {
+        view.setNeedsDisplay(true);
+    }
+}
+
+fn grid_drop_operation(view: &GridView, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2_app_kit::NSDragOperation {
+    if sender.draggingSource().is_none() {
+        clear_move_drop_target(view);
+        return if dropped_path(&sender.draggingPasteboard()).is_some() { objc2_app_kit::NSDragOperation::Copy } else { objc2_app_kit::NSDragOperation::empty() };
+    }
+    let location = view.convertPoint_fromView(sender.draggingLocation(), None);
+    let paths = pasteboard_file_paths(&sender.draggingPasteboard());
+    let drop = move_drop_at_point(view, &paths, location);
+    let next = drop.as_ref().map(|drop| drop.target_index);
+    if view.ivars().drop_target.replace(next) != next {
+        view.setNeedsDisplay(true);
+    }
+    if drop.is_some() { objc2_app_kit::NSDragOperation::Move } else { objc2_app_kit::NSDragOperation::empty() }
 }
 
 fn accept_dropped_path(view: &GridView, pasteboard: &objc2_app_kit::NSPasteboard) -> bool {
@@ -2084,11 +2234,13 @@ define_class!(
 
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2_app_kit::NSDragOperation {
+            if sender.draggingSource().is_some() { return objc2_app_kit::NSDragOperation::empty() }
             if dropped_path(&sender.draggingPasteboard()).is_some() { objc2_app_kit::NSDragOperation::Copy } else { objc2_app_kit::NSDragOperation::empty() }
         }
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2::runtime::Bool {
+            if sender.draggingSource().is_some() { return objc2::runtime::Bool::NO }
             let Some(path) = dropped_path(&sender.draggingPasteboard()) else { return objc2::runtime::Bool::NO };
             let location = self.convertPoint_fromView(sender.draggingLocation(), None);
             let (width, tab_count) = {
@@ -2180,6 +2332,7 @@ struct GridInteraction {
     deferred_click: std::cell::Cell<Option<usize>>,
     drag_candidate: std::cell::Cell<bool>,
     drag_origin: std::cell::Cell<Option<NSPoint>>,
+    drop_target: std::cell::Cell<Option<usize>>,
 }
 
 const DRAG_THRESHOLD: f64 = 5.0;
@@ -2282,6 +2435,14 @@ define_class!(
                     path.setLineWidth(2.0);
                     path.stroke();
                 }
+                if self.ivars().drop_target.get() == Some(i) {
+                    let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(cell, 10.0, 10.0);
+                    NSColor::controlAccentColor().colorWithAlphaComponent(0.24).setFill();
+                    path.fill();
+                    NSColor::controlAccentColor().setStroke();
+                    path.setLineWidth(3.0);
+                    path.stroke();
+                }
                 let (thumb_rect, name_rect, detail_rect) = cell_content_rects(cell, carousel, scale);
                 let thumb_img = if item.kind == MediaKind::Directory {
                     folder_like_icon(item)
@@ -2335,7 +2496,7 @@ define_class!(
             if code == 14 && !command && !control && !shift { quicklook_selected(); return; }
             if code == 51 || code == 117 { trash_selected(self); return; }
             if code == 126 && command { navigate_to_parent(); return; }
-            if code == 6 && command { if shift { redo_trash(); } else { undo_trash(); } return; }
+            if code == 6 && command { if shift { redo_move(); } else { undo_move(); } return; }
             if code == 123 && shift { navigate_back(); return; }
             if code == 124 && shift { navigate_forward(); return; }
             let items_len = unsafe { (*app_state()).items().len() };
@@ -2391,10 +2552,10 @@ define_class!(
         fn rename_selected_action(&self, _sender: &NSObject) { rename_selected(); }
         #[unsafe(method(moveSelectedToTrash:))]
         fn move_selected_action(&self, _sender: &NSObject) { trash_selected(self); }
-        #[unsafe(method(undoTrash:))]
-        fn undo_trash_action(&self, _sender: &NSObject) { undo_trash(); }
-        #[unsafe(method(redoTrash:))]
-        fn redo_trash_action(&self, _sender: &NSObject) { redo_trash(); }
+        #[unsafe(method(undoMove:))]
+        fn undo_move_action(&self, _sender: &NSObject) { undo_move(); }
+        #[unsafe(method(redoMove:))]
+        fn redo_move_action(&self, _sender: &NSObject) { redo_move(); }
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
@@ -2480,12 +2641,30 @@ define_class!(
 
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2_app_kit::NSDragOperation {
-            if dropped_path(&sender.draggingPasteboard()).is_some() { objc2_app_kit::NSDragOperation::Copy } else { objc2_app_kit::NSDragOperation::empty() }
+            grid_drop_operation(self, sender)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2_app_kit::NSDragOperation {
+            grid_drop_operation(self, sender)
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>>) {
+            clear_move_drop_target(self);
         }
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &objc2::runtime::ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> bool {
-            accept_dropped_path(self, &sender.draggingPasteboard())
+            if sender.draggingSource().is_some() {
+                let location = self.convertPoint_fromView(sender.draggingLocation(), None);
+                let paths = pasteboard_file_paths(&sender.draggingPasteboard());
+                let performed = perform_move_drop(self, &paths, location);
+                clear_move_drop_target(self);
+                performed
+            } else {
+                accept_dropped_path(self, &sender.draggingPasteboard())
+            }
         }
 
         #[unsafe(method(acceptsPreviewPanelControl:))]
@@ -2557,8 +2736,8 @@ define_class!(
     unsafe impl NSDraggingSource for GridView {
         #[allow(non_snake_case)]
         #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
-        fn draggingSession_sourceOperationMaskForDraggingContext(&self, _session: &objc2_app_kit::NSDraggingSession, _context: objc2_app_kit::NSDraggingContext) -> objc2_app_kit::NSDragOperation {
-            objc2_app_kit::NSDragOperation::Copy
+        fn draggingSession_sourceOperationMaskForDraggingContext(&self, _session: &objc2_app_kit::NSDraggingSession, context: objc2_app_kit::NSDraggingContext) -> objc2_app_kit::NSDragOperation {
+            if context == objc2_app_kit::NSDraggingContext::WithinApplication { objc2_app_kit::NSDragOperation::Move } else { objc2_app_kit::NSDragOperation::Copy }
         }
         #[allow(non_snake_case)]
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
@@ -2854,6 +3033,13 @@ fn assert_orientation(bitmap: &objc2_app_kit::NSBitmapImageRep) {
     assert!(lower_right.redComponent() > lower_right.blueComponent() * 2.0 && lower_right.greenComponent() > lower_right.blueComponent() * 2.0, "bottom right is yellow: {lower_right:?}");
 }
 
+fn write_file_urls(pasteboard: &objc2_app_kit::NSPasteboard, paths: &[PathBuf]) {
+    let urls: Vec<Retained<NSURL>> = paths.iter().map(|path| url_from_path(path)).collect();
+    let objects = NSArray::from_retained_slice(&urls);
+    let wrote: bool = unsafe { objc2::msg_send![pasteboard, writeObjects: &*objects] };
+    assert!(wrote, "file URLs write to the drag pasteboard");
+}
+
 fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView) {
     let (back_button, forward_button, add_button) = {
         let refs = window_refs();
@@ -2923,9 +3109,9 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
             assert!(state.items().iter().any(|i| i.path == keep1), "failed file stays in the catalog");
             assert!(!state.items().iter().any(|i| i.path == keep2), "moved file leaves the catalog");
             assert!(state.pending_trash.is_empty(), "attempted paths are released on completion");
-            assert!(state.trash_history.can_undo(), "successful subset is undoable");
+            assert!(state.move_history.can_undo(), "successful subset is undoable");
         }
-        undo_trash();
+        undo_move();
         let state = unsafe { &*app_state() };
         assert!(keep2.exists(), "undo restores the successful subset");
         assert_eq!(std::fs::read(&keep1).unwrap(), include_bytes!("../../tests/fixtures/orientation.png"), "failed file is untouched");
@@ -2957,8 +3143,8 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
             let index = tab.catalog.items().iter().position(|item| item.path == b).unwrap();
             let item = tab.catalog.items()[index].clone();
             tab.catalog.remove(&b);
-            state.trash_history.record_trash(TrashTransaction {
-                files: vec![view_core::TrashedFile { item, trashed_path: staged_b.clone(), index }],
+            state.move_history.record_move(MoveTransaction {
+                files: vec![view_core::MovedItem { item, destination: staged_b.clone(), index }],
                 selection_before_op: vec![a.clone(), c.clone()],
             });
         }
@@ -2969,7 +3155,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
             tab.catalog.select_range(&a, &c).expect("sparse range selection stays in the catalog");
         }
         assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "sparse range selects only the surviving paths");
-        undo_trash();
+        undo_move();
         assert_eq!(unsafe { (*app_state()).tab().catalog.selected_all() }, &[a.clone(), c.clone()], "undo of a trash inside a sparse selection preserves it");
         let other_tab = unsafe { (*app_state()).new_tab(sparse_dir.clone(), BrowserMode::Browser, load_listing(&sparse_dir, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
         let d = sparse_dir.join("d.png");
@@ -2990,7 +3176,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let trashed = pump_run_loop_until(std::time::Duration::from_secs(10), || !a.exists() && !c.exists());
         assert!(trashed, "sparse trash removes exactly the selected files");
         assert!(b.exists(), "unselected undo-restored file is not trashed");
-        let recorded = pump_run_loop_until(std::time::Duration::from_secs(10), || unsafe { (*app_state()).trash_history.can_undo() });
+        let recorded = pump_run_loop_until(std::time::Duration::from_secs(10), || unsafe { (*app_state()).move_history.can_undo() });
         assert!(recorded, "trash completion is recorded before undo");
         send_key_command(&app, 6);
         let restored = pump_run_loop_until(std::time::Duration::from_secs(10), || a.exists() && c.exists());
@@ -3124,6 +3310,10 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     assert!(grid.respondsToSelector(objc2::sel!(draggingSession:endedAtPoint:operation:)), "drag completion callback is registered");
     DRAG_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     let session = NSObject::new();
+    let within_mask: objc2_app_kit::NSDragOperation = unsafe { objc2::msg_send![grid, draggingSession: &*session, sourceOperationMaskForDraggingContext: objc2_app_kit::NSDraggingContext::WithinApplication] };
+    assert_eq!(within_mask, objc2_app_kit::NSDragOperation::Move, "drags move inside the application");
+    let outside_mask: objc2_app_kit::NSDragOperation = unsafe { objc2::msg_send![grid, draggingSession: &*session, sourceOperationMaskForDraggingContext: objc2_app_kit::NSDraggingContext::OutsideApplication] };
+    assert_eq!(outside_mask, objc2_app_kit::NSDragOperation::Copy, "drags still copy to other applications");
     unsafe { let _: () = objc2::msg_send![grid, draggingSession: &*session, endedAtPoint: NSPoint::ZERO, operation: objc2_app_kit::NSDragOperation::empty()]; }
     assert!(!DRAG_ACTIVE.load(std::sync::atomic::Ordering::SeqCst), "completed drag permits another session");
     let items = dragging_items(grid);
@@ -3134,6 +3324,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         assert_eq!(path_from_url(url), unsafe { (*app_state()).items()[index].path.clone() });
     }
     assert!(grid.respondsToSelector(objc2::sel!(draggingEntered:)), "drop negotiation is registered");
+    assert!(grid.respondsToSelector(objc2::sel!(draggingUpdated:)), "drop target tracking is registered");
     assert!(grid.respondsToSelector(objc2::sel!(performDragOperation:)), "drop handler is registered");
     let pasteboard = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
     let folder = unsafe { (*app_state()).tab().root.clone() };
@@ -3166,8 +3357,8 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
         let item = tab.catalog.items()[index].clone();
         tab.catalog.remove(&original);
         let state = unsafe { &mut *app_state() };
-        state.trash_history.record_trash(TrashTransaction {
-            files: vec![view_core::TrashedFile { item, trashed_path: trashed.clone(), index }],
+        state.move_history.record_move(MoveTransaction {
+            files: vec![view_core::MovedItem { item, destination: trashed.clone(), index }],
             selection_before_op: vec![original.clone()],
         });
     }
@@ -3175,7 +3366,7 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     assert_eq!(std::fs::read(&original).unwrap(), content, "undo restores the file contents");
     assert!(!trashed.exists(), "undo removes the trashed copy");
     assert!(unsafe { (*app_state()).items().iter().any(|item| item.path == original) }, "undo restores the catalog item");
-    unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
+    unsafe { let _: () = objc2::msg_send![grid, redoMove: grid]; }
     assert!(!original.exists(), "redo removes the original file");
     assert_eq!(std::fs::read(&trashed).unwrap(), content, "redo preserves the file contents");
     assert!(!unsafe { (*app_state()).items().iter().any(|item| item.path == original) }, "redo removes the catalog item");
@@ -3192,8 +3383,8 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     std::fs::create_dir(&album).unwrap();
     std::fs::write(album.join("inside.png"), &content).unwrap();
     std::fs::rename(&album, &trashed_album).unwrap();
-    unsafe { (*app_state()).trash_history.record_trash(TrashTransaction {
-        files: vec![view_core::TrashedFile { item: MediaItem::new(&album, MediaKind::Directory), trashed_path: trashed_album.clone(), index: 0 }],
+    unsafe { (*app_state()).move_history.record_move(MoveTransaction {
+        files: vec![view_core::MovedItem { item: MediaItem::new(&album, MediaKind::Directory), destination: trashed_album.clone(), index: 0 }],
         selection_before_op: vec![album.clone()],
     }); }
     send_key_command(&app, 6);
@@ -3201,13 +3392,13 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     assert!(!trashed_album.exists(), "undo removes the trashed folder");
     std::fs::create_dir(&trashed_album).unwrap();
     std::fs::write(trashed_album.join("replacement"), b"replacement").unwrap();
-    unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
+    unsafe { let _: () = objc2::msg_send![grid, redoMove: grid]; }
     assert_eq!(std::fs::read(album.join("inside.png")).unwrap(), content, "redo preserves the source on conflict");
     assert_eq!(std::fs::read(trashed_album.join("replacement")).unwrap(), b"replacement", "redo preserves the conflicting destination");
     assert!(unsafe { (*app_state()).items().iter().any(|item| item.path == album) }, "redo conflict leaves the folder in the catalog");
     std::fs::remove_file(trashed_album.join("replacement")).unwrap();
     std::fs::remove_dir(&trashed_album).unwrap();
-    unsafe { let _: () = objc2::msg_send![grid, redoTrash: grid]; }
+    unsafe { let _: () = objc2::msg_send![grid, redoMove: grid]; }
     assert!(!album.exists(), "redo removes the original folder");
     assert_eq!(std::fs::read(trashed_album.join("inside.png")).expect("redo preserves folder contents"), content);
     {
@@ -3396,6 +3587,81 @@ fn run_regression_test(window: &NSWindow, grid: &GridView, preview: &NSImageView
     navigate_back();
     assert_eq!(unsafe { (*app_state()).tab().root.clone() }, moved_dir, "history follows renamed directories");
     navigate_to_parent();
+
+    {
+        let move_root = folder.join("move-test");
+        let source = move_root.join("source");
+        let second = move_root.join("second");
+        let target_a = move_root.join("target-a");
+        let target_b = move_root.join("target-b");
+        let occupied = move_root.join("occupied");
+        std::fs::create_dir(&move_root).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::create_dir(&target_a).unwrap();
+        std::fs::create_dir(&target_b).unwrap();
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::create_dir(occupied.join("source")).unwrap();
+        std::fs::write(source.join("inside.png"), include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        std::fs::write(second.join("second.png"), include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        std::fs::write(move_root.join("loose.png"), include_bytes!("../../tests/fixtures/orientation.png")).unwrap();
+        enter_directory(move_root.clone());
+        let source_tab = unsafe { (*app_state()).new_tab(source.clone(), BrowserMode::Browser, load_listing(&source, BrowserMode::Browser, MediaFilter::Both).unwrap()) };
+        let pasteboard = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
+        pasteboard.clearContents();
+        write_file_urls(&pasteboard, &[source.clone()]);
+        assert_eq!(pasteboard_file_paths(&pasteboard), vec![source.clone()], "file URL objects read back from the pasteboard");
+        let target_index = unsafe { (*app_state()).items().iter().position(|item| item.path == target_a).unwrap() };
+        let target_rect = grid.cell_rect(target_index);
+        let target_point = NSPoint::new(target_rect.origin.x + target_rect.size.width / 2.0, target_rect.origin.y + target_rect.size.height / 2.0);
+        let planned = move_drop_at_point(grid, &[source.clone()], target_point).expect("folder drop targets a directory");
+        assert_eq!(planned.target_index, target_index, "drop targets the directory under the pointer");
+        assert!(perform_move_drop(grid, &[source.clone()], target_point), "drop moves the folder");
+        let moved_source = target_a.join("source");
+        assert!(!source.exists(), "move removes the source folder");
+        assert!(moved_source.join("inside.png").exists(), "move preserves folder contents");
+        assert_eq!(unsafe { (&(*app_state()).tabs)[source_tab].root.clone() }, moved_source, "open tabs follow moved folders");
+        assert!(!unsafe { (*app_state()).items().iter().any(|item| item.path == source) }, "the moved folder leaves the source listing");
+        assert!(unsafe { (*app_state()).tab().catalog.selected().is_some_and(|path| (*app_state()).items().iter().any(|item| item.path == path)) }, "move leaves a live selection");
+        undo_move();
+        assert!(source.exists(), "undo restores a dragged folder");
+        assert!(!moved_source.exists(), "undo empties the drag destination");
+        assert_eq!(unsafe { (&(*app_state()).tabs)[source_tab].root.clone() }, source, "open tabs follow undone folder moves");
+        redo_move();
+        assert!(moved_source.exists(), "redo reapplies a dragged folder move");
+        undo_move();
+        assert!(source.exists(), "a second undo leaves the folder ready for conflict coverage");
+        close_tab(source_tab);
+
+        enter_directory(move_root.clone());
+        let occupied_index = unsafe { (*app_state()).items().iter().position(|item| item.path == occupied).unwrap() };
+        let occupied_rect = grid.cell_rect(occupied_index);
+        let occupied_point = NSPoint::new(occupied_rect.origin.x + occupied_rect.size.width / 2.0, occupied_rect.origin.y + occupied_rect.size.height / 2.0);
+        assert!(move_drop_at_point(grid, &[source.clone()], occupied_point).is_none(), "an existing destination rejects the drop");
+        assert!(!perform_move_drop(grid, &[source.clone()], occupied_point), "a conflicting drop does not move");
+        assert!(source.exists(), "conflict preserves the source folder");
+        assert!(!occupied.join("source/inside.png").exists(), "conflict preserves the destination folder");
+
+        let source_index = unsafe { (*app_state()).items().iter().position(|item| item.path == source).unwrap() };
+        let source_rect = grid.cell_rect(source_index);
+        let source_point = NSPoint::new(source_rect.origin.x + source_rect.size.width / 2.0, source_rect.origin.y + source_rect.size.height / 2.0);
+        assert!(move_drop_at_point(grid, &[source.clone()], source_point).is_none(), "a folder cannot drop onto itself");
+        assert!(!perform_move_drop(grid, &[source.clone()], source_point), "a self drop does not move");
+
+        let loose = move_root.join("loose.png");
+        pasteboard.clearContents();
+        write_file_urls(&pasteboard, &[source.clone(), second.clone(), loose.clone()]);
+        assert_eq!(pasteboard_file_paths(&pasteboard), vec![source.clone(), second.clone(), loose.clone()], "multi-item drags read every file URL");
+        let target_b_index = unsafe { (*app_state()).items().iter().position(|item| item.path == target_b).unwrap() };
+        let target_b_rect = grid.cell_rect(target_b_index);
+        let target_b_point = NSPoint::new(target_b_rect.origin.x + target_b_rect.size.width / 2.0, target_b_rect.origin.y + target_b_rect.size.height / 2.0);
+        assert!(perform_move_drop(grid, &[source.clone(), second.clone(), loose.clone()], target_b_point), "drop moves multiple selected items");
+        assert!(target_b.join("source/inside.png").exists(), "multi-move preserves the first folder");
+        assert!(target_b.join("second/second.png").exists(), "multi-move preserves the second folder");
+        assert!(target_b.join("loose.png").exists(), "multi-move includes media files");
+        assert!(!source.exists() && !second.exists() && !loose.exists(), "multi-move removes every source");
+        enter_directory(folder.clone());
+    }
 
     let video_dir = folder.join("video");
     std::fs::create_dir(&video_dir).unwrap();

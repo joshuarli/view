@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use view_core::{
     list_browser, scan_recursive, Catalog, MediaKind, MediaItem, Scheduler,
-    ThumbKey, TrashHistory, TrashOutcome, TrashService,
-    TrashTransaction, TrashedFile,
+    ThumbKey, MoveHistory, TrashOutcome, TrashService,
+    MoveTransaction, MovedItem,
 };
 
 fn make_file(path: &Path, bytes: &[u8]) {
@@ -41,29 +41,29 @@ fn trash_then_undo_then_redo_moves_files_on_disk() {
     assert_eq!(outcome, TrashOutcome::Removed { trashed_path: trash_dir.join("a.png") });
     assert!(!a.exists() && trash_dir.join("a.png").exists() && b.exists());
 
-    let mut history = TrashHistory::new();
-    history.record_trash(TrashTransaction {
-        files: vec![TrashedFile {
+    let mut history = MoveHistory::new();
+    history.record_move(MoveTransaction {
+        files: vec![MovedItem {
             item: MediaItem::new(&a, MediaKind::Image),
-            trashed_path: trash_dir.join("a.png"),
+            destination: trash_dir.join("a.png"),
             index: 0,
         }],
         selection_before_op: vec![a.clone()],
     });
     let undo = history.pop_undo().unwrap();
     let file = &undo.files[0];
-    service.restore(&file.trashed_path, &file.item.path, |from, to| {
+    service.restore(&file.destination, &file.item.path, |from, to| {
         std::fs::rename(from, to).map_err(|e| view_core::TrashError::MoveFailed(e.to_string()))
     }).unwrap();
     assert_eq!(std::fs::read(&a).unwrap(), b"aaa");
-    assert!(!file.trashed_path.exists());
+    assert!(!file.destination.exists());
     history.push_redo(undo);
     let redo = history.pop_redo().unwrap();
     let file = &redo.files[0];
     let outcome = trash_one(&mut service, &file.item.path);
-    assert_eq!(outcome, TrashOutcome::Removed { trashed_path: file.trashed_path.clone() });
+    assert_eq!(outcome, TrashOutcome::Removed { trashed_path: file.destination.clone() });
     assert!(!a.exists());
-    assert_eq!(std::fs::read(&file.trashed_path).unwrap(), b"aaa");
+    assert_eq!(std::fs::read(&file.destination).unwrap(), b"aaa");
     assert_eq!(std::fs::read(&b).unwrap(), b"bbb");
 }
 

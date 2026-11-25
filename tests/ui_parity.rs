@@ -5,7 +5,7 @@ use std::path::Path;
 
 use view_core::{
     GridCommand, GridKeyModifier, MediaKind, MediaItem,
-    TrashError, TrashHistory, TrashService, TrashTransaction, TrashedFile,
+    TrashError, MoveHistory, TrashService, MoveTransaction, MovedItem,
 };
 
 fn write_png(path: &Path) {
@@ -93,18 +93,18 @@ fn undo_fails_when_destination_reappears() {
         .unwrap();
     write_png(&a);
 
-    let mut history = TrashHistory::new();
-    history.record_trash(TrashTransaction {
-        files: vec![TrashedFile {
+    let mut history = MoveHistory::new();
+    history.record_move(MoveTransaction {
+        files: vec![MovedItem {
             item: MediaItem::new(&a, MediaKind::Image),
-            trashed_path: trashed.clone(),
+            destination: trashed.clone(),
             index: 0,
         }],
         selection_before_op: vec![a.clone()],
     });
     let txn = history.pop_undo().unwrap();
     let file = &txn.files[0];
-    let failed = service.restore(&file.trashed_path, &file.item.path, |from, to| {
+    let failed = service.restore(&file.destination, &file.item.path, |from, to| {
         if to.exists() {
             return Err(TrashError::DestinationExists(to.to_path_buf()));
         }

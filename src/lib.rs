@@ -1009,56 +1009,99 @@ impl PreviewSession {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrashedFile {
+pub struct PlannedMove {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+}
+
+pub fn plan_moves_into_directory(sources: &[PathBuf], target_dir: &Path) -> Option<Vec<PlannedMove>> {
+    if sources.is_empty() {
+        return None;
+    }
+    let mut destinations = HashSet::new();
+    let mut plans = Vec::with_capacity(sources.len());
+    for source in sources {
+        if source == target_dir || target_dir.starts_with(source) {
+            return None;
+        }
+        if sources.iter().any(|other| other != source && source.starts_with(other)) {
+            return None;
+        }
+        let name = source.file_name()?;
+        let destination = target_dir.join(name);
+        if destination == *source || !destinations.insert(destination.clone()) {
+            return None;
+        }
+        plans.push(PlannedMove { source: source.clone(), destination });
+    }
+    Some(plans)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovedItem {
     pub item: MediaItem,
-    pub trashed_path: PathBuf,
+    pub destination: PathBuf,
     pub index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrashTransaction {
-    pub files: Vec<TrashedFile>,
+pub struct MoveTransaction {
+    pub files: Vec<MovedItem>,
     pub selection_before_op: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct TrashHistory {
-    undo_stack: Vec<TrashTransaction>,
-    redo_stack: Vec<TrashTransaction>,
+pub struct MoveHistory {
+    undo_stack: Vec<MoveTransaction>,
+    redo_stack: Vec<MoveTransaction>,
 }
 
-impl TrashHistory {
-    pub fn new() -> Self { Self::default() }
-    /// Update original paths in undo and redo entries after an item or ancestor is renamed.
-    pub fn relocate(&mut self, from: &Path, to: &Path) {
-        for transaction in self.undo_stack.iter_mut().chain(&mut self.redo_stack) {
-            for file in &mut transaction.files {
-                if let Ok(suffix) = file.item.path.strip_prefix(from) {
-                    file.item.path = if suffix.as_os_str().is_empty() { to.to_path_buf() } else { to.join(suffix) };
-                }
-            }
-            for path in &mut transaction.selection_before_op {
-                if let Ok(suffix) = path.strip_prefix(from) {
-                    *path = if suffix.as_os_str().is_empty() { to.to_path_buf() } else { to.join(suffix) };
-                }
-            }
+fn relocate_transactions<'a>(transactions: impl Iterator<Item = &'a mut MoveTransaction>, from: &Path, to: &Path) {
+    for transaction in transactions {
+        for file in &mut transaction.files {
+            file.item.path = relocated_move_path(&file.item.path, from, to);
+            file.destination = relocated_move_path(&file.destination, from, to);
         }
+        for path in &mut transaction.selection_before_op {
+            *path = relocated_move_path(path, from, to);
+        }
+    }
+}
+
+fn relocated_move_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
+    match path.strip_prefix(from) {
+        Ok(suffix) if suffix.as_os_str().is_empty() => to.to_path_buf(),
+        Ok(suffix) => to.join(suffix),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+impl MoveHistory {
+    pub fn new() -> Self { Self::default() }
+    /// Update original and destination paths in undo and redo entries after an item or ancestor is renamed or moved.
+    pub fn relocate(&mut self, from: &Path, to: &Path) {
+        relocate_transactions(self.undo_stack.iter_mut().chain(&mut self.redo_stack), from, to);
+    }
+
+    /// Update original and destination paths in undo entries while an undo or redo applies a directory move.
+    pub fn relocate_undo(&mut self, from: &Path, to: &Path) {
+        relocate_transactions(self.undo_stack.iter_mut(), from, to);
     }
     pub fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
-    pub fn record_trash(&mut self, transaction: TrashTransaction) {
+    pub fn record_move(&mut self, transaction: MoveTransaction) {
         if transaction.files.is_empty() { return; }
         self.undo_stack.push(transaction);
         self.redo_stack.clear();
     }
-    pub fn push_undo(&mut self, transaction: TrashTransaction) {
+    pub fn push_undo(&mut self, transaction: MoveTransaction) {
         if !transaction.files.is_empty() { self.undo_stack.push(transaction); }
     }
-    pub fn push_redo(&mut self, transaction: TrashTransaction) {
+    pub fn push_redo(&mut self, transaction: MoveTransaction) {
         if !transaction.files.is_empty() { self.redo_stack.push(transaction); }
     }
-    pub fn pop_undo(&mut self) -> Option<TrashTransaction> { self.undo_stack.pop() }
-    pub fn pop_redo(&mut self) -> Option<TrashTransaction> { self.redo_stack.pop() }
+    pub fn pop_undo(&mut self) -> Option<MoveTransaction> { self.undo_stack.pop() }
+    pub fn pop_redo(&mut self) -> Option<MoveTransaction> { self.redo_stack.pop() }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1412,29 +1455,61 @@ mod tests {
     }
 
     #[test]
-    fn history_new_trash_clears_redo() {
-        let mut history = TrashHistory::default();
-        let file = TrashedFile { item: MediaItem::new("/x/a.png", MediaKind::Image), trashed_path: PathBuf::from("/t/a.png"), index: 0 };
-        history.record_trash(TrashTransaction { files: vec![file.clone()], selection_before_op: vec![PathBuf::from("/x/a.png")] });
-        history.push_redo(TrashTransaction { files: vec![file.clone()], selection_before_op: vec![] });
+    fn move_planning_targets_a_sibling_directory() {
+        let source = PathBuf::from("/root/source");
+        let target = PathBuf::from("/root/target");
+        let plans = plan_moves_into_directory(&[source.clone()], &target).unwrap();
+        assert_eq!(plans, vec![PlannedMove { source, destination: target.join("source") }]);
+    }
+
+    #[test]
+    fn move_planning_rejects_invalid_folder_drops() {
+        let target = PathBuf::from("/root/target");
+        assert!(plan_moves_into_directory(&[], &target).is_none(), "empty drops have nothing to move");
+        assert!(plan_moves_into_directory(&[target.clone()], &target).is_none(), "a folder cannot move onto itself");
+        assert!(plan_moves_into_directory(&[PathBuf::from("/root/source")], &PathBuf::from("/root/source/child")).is_none(), "a folder cannot move into its descendant");
+        assert!(plan_moves_into_directory(&[target.join("item")], &target).is_none(), "an item already inside the target has nowhere to move");
+        assert!(plan_moves_into_directory(&[PathBuf::from("/root/source"), PathBuf::from("/root/source/child")], &target).is_none(), "nested selections cannot move together");
+        assert!(plan_moves_into_directory(&[PathBuf::from("/root/a/item"), PathBuf::from("/root/b/item")], &target).is_none(), "two items cannot move to one destination");
+    }
+
+    #[test]
+    fn history_new_move_clears_redo() {
+        let mut history = MoveHistory::default();
+        let file = MovedItem { item: MediaItem::new("/x/a.png", MediaKind::Image), destination: PathBuf::from("/t/a.png"), index: 0 };
+        history.record_move(MoveTransaction { files: vec![file.clone()], selection_before_op: vec![PathBuf::from("/x/a.png")] });
+        history.push_redo(MoveTransaction { files: vec![file.clone()], selection_before_op: vec![] });
         assert!(history.can_redo());
-        history.record_trash(TrashTransaction { files: vec![file], selection_before_op: vec![] });
+        history.record_move(MoveTransaction { files: vec![file], selection_before_op: vec![] });
         assert!(!history.can_redo());
     }
 
     #[test]
-    fn trash_history_follows_renamed_directories() {
-        let mut history = TrashHistory::new();
-        let file = TrashedFile { item: MediaItem::new("/x/old/a.png", MediaKind::Image), trashed_path: PathBuf::from("/trash/a.png"), index: 0 };
-        let transaction = TrashTransaction { files: vec![file], selection_before_op: vec![PathBuf::from("/x/old/a.png"), PathBuf::from("/x/other.png")] };
-        history.record_trash(transaction.clone());
+    fn move_history_follows_renamed_directories() {
+        let mut history = MoveHistory::new();
+        let inside = MovedItem { item: MediaItem::new("/x/old/a.png", MediaKind::Image), destination: PathBuf::from("/x/old-destination/a.png"), index: 0 };
+        let outside = MovedItem { item: MediaItem::new("/x/old/b.png", MediaKind::Image), destination: PathBuf::from("/trash/b.png"), index: 0 };
+        let transaction = MoveTransaction { files: vec![inside, outside], selection_before_op: vec![PathBuf::from("/x/old/a.png"), PathBuf::from("/x/other.png")] };
+        history.record_move(transaction.clone());
         history.push_redo(transaction);
         history.relocate(Path::new("/x/old"), Path::new("/x/new"));
         for transaction in [history.pop_undo().unwrap(), history.pop_redo().unwrap()] {
             assert_eq!(transaction.files[0].item.path, Path::new("/x/new/a.png"));
-            assert_eq!(transaction.files[0].trashed_path, Path::new("/trash/a.png"));
+            assert_eq!(transaction.files[0].destination, Path::new("/x/old-destination/a.png"));
+            assert_eq!(transaction.files[1].item.path, Path::new("/x/new/b.png"));
+            assert_eq!(transaction.files[1].destination, Path::new("/trash/b.png"));
             assert_eq!(transaction.selection_before_op, [PathBuf::from("/x/new/a.png"), PathBuf::from("/x/other.png")]);
         }
+    }
+
+    #[test]
+    fn move_history_relocates_destinations_inside_moved_directories() {
+        let mut history = MoveHistory::new();
+        let file = MovedItem { item: MediaItem::new("/root/source", MediaKind::Directory), destination: PathBuf::from("/root/target/source"), index: 0 };
+        history.record_move(MoveTransaction { files: vec![file], selection_before_op: vec![] });
+        history.relocate_undo(Path::new("/root/target"), Path::new("/root/elsewhere"));
+        let transaction = history.pop_undo().unwrap();
+        assert_eq!(transaction.files[0].destination, Path::new("/root/elsewhere/source"));
     }
 
     #[test]
@@ -1642,22 +1717,22 @@ mod tests {
         assert_eq!(outcome, TrashOutcome::Removed { trashed_path: trashed.clone() });
         assert!(!original.exists());
         assert!(trashed.exists());
-        let mut history = TrashHistory::new();
+        let mut history = MoveHistory::new();
         let item = MediaItem::new(&original, MediaKind::Image);
-        history.record_trash(TrashTransaction {
-            files: vec![TrashedFile { item: item.clone(), trashed_path: trashed.clone(), index: 0 }],
+        history.record_move(MoveTransaction {
+            files: vec![MovedItem { item: item.clone(), destination: trashed.clone(), index: 0 }],
             selection_before_op: vec![original.clone()],
         });
         assert!(history.can_undo());
         let txn = history.pop_undo().unwrap();
         service
-            .restore(&txn.files[0].trashed_path, &txn.files[0].item.path, |from, to| {
+            .restore(&txn.files[0].destination, &txn.files[0].item.path, |from, to| {
                 std::fs::rename(from, to).map_err(|e| TrashError::MoveFailed(e.to_string()))
             })
             .unwrap();
         assert!(original.exists());
         assert!(!trashed.exists());
-        history.push_redo(TrashTransaction { files: txn.files, selection_before_op: vec![] });
+        history.push_redo(MoveTransaction { files: txn.files, selection_before_op: vec![] });
         assert!(history.can_redo());
         let _ = std::fs::remove_dir_all(&dir);
     }
