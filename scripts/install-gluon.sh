@@ -8,10 +8,13 @@ GLUON_DIR="${GLUON_DIR:-$PWD/.work/gluon}"
 REPO="${GLUON_REPO:-joshuarli/gluon}"
 mkdir -p "$GLUON_DIR/bin"
 
-case "$(uname -sm)" in
+if platform=$(uname -sm); then
+    :
+fi
+case "$platform" in
     "Darwin arm64") triple="aarch64-apple-darwin" ;;
     "Linux x86_64") triple="x86_64-unknown-linux-musl" ;;
-    *) echo "install-gluon: unsupported platform: $(uname -sm)" >&2; exit 1 ;;
+    *) printf 'install-gluon: unsupported platform: %s\n' "$platform" >&2; exit 1 ;;
 esac
 
 tmpdir=$(mktemp -d)
@@ -25,11 +28,7 @@ fi
 gh release download "$tag" --repo "$REPO" --clobber --pattern "gluon-$triple.zip"
 gh release download "$tag" --repo "$REPO" --clobber --pattern "SHA256SUMS"
 name="gluon-$triple.zip"
-if command -v shasum >/dev/null 2>&1; then
-    grep -F "$name" SHA256SUMS | shasum -a 256 -c -
-else
-    grep -F "$name" SHA256SUMS | sha256sum -c -
-fi
+grep -F "$name" SHA256SUMS | sha256sum -c -
 unzip -o "$name"
 for bin in meson ninja gluon-build; do
     test -f "$bin" || { echo "install-gluon: missing $bin in $name" >&2; exit 1; }
