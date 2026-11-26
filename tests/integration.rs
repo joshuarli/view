@@ -104,6 +104,24 @@ fn discovery_skips_packages_hidden_and_symlinks() {
 }
 
 #[test]
+fn recursive_scan_uses_natural_relative_path_order() {
+    let dir = support::TestDirectory::new("recursive-order");
+    let png = [0x89, 0x50, 0x4E, 0x47];
+    for name in ["2.png", "10.png", "a.png", "z.png"] {
+        make_file(&dir.join(name), &png);
+    }
+    make_file(&dir.join("b").join("2.png"), &png);
+    make_file(&dir.join("b").join("10.png"), &png);
+
+    let scanned = scan_recursive(&dir).unwrap();
+    let relative: Vec<String> = scanned
+        .iter()
+        .map(|item| item.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(relative, ["2.png", "10.png", "a.png", "b/2.png", "b/10.png", "z.png"]);
+}
+
+#[test]
 fn catalog_selection_survives_listing_rebuild() {
     let dir = support::TestDirectory::new("catalog");
     make_file(&dir.join("one.png"), &[0x89, 0x50, 0x4E, 0x47]);

@@ -4,7 +4,7 @@ One AppKit window hosts multiple tabs. Each `Tab` owns a root directory, browser
 
 ## Catalog and navigation
 
-`list_browser` and `scan_recursive` in `src/lib.rs` discover media. Browser listings put directories first by natural name, followed by files in descending size order. Recursive traversal visits child directories through a stack and emits each directory's files in reverse natural name order. It does not globally sort relative paths.
+`list_browser` and `scan_recursive` in `src/lib.rs` discover media. Browser listings put directories first by natural name, followed by files in descending size order. Recursive traversal visits child directories through a stack and returns the discovered media sorted by natural relative-path order.
 
 Navigation synchronously replaces a tab's catalog through `load_listing` and `show_listing` in `src/bin/app.rs`. `load_listing` carries a path-aware `ListingError` from `src/lib.rs` on failure and applies the tab's media filter — images, videos, or both — which folders always bypass. A failed listing keeps the previous catalog and marks the tab unavailable; the grid shows the error instead of a listing. There are no incremental scan batches, scan generations, or background directory workers. `after_navigation` updates the title, layout, Quick Look, scroll position, and tab bar.
 

@@ -257,6 +257,11 @@ pub fn scan_recursive(root: &Path) -> Result<Vec<MediaItem>, ListingError> {
                 }
         }
     }
+    out.sort_by(|a, b| {
+        let a = a.path.strip_prefix(root).unwrap_or(&a.path).to_string_lossy();
+        let b = b.path.strip_prefix(root).unwrap_or(&b.path).to_string_lossy();
+        natural_cmp(&a, &b)
+    });
     Ok(out)
 }
 
