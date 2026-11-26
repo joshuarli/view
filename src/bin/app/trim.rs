@@ -106,6 +106,17 @@ pub(crate) fn active() -> bool {
     operation().is_some()
 }
 
+pub(crate) fn has_pending_export() -> bool {
+    operation().as_ref().is_some_and(|op| matches!(op.phase, Phase::Exporting | Phase::Validating))
+}
+
+pub(crate) fn abort_for_termination() {
+    if let Some(export) = operation().as_ref().and_then(|op| op.export.as_ref()) {
+        unsafe { export.cancelExport() };
+    }
+    finish();
+}
+
 fn finish() {
     let op = operation().take();
     if let Some(op) = op {
@@ -121,6 +132,7 @@ fn finish() {
     }
     player::set_trim_focus(false);
     restore_grid_focus();
+    super::approve_deferred_termination();
 }
 
 fn restore_grid_focus() {
@@ -425,7 +437,14 @@ fn start_export(token: u64, target: SaveTarget) {
         op.export = Some(session.clone());
     }
     let handler = block2::RcBlock::new(move || {
-        dispatch2::DispatchQueue::main().exec_async(move || export_completed(token));
+        if super::termination_test_mode() {
+            // SAFETY: the delayed block runs on the main queue and carries only the token.
+            let _ = dispatch2::DispatchQueue::main().after(dispatch2::DispatchTime::NOW.time(500_000_000), move || {
+                dispatch2::DispatchQueue::main().exec_async(move || export_completed(token));
+            });
+        } else {
+            dispatch2::DispatchQueue::main().exec_async(move || export_completed(token));
+        }
     });
     unsafe { session.exportAsynchronouslyWithCompletionHandler(&handler) };
 }

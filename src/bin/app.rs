@@ -3,16 +3,18 @@
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2::{define_class, ClassType, DefinedClass, MainThreadOnly};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::NSObject;
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBox, NSButton, NSColor, NSDraggingInfo, NSDraggingSource, NSFont,
-    NSImage, NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWorkspace,
+    NSAlert, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSBackingStoreType, NSBox, NSButton, NSColor,
+    NSDraggingInfo, NSDraggingSource, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSScrollView, NSTextField, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_av_foundation::{AVLayerVideoGravityResizeAspect, AVPlayer};
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2_av_kit::{AVPlayerView, AVPlayerViewControlsStyle};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -2870,6 +2872,15 @@ define_class!(
             true
         }
 
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn application_should_terminate(&self, _sender: &NSApplication) -> NSApplicationTerminateReply {
+            if trim::has_pending_export() {
+                begin_deferred_termination()
+            } else {
+                NSApplicationTerminateReply::TerminateNow
+            }
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let (title, frame_size, item_count) = {
@@ -2990,6 +3001,9 @@ define_class!(
             }
             if *PLAYER_TEST.get_or_init(|| false) {
                 start_player_test();
+            }
+            if *TERMINATION_TEST.get_or_init(|| false) {
+                start_termination_test();
             }
             if !*REGRESSION_TEST.get_or_init(|| false) && !*BENCHMARK_STARTUP.get_or_init(|| false) && !*BENCHMARK_MEMORY.get_or_init(|| false) && !benchmark_mode() {
                 window.setFrameAutosaveName(&NSString::from_str("ViewWindow"));
@@ -3915,6 +3929,60 @@ fn start_player_test() {
     unsafe { objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes) };
 }
 
+fn start_termination_test() {
+    TERMINATION_TEST_START.set(std::time::Instant::now()).ok();
+    let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| { run_termination_test(); });
+    // SAFETY: the block is copied by NSTimer and this runs on the main thread.
+    let timer = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, true, &block) };
+    // SAFETY: the main run loop retains the timer and common modes are valid main-thread modes.
+    unsafe { objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes) };
+}
+
+fn run_termination_test() {
+    let started = TERMINATION_TEST_START.get().copied().unwrap_or_else(std::time::Instant::now);
+    match TERMINATION_TEST_STEP.load(Ordering::SeqCst) {
+        0 => {
+            let Some(item) = focused_item(unsafe { &*app_state() }) else { return };
+            if item.kind != MediaKind::Movie { assert!(started.elapsed().as_secs() < 10, "termination test corpus must begin with a movie"); return; }
+            let ready = player::with_store(|store| store.status == player::PlayerStatus::Ready).unwrap_or(false);
+            if !ready { assert!(started.elapsed().as_secs() < 10, "termination test movie did not become ready"); return; }
+            player::start();
+            TERMINATION_TEST_STEP.store(4, Ordering::SeqCst);
+        }
+        4 => {
+            if started.elapsed() < std::time::Duration::from_millis(800) { return; }
+            player::pause();
+            trim::begin_selected();
+            TERMINATION_TEST_STEP.store(1, Ordering::SeqCst);
+        }
+        1 => {
+            if !trim::active() { assert!(started.elapsed().as_secs() < 10, "trim did not start before termination"); return; }
+            let Some((view, frame)) = player::with_store(|store| (store.view.clone(), store.view.convertRect_toView(store.view.bounds(), None))) else { return };
+            if find_titled_button(&view, "Cancel").is_none() || find_titled_button(&view, "Trim").is_none() {
+                assert!(started.elapsed().as_secs() < 10, "native trim controls did not appear");
+                return;
+            }
+            let start = objc2_foundation::NSPoint::new(frame.origin.x + frame.size.width * (97.0 / 1260.0), frame.origin.y + 38.0);
+            let end = objc2_foundation::NSPoint::new(start.x + frame.size.width * (176.0 / 1260.0), start.y);
+            send_mouse_drag(start, end);
+            assert!(click_titled_button(&view, "Trim"), "native trim confirmation button is available");
+            TERMINATION_TEST_STEP.store(2, Ordering::SeqCst);
+        }
+        2 => {
+            if !trim::has_pending_export() { assert!(started.elapsed().as_secs() < 10, "trim export did not start before termination"); return; }
+            if *TERMINATION_SIGNAL_TEST.get_or_init(|| false) {
+                // SAFETY: self-signaling only sets the installed test-process flag.
+                unsafe { libc::raise(libc::SIGTERM); };
+            } else {
+                let mtm = objc2::MainThreadMarker::new().unwrap();
+                NSApplication::sharedApplication(mtm).terminate(None);
+            }
+            TERMINATION_TEST_STEP.store(3, Ordering::SeqCst);
+        }
+        _ => assert!(started.elapsed().as_secs() < 15, "termination did not finish after the export"),
+    }
+}
+
 fn run_player_test() {
     let started = PLAYER_TEST_START.get().copied().unwrap_or_else(std::time::Instant::now);
     match PLAYER_TEST_STEP.load(std::sync::atomic::Ordering::SeqCst) {
@@ -4151,11 +4219,41 @@ static DEBUG_ENTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PLAYER_TEST_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static PLAYER_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TERMINATION_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static TERMINATION_SIGNAL_TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static TERMINATION_TEST_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static TERMINATION_TEST_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static TRIM_ORIGINAL_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 static INTERNAL_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DEFERRED_TERMINATION: AtomicBool = AtomicBool::new(false);
+static TERMINATION_SIGNALLED: AtomicBool = AtomicBool::new(false);
 
 fn internal_test_mode() -> bool {
-    INTERNAL_RUN.load(std::sync::atomic::Ordering::Relaxed)
+    INTERNAL_RUN.load(Ordering::Relaxed)
+}
+
+pub(crate) fn termination_test_mode() -> bool {
+    *TERMINATION_TEST.get_or_init(|| false)
+}
+
+fn begin_deferred_termination() -> NSApplicationTerminateReply {
+    if DEFERRED_TERMINATION.swap(true, Ordering::SeqCst) {
+        return NSApplicationTerminateReply::TerminateLater;
+    }
+    let deadline = DispatchTime::NOW.time(10_000_000_000);
+    let _ = DispatchQueue::main().after(deadline, || {
+        if DEFERRED_TERMINATION.load(Ordering::SeqCst) {
+            trim::abort_for_termination();
+        }
+    });
+    NSApplicationTerminateReply::TerminateLater
+}
+
+pub(crate) fn approve_deferred_termination() {
+    if DEFERRED_TERMINATION.swap(false, Ordering::SeqCst) {
+        let mtm = objc2::MainThreadMarker::new().unwrap();
+        NSApplication::sharedApplication(mtm).replyToApplicationShouldTerminate(true);
+    }
 }
 
 fn launched_from_terminal() -> bool {
@@ -4249,19 +4347,23 @@ fn main() {
     let regression_test = args.iter().any(|a| a == "--regression-test");
     let debug_enter = args.iter().any(|a| a == "--debug-enter");
     let player_test = args.iter().any(|a| a == "--player-test");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter" && a != "--regression-test" && a != "--benchmark-startup" && a != "--benchmark-memory" && a != "--player-test").collect();
+    let termination_test = args.iter().any(|a| a == "--termination-test");
+    let termination_signal_test = args.iter().any(|a| a == "--termination-signal-test");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--self-test" && a != "--debug-enter" && a != "--regression-test" && a != "--benchmark-startup" && a != "--benchmark-memory" && a != "--player-test" && a != "--termination-test" && a != "--termination-signal-test").collect();
     SELF_TEST.set(self_test).ok();
     DEBUG_ENTER.set(debug_enter).ok();
     REGRESSION_TEST.set(regression_test).ok();
     BENCHMARK_STARTUP.set(benchmark_startup).ok();
     BENCHMARK_MEMORY.set(benchmark_memory).ok();
     PLAYER_TEST.set(player_test).ok();
+    TERMINATION_TEST.set(termination_test || termination_signal_test).ok();
+    TERMINATION_SIGNAL_TEST.set(termination_signal_test).ok();
     let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let (root, mode) = match view_core::resolve_launch(&args, &current.display().to_string()) {
         Ok(v) => v,
         Err(e) => { eprintln!("view: {e}"); std::process::exit(1); }
     };
-    let internal_run = self_test || debug_enter || regression_test || benchmark_startup || benchmark_memory || player_test;
+    let internal_run = self_test || debug_enter || regression_test || benchmark_startup || benchmark_memory || player_test || termination_test || termination_signal_test;
     INTERNAL_RUN.store(internal_run, std::sync::atomic::Ordering::Relaxed);
     if !internal_run && launched_from_terminal() {
         detach_from_terminal(&args);
@@ -4291,10 +4393,21 @@ fn main() {
     }
 
     unsafe {
-        extern "C" fn handle_signal(_signal: libc::c_int) { std::process::exit(0); }
-        libc::signal(libc::SIGINT, handle_signal as *const () as usize as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as *const () as usize as libc::sighandler_t);
+        extern "C" fn handle_signal(_signal: libc::c_int) {
+            TERMINATION_SIGNALLED.store(true, Ordering::SeqCst);
+        }
+        let handler = handle_signal as *const () as usize as libc::sighandler_t;
+        assert_ne!(libc::signal(libc::SIGINT, handler), libc::SIG_ERR, "could not install SIGINT handler");
+        assert_ne!(libc::signal(libc::SIGTERM, handler), libc::SIG_ERR, "could not install SIGTERM handler");
     }
+    let signal_block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<objc2_foundation::NSTimer>| {
+        if TERMINATION_SIGNALLED.swap(false, Ordering::SeqCst) {
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).terminate(None);
+        }
+    });
+    // SAFETY: the block is copied by NSTimer and this runs on the main thread.
+    unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &signal_block) };
 
     let mtm = objc2::MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);

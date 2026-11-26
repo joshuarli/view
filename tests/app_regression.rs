@@ -68,3 +68,42 @@ fn inline_video_playback() {
     let stderr = std::fs::read_to_string(stderr_path).unwrap();
     assert!(status.success(), "player test failed: {stderr}");
 }
+
+fn run_termination_scenario(flag: &str, tag: &str) {
+    let _gui = GUI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = support::TestDirectory::new(tag);
+    let original = include_bytes!("fixtures/trim-source.mp4");
+    let clip = root.join("clip.mp4");
+    std::fs::write(&clip, original).unwrap();
+    let stderr_path = root.join(".stderr");
+    let stderr = std::fs::File::create(&stderr_path).unwrap();
+    let mut child = TestProcess(std::process::Command::new(env!("CARGO_BIN_EXE_app"))
+        .arg(flag).arg(&*root)
+        .stdout(std::process::Stdio::null()).stderr(stderr).spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() { break status; }
+        assert!(std::time::Instant::now() < deadline, "termination test timed out");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    assert!(status.success(), "app failed: {stderr}");
+    let leftovers: Vec<String> = std::fs::read_dir(&*root).unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".view-trim-"))
+        .collect();
+    assert!(leftovers.is_empty(), "termination left temporary export directories: {leftovers:?}");
+    let size = std::fs::metadata(&clip).unwrap().len();
+    assert!(size < original.len() as u64, "termination waited for the export to finish");
+}
+
+#[test]
+fn termination_waits_for_trim_export() {
+    run_termination_scenario("--termination-test", "termination");
+}
+
+#[test]
+fn sigterm_waits_for_trim_export() {
+    run_termination_scenario("--termination-signal-test", "sigterm-termination");
+}
