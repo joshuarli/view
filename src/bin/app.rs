@@ -3988,7 +3988,43 @@ fn run_player_test() {
             assert!(carousel, "space in grid mode returns to carousel");
             let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(0.0);
             if rate <= 0.0 { assert!(started.elapsed().as_secs() < 10, "space in grid mode did not begin playback"); return; }
-            player::pause();
+            PLAYER_TEST_STEP.store(7, std::sync::atomic::Ordering::SeqCst);
+        }
+        7 => {
+            let ended = player::with_store(|store| unsafe { store.player.rate() } == 0.0).unwrap_or(false) && player::is_at_end();
+            if !ended { assert!(started.elapsed().as_secs() < 20, "movie did not play to its end"); return; }
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(refs) = window_refs().as_ref() {
+                let _ = unsafe { &*refs.window }.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 49, false);
+            assert!(pump_run_loop_until(std::time::Duration::from_secs(2), || {
+                player::with_store(|store| unsafe { store.player.rate() } > 0.0).unwrap_or(false) && !player::is_at_end()
+            }), "space replays the movie after EOF");
+            send_key_via_app(&app, 123, false);
+            PLAYER_TEST_STEP.store(8, std::sync::atomic::Ordering::SeqCst);
+        }
+        8 => {
+            let path = focused_item(unsafe { &*app_state() }).map(|item| item.path.clone());
+            let ready = player::with_store(|store| store.item_path.as_deref() == path.as_deref()
+                && store.status == player::PlayerStatus::Ready).unwrap_or(false);
+            if !ready { assert!(started.elapsed().as_secs() < 20, "left navigation during replay did not load the previous movie"); return; }
+            let rate = player::with_store(|store| unsafe { store.player.rate() }).unwrap_or(-1.0);
+            assert_eq!(rate, 0.0, "a stale replay must not start the newly selected movie");
+            let mtm = objc2::MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(refs) = window_refs().as_ref() {
+                let _ = unsafe { &*refs.window }.makeFirstResponder(Some(unsafe { &*refs.grid }));
+            }
+            send_key_via_app(&app, 124, false);
+            PLAYER_TEST_STEP.store(9, std::sync::atomic::Ordering::SeqCst);
+        }
+        9 => {
+            let path = focused_item(unsafe { &*app_state() }).map(|item| item.path.clone());
+            let ready = player::with_store(|store| store.item_path.as_deref() == path.as_deref()
+                && store.status == player::PlayerStatus::Ready).unwrap_or(false);
+            if !ready { assert!(started.elapsed().as_secs() < 20, "return navigation during replay did not load the movie"); return; }
             let mtm = objc2::MainThreadMarker::new().unwrap();
             let app = NSApplication::sharedApplication(mtm);
             if let Some(refs) = window_refs().as_ref() {

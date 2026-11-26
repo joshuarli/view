@@ -161,6 +161,9 @@ pub(crate) fn load(path: &std::path::Path) {
             core::ptr::null_mut(),
         );
     }
+    // SAFETY: the player is alive on the main thread and the item was just created there.
+    unsafe { player.pause() };
+    // SAFETY: the player is alive on the main thread and the item remains retained.
     unsafe { player.replaceCurrentItemWithPlayerItem(Some(&item)) };
     let Some(store) = player_store().as_mut() else { return };
     store.item = Some(item);
@@ -196,11 +199,72 @@ pub(crate) fn pause() {
     }
 }
 
+#[repr(C, packed(4))]
+#[derive(Clone, Copy)]
+struct CoreTime {
+    value: i64,
+    timescale: i32,
+    flags: u32,
+    epoch: i64,
+}
+
+// SAFETY: CMTime is the CoreMedia C struct (value, timescale, flags, epoch);
+// its packed(4) layout and encoding match the Objective-C ABI on macOS.
+unsafe impl objc2::encode::Encode for CoreTime {
+    const ENCODING: objc2::encode::Encoding = objc2::encode::Encoding::Struct(
+        "?",
+        &[
+            <i64 as objc2::encode::Encode>::ENCODING,
+            <i32 as objc2::encode::Encode>::ENCODING,
+            <u32 as objc2::encode::Encode>::ENCODING,
+            <i64 as objc2::encode::Encode>::ENCODING,
+        ],
+    );
+}
+
+unsafe impl objc2::encode::RefEncode for CoreTime {
+    const ENCODING_REF: objc2::encode::Encoding = objc2::encode::Encoding::Pointer(&<Self as objc2::encode::Encode>::ENCODING);
+}
+
+impl CoreTime {
+    fn start() -> Self {
+        Self { value: 0, timescale: 1, flags: 1, epoch: 0 }
+    }
+
+    fn seconds(self) -> Option<f64> {
+        if self.flags & 1 == 0 || self.timescale <= 0 {
+            None
+        } else {
+            Some(self.value as f64 / self.timescale as f64)
+        }
+    }
+}
+
+fn is_at_end_in(store: &PlayerStore) -> bool {
+    let Some(item) = store.item.as_ref() else { return false };
+    // SAFETY: the player is alive on the main thread.
+    let time: CoreTime = unsafe { objc2::msg_send![&*store.player, currentTime] };
+    // SAFETY: the item is retained by the store on the main thread.
+    let duration: CoreTime = unsafe { objc2::msg_send![&**item, duration] };
+    let (time, duration) = (time.seconds(), duration.seconds());
+    matches!((time, duration), (Some(time), Some(duration)) if time >= duration - 0.05)
+}
+
+pub(crate) fn is_at_end() -> bool {
+    player_store().as_ref().map(is_at_end_in).unwrap_or(false)
+}
+
 pub(crate) fn toggle() {
     let Some(store) = player_store().as_mut() else { return };
     match store.status {
         PlayerStatus::Ready => {
             if unsafe { store.player.rate() } == 0.0 {
+                if is_at_end_in(store) {
+                    let start = CoreTime::start();
+                    // SAFETY: the player is alive on the main thread; seeking without a
+                    // completion handler cannot replay a stale item after navigation.
+                    unsafe { let _: () = objc2::msg_send![&*store.player, seekToTime: start]; };
+                }
                 unsafe { store.player.play() };
             } else {
                 unsafe { store.player.pause() };
